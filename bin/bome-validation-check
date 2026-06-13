@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+find_port() {
+  local client_pattern="$1"
+  local port_pattern="$2"
+  local client_id=""
+  local in_client=0
+
+  while IFS= read -r line; do
+    case "$line" in
+      client\ * )
+        in_client=0
+        if printf '%s\n' "$line" | grep -Ei "$client_pattern" >/dev/null 2>&1; then
+          client_id="$(printf '%s\n' "$line" | sed -n "s/^client \([0-9][0-9]*\):.*/\1/p")"
+          in_client=1
+        fi
+        ;;
+      * )
+        if [ "$in_client" -eq 1 ] && printf '%s\n' "$line" | grep -Ei "$port_pattern" >/dev/null 2>&1; then
+          local port_id
+          port_id="$(printf '%s\n' "$line" | sed -n "s/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p")"
+          if [ "$client_id" != "" ] && [ "$port_id" != "" ]; then
+            printf '%s:%s\n' "$client_id" "$port_id"
+            return 0
+          fi
+        fi
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+route_exists() {
+  local src="$1"
+  local dst="$2"
+  local data="$3"
+
+  printf '%s\n' "$data" | grep -A 4 -E "^client ${src%%:*}:" | grep -Eq "Connecting To:.*(^|[^0-9])${dst}([^0-9]|$)"
+}
+
+printf '[%s] Bome validation check start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+if ! has_cmd aconnect; then
+  printf 'ERROR: aconnect not found\n'
+  exit 1
+fi
+
+if pgrep -af 'Bome|MIDITranslator' >/dev/null 2>&1; then
+  printf 'Bome: RUNNING\n'
+  pgrep -af 'Bome|MIDITranslator' || true
+else
+  printf 'Bome: NOT RUNNING\n'
+fi
+
+aconnect_output="$(aconnect -l 2>&1)"
+
+launchpad_port="$(printf '%s\n' "$aconnect_output" | find_port 'Launchpad' 'Launchpad.*MIDI|MIDI')"
+virmidi_port="$(printf '%s\n' "$aconnect_output" | find_port 'Virtual Raw MIDI 1-0|VirMIDI 1-0' 'VirMIDI 1-0')"
+wine_port="$(printf '%s\n' "$aconnect_output" | find_port 'WINE midi driver' 'WINE ALSA Input')"
+
+printf 'WINE ALSA Input: %s\n' "${wine_port:-NOT FOUND}"
+printf 'Launchpad S: %s\n' "${launchpad_port:-NOT FOUND}"
+printf 'VirMIDI 1-0: %s\n' "${virmidi_port:-NOT FOUND}"
+
+printf '\nCurrent ALSA MIDI routes:\n'
+printf '%s\n' "$aconnect_output"
+
+bypass_present=0
+translated_present=0
+
+if [ "${launchpad_port:-}" != "" ] && [ "${wine_port:-}" != "" ] && route_exists "$launchpad_port" "$wine_port" "$aconnect_output"; then
+  bypass_present=1
+fi
+
+if [ "${virmidi_port:-}" != "" ] && [ "${wine_port:-}" != "" ] && route_exists "$virmidi_port" "$wine_port" "$aconnect_output"; then
+  translated_present=1
+fi
+
+printf '\nBome validation route state:\n'
+if [ "$bypass_present" -eq 1 ]; then
+  printf 'DUPLICATE BYPASS PRESENT: Launchpad S -> WINE ALSA Input\n'
+else
+  printf 'OK: no Launchpad S -> WINE ALSA Input bypass detected\n'
+fi
+
+if [ "$translated_present" -eq 1 ]; then
+  printf 'OK: VirMIDI 1-0 -> WINE ALSA Input is connected\n'
+else
+  printf 'MISSING: VirMIDI 1-0 -> WINE ALSA Input\n'
+fi
+
+printf '\nStatus:\n'
+if ! pgrep -af 'Bome|MIDITranslator' >/dev/null 2>&1; then
+  printf 'NOT READY: start Bome with ./bin/bome or pw-jack ./bin/session\n'
+elif [ "${wine_port:-}" = "" ]; then
+  printf 'NOT READY: WINE ALSA Input not found. Start Ableton with pw-jack ./bin/session\n'
+elif [ "${launchpad_port:-}" = "" ]; then
+  printf 'NOT READY: Launchpad S not found. Check ./bin/launchpad-check\n'
+elif [ "${virmidi_port:-}" = "" ]; then
+  printf 'NOT READY: VirMIDI 1-0 not found. Run ./bin/load-virmidi-temp and check ./bin/virmidi-check\n'
+elif [ "$bypass_present" -eq 1 ]; then
+  printf 'NOT READY: remove bypass with ./bin/bome-validation-route --apply\n'
+elif [ "$translated_present" -eq 0 ]; then
+  printf 'NOT READY: connect translated route with ./bin/bome-validation-route --apply\n'
+else
+  printf 'READY FOR BOME TEST\n'
+fi
+
+printf '[%s] Bome validation check end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

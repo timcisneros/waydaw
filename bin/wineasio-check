@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/wineasio-check.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+found=0
+total=0
+critical_missing=0
+asio_registry_found=0
+dll_found=0
+pw_jack_found=0
+inproc_64_found=0
+wine64_cmd=""
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+find_wine64() {
+  if command -v wine64 >/dev/null 2>&1; then
+    command -v wine64
+    return 0
+  fi
+
+  if [[ -x /usr/lib/wine/wine64 ]]; then
+    printf '%s\n' /usr/lib/wine/wine64
+    return 0
+  fi
+
+  return 1
+}
+
+mark_found() {
+  found=$((found + 1))
+}
+
+check_cmd() {
+  local label="$1"
+  local cmd="$2"
+  total=$((total + 1))
+  if have_cmd "$cmd"; then
+    printf 'FOUND: %s -> %s\n' "$label" "$(command -v "$cmd")"
+    if [[ "$cmd" == "pw-jack" ]]; then
+      pw_jack_found=1
+    fi
+    mark_found
+    return 0
+  fi
+
+  printf 'MISSING: %s\n' "$label"
+  return 1
+}
+
+check_pipewire_jack_libs() {
+  local matches
+  total=$((total + 1))
+  matches="$(find /usr/lib /usr/lib64 -path '*pipewire*jack*' -name 'libjack*.so*' -print 2>/dev/null | sort)"
+  if [[ -n "$matches" ]]; then
+    printf 'FOUND: PipeWire JACK libraries\n'
+    printf '%s\n' "$matches"
+    mark_found
+    return 0
+  fi
+
+  printf 'MISSING: PipeWire JACK libraries not found in /usr/lib or /usr/lib64\n'
+  return 1
+}
+
+check_wineasio_dll() {
+  local matches
+  total=$((total + 1))
+  matches="$(find "$WINEPREFIX" /usr/lib /usr/lib64 \
+    \( -iname 'wineasio.dll*' -o -iname 'wineasio32.dll*' -o -iname 'wineasio64.dll*' -o -iname 'wineasio*.dll*' \) \
+    2>/dev/null | sort)"
+  if [[ -n "$matches" ]]; then
+    printf 'FOUND: wineasio DLL candidate(s)\n'
+    printf '%s\n' "$matches"
+    dll_found=1
+    mark_found
+    return 0
+  fi
+
+  printf 'MISSING: wineasio DLL not found in WINEPREFIX, /usr/lib, or /usr/lib64\n'
+  critical_missing=1
+  return 1
+}
+
+check_wineasio_prefix_64_dll() {
+  local matches
+  total=$((total + 1))
+  matches="$(find "$WINEPREFIX/drive_c/windows" -iname 'wineasio64.dll' -print 2>/dev/null | sort)"
+  if [[ -n "$matches" ]]; then
+    printf 'FOUND: 64-bit WineASIO DLL in prefix\n'
+    printf '%s\n' "$matches"
+    mark_found
+    return 0
+  fi
+
+  printf 'MISSING: wineasio64.dll not found inside prefix windows directory\n'
+  critical_missing=1
+  return 1
+}
+
+check_wineasio_asio_registry() {
+  total=$((total + 1))
+
+  if [[ -z "$wine64_cmd" ]]; then
+    printf 'MISSING: native 64-bit Wine command unavailable; cannot query 64-bit ASIO registry\n'
+    critical_missing=1
+    return 1
+  fi
+
+  if "$wine64_cmd" reg query 'HKLM\Software\ASIO\WineASIO' >/dev/null 2>&1; then
+    printf 'FOUND: native 64-bit WineASIO ASIO registration in HKLM\\Software\\ASIO\\WineASIO\n'
+    asio_registry_found=1
+    mark_found
+    return 0
+  fi
+
+  if "$wine64_cmd" reg query 'HKCU\Software\ASIO\WineASIO' >/dev/null 2>&1; then
+    printf 'FOUND: native 64-bit WineASIO ASIO registration in HKCU\\Software\\ASIO\\WineASIO\n'
+    asio_registry_found=1
+    mark_found
+    return 0
+  fi
+
+  printf 'MISSING: native 64-bit WineASIO ASIO registration in HKLM/HKCU Software\\ASIO\n'
+  critical_missing=1
+  return 1
+}
+
+check_wineasio_inproc_64() {
+  local output
+  total=$((total + 1))
+
+  if [[ -z "$wine64_cmd" ]]; then
+    printf 'MISSING: native 64-bit Wine command unavailable; cannot query WineASIO CLSID InProcServer32\n'
+    critical_missing=1
+    return 1
+  fi
+
+  output="$("$wine64_cmd" reg query 'HKCR\CLSID\{48D0C522-BFCC-45CC-8B84-17F25F33E6E8}\InProcServer32' 2>/dev/null)"
+  if printf '%s\n' "$output" | grep -qi 'wineasio64\.dll'; then
+    printf 'FOUND: native 64-bit WineASIO CLSID InProcServer32 points to wineasio64.dll\n'
+    printf '%s\n' "$output"
+    inproc_64_found=1
+    mark_found
+    return 0
+  fi
+
+  if printf '%s\n' "$output" | grep -qi 'wineasio32\.dll'; then
+    printf 'NOT READY: WineASIO CLSID InProcServer32 points to wineasio32.dll, not wineasio64.dll\n'
+    printf '%s\n' "$output"
+    critical_missing=1
+    return 1
+  fi
+
+  printf 'MISSING: WineASIO CLSID InProcServer32 does not point to wineasio64.dll\n'
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$output"
+  fi
+  critical_missing=1
+  return 1
+}
+
+check_wineasio_override() {
+  total=$((total + 1))
+
+  if ! have_cmd wine; then
+    printf 'OPTIONAL MISSING: wine command unavailable; cannot query DLL override\n'
+    return 1
+  fi
+
+  if wine reg query 'HKCU\Software\Wine\DllOverrides' /v wineasio >/dev/null 2>&1; then
+    printf 'OPTIONAL FOUND: WineASIO DLL override in HKCU Wine registry\n'
+    mark_found
+    return 0
+  fi
+
+  if wine reg query 'HKLM\Software\Wine\DllOverrides' /v wineasio >/dev/null 2>&1; then
+    printf 'OPTIONAL FOUND: WineASIO DLL override in HKLM Wine registry\n'
+    mark_found
+    return 0
+  fi
+
+  printf 'OPTIONAL MISSING: WineASIO DLL override in WINEPREFIX\n'
+  return 1
+}
+
+printf '[%s] WineASIO readiness check start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+if wine64_cmd="$(find_wine64)"; then
+  printf 'WINE64=%s\n' "$wine64_cmd"
+else
+  wine64_cmd=""
+  printf 'WINE64=missing\n'
+fi
+
+section "Tool availability"
+check_cmd "pw-jack" pw-jack || true
+check_cmd "wineasio-register" wineasio-register || true
+check_cmd "regsvr32" regsvr32 || true
+check_cmd "jack_lsp" jack_lsp || true
+check_cmd "qpwgraph" qpwgraph || true
+
+section "PipeWire JACK shim"
+check_pipewire_jack_libs || true
+
+section "WineASIO files"
+check_wineasio_dll || true
+check_wineasio_prefix_64_dll || true
+
+section "WineASIO ASIO registry"
+check_wineasio_asio_registry || true
+check_wineasio_inproc_64 || true
+
+section "Optional Wine DLL override"
+check_wineasio_override || true
+
+section "Readiness"
+if [[ "$asio_registry_found" -eq 1 && "$dll_found" -eq 1 && "$inproc_64_found" -eq 1 ]]; then
+  if [[ "$pw_jack_found" -eq 1 ]]; then
+    printf 'READY: 64-bit WineASIO registration, DLL files, and PipeWire JACK entrypoint are present for Ableton Live 12.\n'
+  else
+    printf 'READY: 64-bit WineASIO registration and DLL files are present. PipeWire JACK entrypoint is missing.\n'
+  fi
+elif [[ "$found" -gt 0 ]]; then
+  printf 'NOT READY: %s of %s readiness checks found. 64-bit WineASIO registration is incomplete for Ableton Live 12.\n' "$found" "$total"
+else
+  printf 'MISSING: no WineASIO/PipeWire JACK readiness signals found.\n'
+fi
+
+printf '\nActions not performed by this script:\n'
+printf '%s\n' '- no package installs'
+printf '%s\n' '- no WineASIO registration'
+printf '%s\n' '- no PipeWire service changes'
+printf '%s\n' '- no Wine prefix mutation'
+
+printf '\n[%s] WineASIO readiness check end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

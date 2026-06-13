@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+SESSION_LOG="$LOG_DIR/session.log"
+mkdir -p "$LOG_DIR"
+
+log() {
+  printf '%s\n' "$*" | tee -a "$SESSION_LOG"
+}
+
+check_ableton_update_state() {
+  local autoupdates="$WINEPREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/_autoupdates"
+  local deltas="$WINEPREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/_autoupdates/deltas"
+  local updated="$WINEPREFIX/drive_c/ProgramData/Ableton/.Live 12 Suite_updated"
+
+  if [[ -e "$updated" ]]; then
+    log "ERROR: Ableton updater swap marker is present: $updated"
+    log "Ableton updater state present. Run ./bin/disable-ableton-updates before session."
+    log "[$(timestamp)] session end"
+    exit 1
+  fi
+
+  if [[ -e "$autoupdates" ]]; then
+    log "WARNING: Ableton auto-update directory is present: $autoupdates"
+  fi
+
+  if [[ -e "$deltas" ]]; then
+    log "WARNING: Ableton update payload may be present; run ./bin/disable-ableton-updates if instability returns"
+    log "WARNING: Ableton update payload path: $deltas"
+  fi
+}
+
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S'
+}
+
+log "[$(timestamp)] session start"
+log "[$(timestamp)] effective session environment:"
+./bin/debug-env >>"$SESSION_LOG" 2>&1
+check_ableton_update_state
+
+log "[$(timestamp)] checking optional MIDI bridge"
+if command -v a2jmidid >/dev/null 2>&1; then
+  ./bin/start-midi-bridge >>"$SESSION_LOG" 2>&1 || log "WARNING: MIDI bridge startup returned non-zero; continuing session"
+else
+  log "MIDI bridge unavailable: a2jmidid not found"
+fi
+
+if pgrep -x a2jmidid >/dev/null 2>&1 || pgrep -f 'a2jmidid.*-e' >/dev/null 2>&1; then
+  log "MIDI bridge active: a2jmidid"
+else
+  log "MIDI bridge inactive"
+fi
+
+log "[$(timestamp)] starting Bome"
+./bin/bome &
+bome_pid="$!"
+
+sleep 2
+
+if ! kill -0 "$bome_pid" 2>/dev/null; then
+  set +e
+  wait "$bome_pid"
+  bome_status="$?"
+  set -e
+  log "[$(timestamp)] Bome exited during startup with code: $bome_status"
+  log "[$(timestamp)] session end"
+  exit "$bome_status"
+fi
+
+log "[$(timestamp)] starting Ableton"
+set +e
+./bin/ableton "$@"
+ableton_status="$?"
+set -e
+
+log "[$(timestamp)] Ableton exit code: $ableton_status"
+log "[$(timestamp)] session end"
+exit "$ableton_status"

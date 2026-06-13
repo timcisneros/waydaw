@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/bome-validation.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+APPLY=0
+if [ "${1:-}" = "--apply" ]; then
+  APPLY=1
+elif [ "${1:-}" != "" ]; then
+  printf 'Usage: %s [--apply]\n' "$0"
+  exit 2
+fi
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+find_port() {
+  local client_pattern="$1"
+  local port_pattern="$2"
+  local client_id=""
+  local in_client=0
+
+  while IFS= read -r line; do
+    case "$line" in
+      client\ * )
+        in_client=0
+        if printf '%s\n' "$line" | grep -Ei "$client_pattern" >/dev/null 2>&1; then
+          client_id="$(printf '%s\n' "$line" | sed -n "s/^client \([0-9][0-9]*\):.*/\1/p")"
+          in_client=1
+        fi
+        ;;
+      * )
+        if [ "$in_client" -eq 1 ] && printf '%s\n' "$line" | grep -Ei "$port_pattern" >/dev/null 2>&1; then
+          local port_id
+          port_id="$(printf '%s\n' "$line" | sed -n "s/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p")"
+          if [ "$client_id" != "" ] && [ "$port_id" != "" ]; then
+            printf '%s:%s\n' "$client_id" "$port_id"
+            return 0
+          fi
+        fi
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+route_exists() {
+  local src="$1"
+  local dst="$2"
+  local data="$3"
+
+  printf '%s\n' "$data" | grep -A 4 -E "^client ${src%%:*}:" | grep -Eq "Connecting To:.*(^|[^0-9])${dst}([^0-9]|$)"
+}
+
+disconnect_if_present() {
+  local label="$1"
+  local src="$2"
+  local dst="$3"
+  local data="$4"
+
+  if route_exists "$src" "$dst" "$data"; then
+    printf 'remove %s: %s -> %s\n' "$label" "$src" "$dst"
+    if [ "$APPLY" -eq 1 ]; then
+      aconnect -d "$src" "$dst" >/dev/null 2>&1 || printf 'WARN: failed or already absent: %s -> %s\n' "$src" "$dst"
+    fi
+  else
+    printf 'not present: %s (%s -> %s)\n' "$label" "$src" "$dst"
+  fi
+}
+
+connect_if_missing() {
+  local label="$1"
+  local src="$2"
+  local dst="$3"
+  local data="$4"
+
+  if route_exists "$src" "$dst" "$data"; then
+    printf 'already present: %s (%s -> %s)\n' "$label" "$src" "$dst"
+  else
+    printf 'connect %s: %s -> %s\n' "$label" "$src" "$dst"
+    if [ "$APPLY" -eq 1 ]; then
+      aconnect "$src" "$dst" >/dev/null 2>&1 || printf 'ERROR: failed to connect %s -> %s\n' "$src" "$dst"
+    fi
+  fi
+}
+
+printf '[%s] Bome validation route start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+if ! has_cmd aconnect; then
+  printf 'ERROR: aconnect not found\n'
+  exit 1
+fi
+
+aconnect_output="$(aconnect -l 2>&1)"
+
+launchpad_port="$(printf '%s\n' "$aconnect_output" | find_port 'Launchpad' 'Launchpad.*MIDI|MIDI')"
+virmidi_port="$(printf '%s\n' "$aconnect_output" | find_port 'Virtual Raw MIDI 1-0|VirMIDI 1-0' 'VirMIDI 1-0')"
+wine_port="$(printf '%s\n' "$aconnect_output" | find_port 'WINE midi driver' 'WINE ALSA Input')"
+
+printf 'Launchpad S port: %s\n' "${launchpad_port:-NOT FOUND}"
+printf 'VirMIDI 1-0 port: %s\n' "${virmidi_port:-NOT FOUND}"
+printf 'WINE ALSA Input port: %s\n' "${wine_port:-NOT FOUND}"
+
+if [ "${wine_port:-}" = "" ]; then
+  printf 'ERROR: WINE ALSA Input not found. Start the DAW session first:\n'
+  printf '  ./bin/disable-ableton-updates\n'
+  printf '  pw-jack ./bin/session\n'
+  exit 1
+fi
+
+if [ "${launchpad_port:-}" = "" ]; then
+  printf 'ERROR: Launchpad S not found. Check ./bin/launchpad-check\n'
+  exit 1
+fi
+
+if [ "${virmidi_port:-}" = "" ]; then
+  printf 'ERROR: VirMIDI 1-0 not found. Run ./bin/load-virmidi-temp\n'
+  exit 1
+fi
+
+if [ "$APPLY" -eq 1 ]; then
+  printf '\nApplying Bome validation routing:\n'
+else
+  printf '\nDry run. These Bome validation routing changes would be applied with --apply:\n'
+fi
+
+disconnect_if_present "Launchpad bypass" "$launchpad_port" "$wine_port" "$aconnect_output"
+connect_if_missing "translated output" "$virmidi_port" "$wine_port" "$aconnect_output"
+
+printf '\nThis script never routes WINE ALSA Input -> VirMIDI and never touches BMIDI.\n'
+
+if [ "$APPLY" -eq 1 ]; then
+  printf '\nFinal ALSA MIDI summary:\n'
+  aconnect -l || printf 'WARN: aconnect -l exited with code %s\n' "$?"
+fi
+
+printf '[%s] Bome validation route end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

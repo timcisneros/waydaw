@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/pipewire-check.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+report_cmd() {
+  local cmd="$1"
+  if have_cmd "$cmd"; then
+    printf 'FOUND: %s -> %s\n' "$cmd" "$(command -v "$cmd")"
+  else
+    printf 'MISSING: %s\n' "$cmd"
+  fi
+}
+
+report_process() {
+  local name="$1"
+  if pgrep -x "$name" >/dev/null 2>&1; then
+    printf 'RUNNING: %s\n' "$name"
+    pgrep -a "$name" 2>/dev/null || true
+  else
+    printf 'NOT RUNNING: %s\n' "$name"
+  fi
+}
+
+report_pipewire_jack_libs() {
+  local matches
+  matches="$(find /usr/lib /usr/lib64 -path '*pipewire*jack*' -name 'libjack*.so*' -print 2>/dev/null | sort)"
+  if [[ -n "$matches" ]]; then
+    printf 'FOUND: PipeWire JACK shim libraries\n'
+    printf '%s\n' "$matches"
+  else
+    printf 'MISSING: PipeWire JACK shim libraries not found in /usr/lib or /usr/lib64\n'
+  fi
+}
+
+printf '[%s] PipeWire readiness check start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+section "Commands"
+report_cmd pipewire
+report_cmd wireplumber
+report_cmd pw-cli
+report_cmd pw-link
+report_cmd pw-jack
+report_cmd jack_lsp
+report_cmd qpwgraph
+
+section "Processes"
+report_process pipewire
+report_process wireplumber
+
+section "PipeWire core"
+if have_cmd pw-cli && pw-cli info 0 >/dev/null 2>&1; then
+  printf 'PASS: pw-cli info 0 succeeded\n'
+else
+  printf 'FAIL: PipeWire core did not respond to pw-cli info 0\n'
+fi
+
+section "PipeWire JACK shim"
+if have_cmd pw-jack; then
+  printf 'FOUND: pw-jack launcher available\n'
+else
+  printf 'MISSING: pw-jack launcher unavailable\n'
+fi
+report_pipewire_jack_libs
+
+section "PipeWire nodes"
+if have_cmd pw-cli; then
+  pw-cli ls Node 2>/dev/null || printf 'WARN: failed to list PipeWire nodes\n'
+else
+  printf 'WARN: pw-cli unavailable; cannot list PipeWire nodes\n'
+fi
+
+section "Readiness"
+if pgrep -x pipewire >/dev/null 2>&1 && pgrep -x wireplumber >/dev/null 2>&1 && have_cmd pw-jack; then
+  printf 'READY: PipeWire, WirePlumber, and pw-jack are available.\n'
+elif pgrep -x pipewire >/dev/null 2>&1; then
+  printf 'PARTIAL: PipeWire is running, but WirePlumber or PipeWire JACK readiness is incomplete.\n'
+else
+  printf 'MISSING: PipeWire is not running for this user session.\n'
+fi
+
+printf '\nActions not performed by this script:\n'
+printf '%s\n' '- no package installs'
+printf '%s\n' '- no PipeWire configuration writes'
+printf '%s\n' '- no service starts/stops/restarts'
+
+printf '\n[%s] PipeWire readiness check end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

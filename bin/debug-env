@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+env | grep -E '^(PYTHON|CONDA|VIRTUAL_ENV|WINE|DISPLAY|WAYLAND|GDK|QT|SDL)' | sort || true

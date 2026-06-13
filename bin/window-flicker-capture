@@ -1,0 +1,434 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_ROOT="$ROOT_DIR/logs/window-flicker-captures"
+DURATION="30"
+FPS="5"
+HEIGHT="140"
+WIDTH=""
+X="0"
+Y="0"
+LABEL="manual"
+PSNR_THRESHOLD="45"
+DELAY="5"
+
+usage() {
+  cat <<'USAGE'
+Usage: ./bin/window-flicker-capture [options]
+
+Observe-only top-band flicker capture for Ableton/KDE/Wine diagnostics.
+This command does not launch Ableton, edit Wine registry, query Ableton with xprop,
+restart X11/KWin, or change compositor settings.
+
+Options:
+  --duration SECONDS   Capture duration, default 30
+  --fps FPS            Capture rate, default 5
+  --height PX          Top screen band height, default 140
+  --width PX           Capture width, default detected monitor width
+  --x PX               Capture x offset, default 0
+  --y PX               Capture y offset, default 0
+  --label NAME         Capture label, default manual
+  --idle               Label capture as idle-baseline
+  --psnr-threshold N   Mark frame pairs below this PSNR as visible changes, default 45
+  --delay SECONDS      Wait before frame capture so the terminal can be hidden, default 5
+  -h, --help           Show this help
+
+Recommended use:
+  ./bin/window-flicker-capture --idle --duration 10
+  # Start Ableton manually, wait for visible flicker, then:
+  ./bin/window-flicker-capture --duration 30 --label ableton-flicker
+USAGE
+}
+
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+is_number() {
+  awk -v value="$1" 'BEGIN { exit(value ~ /^[0-9]+([.][0-9]+)?$/ ? 0 : 1) }'
+}
+
+sanitize_label() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-'
+}
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --duration)
+      [[ "$#" -ge 2 ]] || die "--duration requires a value"
+      DURATION="$2"
+      shift 2
+      ;;
+    --fps)
+      [[ "$#" -ge 2 ]] || die "--fps requires a value"
+      FPS="$2"
+      shift 2
+      ;;
+    --height)
+      [[ "$#" -ge 2 ]] || die "--height requires a value"
+      HEIGHT="$2"
+      shift 2
+      ;;
+    --width)
+      [[ "$#" -ge 2 ]] || die "--width requires a value"
+      WIDTH="$2"
+      shift 2
+      ;;
+    --x)
+      [[ "$#" -ge 2 ]] || die "--x requires a value"
+      X="$2"
+      shift 2
+      ;;
+    --y)
+      [[ "$#" -ge 2 ]] || die "--y requires a value"
+      Y="$2"
+      shift 2
+      ;;
+    --label)
+      [[ "$#" -ge 2 ]] || die "--label requires a value"
+      LABEL="$2"
+      shift 2
+      ;;
+    --idle)
+      LABEL="idle-baseline"
+      shift
+      ;;
+    --psnr-threshold)
+      [[ "$#" -ge 2 ]] || die "--psnr-threshold requires a value"
+      PSNR_THRESHOLD="$2"
+      shift 2
+      ;;
+    --delay)
+      [[ "$#" -ge 2 ]] || die "--delay requires a value"
+      DELAY="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+is_number "$DURATION" || die "--duration must be numeric"
+is_number "$FPS" || die "--fps must be numeric"
+is_number "$HEIGHT" || die "--height must be numeric"
+is_number "$X" || die "--x must be numeric"
+is_number "$Y" || die "--y must be numeric"
+is_number "$PSNR_THRESHOLD" || die "--psnr-threshold must be numeric"
+is_number "$DELAY" || die "--delay must be numeric"
+[[ -z "$WIDTH" ]] || is_number "$WIDTH" || die "--width must be numeric"
+
+if ! have_cmd ffmpeg; then
+  die "ffmpeg is required for frame analysis"
+fi
+
+detect_width() {
+  local geometry
+
+  if [[ -n "$WIDTH" ]]; then
+    printf '%s\n' "$WIDTH"
+    return 0
+  fi
+
+  if have_cmd xrandr; then
+    geometry="$(xrandr --listmonitors 2>/dev/null | awk 'NR == 2 { print $3 }')"
+    if [[ "$geometry" =~ ^[+*]*([0-9]+)/[0-9]+x([0-9]+)/[0-9]+[+-] ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  fi
+
+  printf '1920\n'
+}
+
+qdbus_cmd() {
+  if have_cmd qdbus6; then
+    printf 'qdbus6\n'
+  elif have_cmd qdbus; then
+    printf 'qdbus\n'
+  else
+    return 1
+  fi
+}
+
+capture_with_kwin() {
+  local output="$1"
+  local qdbus_bin screenshot_path
+
+  qdbus_bin="$(qdbus_cmd)" || return 1
+  screenshot_path="$("$qdbus_bin" org.kde.KWin /Screenshot org.kde.kwin.Screenshot.screenshotArea "$X" "$Y" "$CAPTURE_WIDTH" "$HEIGHT" false 2>/dev/null)" || return 1
+  screenshot_path="$(printf '%s' "$screenshot_path" | tr -d '\r')"
+  [[ -n "$screenshot_path" && -f "$screenshot_path" ]] || return 1
+  mv "$screenshot_path" "$output"
+}
+
+capture_with_grim() {
+  local output="$1"
+
+  have_cmd grim || return 1
+  grim -g "${X},${Y} ${CAPTURE_WIDTH}x${HEIGHT}" "$output" >/dev/null 2>&1
+}
+
+capture_with_flameshot() {
+  local output="$1"
+  local full status
+
+  have_cmd flameshot || return 1
+  full="$(mktemp -u --suffix=.png)"
+  if ! flameshot full -p "$full" >/dev/null 2>&1; then
+    rm -f "$full"
+    return 1
+  fi
+  status=0
+  ffmpeg -y -hide_banner -nostdin -loglevel error \
+    -i "$full" \
+    -vf "crop=${CAPTURE_WIDTH}:${HEIGHT}:${X}:${Y}" \
+    -frames:v 1 \
+    "$output" >/dev/null 2>&1 || status="$?"
+  rm -f "$full"
+  [[ "$status" -eq 0 && -s "$output" ]]
+}
+
+capture_with_ffmpeg_x11grab() {
+  local output="$1"
+  local display="${DISPLAY:-}"
+
+  [[ -n "$display" ]] || return 1
+  ffmpeg -hide_banner -nostdin -loglevel error \
+    -f x11grab \
+    -draw_mouse 0 \
+    -video_size "${CAPTURE_WIDTH}x${HEIGHT}" \
+    -framerate 1 \
+    -i "${display}+${X},${Y}" \
+    -frames:v 1 \
+    "$output" >/dev/null 2>&1
+}
+
+capture_sequence_with_ffmpeg_x11grab() {
+  local frames_dir="$1"
+  local display="${DISPLAY:-}"
+
+  [[ -n "$display" ]] || return 1
+  ffmpeg -hide_banner -nostdin -loglevel error \
+    -f x11grab \
+    -draw_mouse 0 \
+    -video_size "${CAPTURE_WIDTH}x${HEIGHT}" \
+    -framerate "$FPS" \
+    -i "${display}+${X},${Y}" \
+    -t "$DURATION" \
+    "$frames_dir/frame-%04d.png" >/dev/null 2>&1
+}
+
+capture_frame() {
+  local output="$1"
+
+  if capture_with_kwin "$output"; then
+    return 0
+  fi
+
+  if capture_with_grim "$output"; then
+    return 0
+  fi
+
+  if capture_with_flameshot "$output"; then
+    return 0
+  fi
+
+  capture_with_ffmpeg_x11grab "$output"
+}
+
+write_tool_availability() {
+  local tool
+
+  for tool in qdbus6 qdbus grim ffmpeg xrandr xprop xwininfo xdotool wmctrl gamescope cage labwc; do
+    if have_cmd "$tool"; then
+      printf '%s=%s\n' "$tool" "$(command -v "$tool")"
+    else
+      printf '%s=unavailable\n' "$tool"
+    fi
+  done
+}
+
+write_process_snapshot() {
+  printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+  printf 'XDG_SESSION_TYPE=%s\n' "${XDG_SESSION_TYPE:-unset}"
+  printf 'DISPLAY=%s\n' "${DISPLAY:-unset}"
+  printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY:-unset}"
+  printf '\n== Matching processes ==\n'
+  pgrep -af '([w]ine|[W]ine|wineserver|winedevice|services\.exe|explorer\.exe|Ableton|MIDITranslator|Bome)' || true
+}
+
+write_kwin_support() {
+  local qdbus_bin
+
+  qdbus_bin="$(qdbus_cmd)" || {
+    printf 'qdbus unavailable\n'
+    return 0
+  }
+
+  "$qdbus_bin" org.kde.KWin /KWin org.kde.KWin.supportInformation 2>&1 || true
+}
+
+log_only() {
+  printf '%s\n' "$*" >>"$CAPTURE_DIR/capture.log"
+}
+
+analyze_frames() {
+  local frames_dir="$1"
+  local analysis_file="$2"
+  local representative_dir="$3"
+  local prev="" cur="" psnr line
+  local total_pairs=0
+  local changed_pairs=0
+  local hash_changed_pairs=0
+  local first_change_prev=""
+  local first_change_cur=""
+  local prev_hash="" cur_hash=""
+
+  mkdir -p "$representative_dir"
+
+  {
+    printf 'Frame analysis started: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'PSNR visible-change threshold: %s\n\n' "$PSNR_THRESHOLD"
+    printf 'pair,previous,current,psnr,visible_change,hash_changed\n'
+  } >"$analysis_file"
+
+  while IFS= read -r cur; do
+    cur_hash="$(sha256sum "$cur" | awk '{ print $1 }')"
+    if [[ -n "$prev" ]]; then
+      total_pairs=$((total_pairs + 1))
+      line="$(ffmpeg -hide_banner -nostdin -nostats -i "$prev" -i "$cur" -lavfi psnr -f null - 2>&1 || true)"
+      psnr="$(sed -n 's/.*average:\([^ ]*\).*/\1/p' <<<"$line" | tail -n 1)"
+      [[ -n "$psnr" ]] || psnr="unavailable"
+
+      local visible_change="no"
+      if [[ "$psnr" != "inf" && "$psnr" != "unavailable" ]]; then
+        if awk -v value="$psnr" -v threshold="$PSNR_THRESHOLD" 'BEGIN { exit(value < threshold ? 0 : 1) }'; then
+          visible_change="yes"
+          changed_pairs=$((changed_pairs + 1))
+          if [[ -z "$first_change_prev" ]]; then
+            first_change_prev="$prev"
+            first_change_cur="$cur"
+          fi
+        fi
+      fi
+
+      local hash_changed="no"
+      if [[ "$cur_hash" != "$prev_hash" ]]; then
+        hash_changed="yes"
+        hash_changed_pairs=$((hash_changed_pairs + 1))
+      fi
+
+      printf '%s,%s,%s,%s,%s,%s\n' \
+        "$total_pairs" "$(basename "$prev")" "$(basename "$cur")" "$psnr" "$visible_change" "$hash_changed" >>"$analysis_file"
+    fi
+    prev="$cur"
+    prev_hash="$cur_hash"
+  done < <(find "$frames_dir" -maxdepth 1 -type f -name 'frame-*.png' | sort)
+
+  if [[ -n "$first_change_prev" && -n "$first_change_cur" ]]; then
+    cp "$first_change_prev" "$representative_dir/first-visible-change-before.png"
+    cp "$first_change_cur" "$representative_dir/first-visible-change-after.png"
+  fi
+
+  {
+    printf '\nSummary\n'
+    printf 'total_frame_pairs=%s\n' "$total_pairs"
+    printf 'hash_changed_pairs=%s\n' "$hash_changed_pairs"
+    printf 'visible_change_pairs=%s\n' "$changed_pairs"
+    if [[ "$total_pairs" -gt 0 ]]; then
+      awk -v changed="$changed_pairs" -v total="$total_pairs" \
+        'BEGIN { printf "visible_change_percent=%.2f\n", (changed / total) * 100 }'
+      awk -v changed="$changed_pairs" -v duration="$DURATION" \
+        'BEGIN { printf "approx_visible_changes_per_second=%.2f\n", changed / duration }'
+    else
+      printf 'visible_change_percent=0.00\n'
+      printf 'approx_visible_changes_per_second=0.00\n'
+    fi
+    if [[ "$changed_pairs" -gt 0 ]]; then
+      printf 'classification_hint=top-band visual state is changing during capture; inspect representative frames and correlate with registry/KWin state.\n'
+    else
+      printf 'classification_hint=no large top-band visual changes crossed the PSNR threshold; lower threshold or capture while flicker is visible if this was unexpected.\n'
+    fi
+  } | tee -a "$analysis_file"
+}
+
+CAPTURE_WIDTH="$(detect_width)"
+SAMPLE_COUNT="$(awk -v duration="$DURATION" -v fps="$FPS" 'BEGIN { count = int(duration * fps); if (count < 2) count = 2; print count }')"
+INTERVAL="$(awk -v fps="$FPS" 'BEGIN { if (fps <= 0) print 1; else printf "%.6f", 1 / fps }')"
+STAMP="$(date '+%Y%m%d-%H%M%S')"
+SAFE_LABEL="$(sanitize_label "$LABEL")"
+CAPTURE_DIR="$LOG_ROOT/${STAMP}-${SAFE_LABEL}"
+FRAMES_DIR="$CAPTURE_DIR/frames"
+REPRESENTATIVE_DIR="$CAPTURE_DIR/representative-frames"
+
+mkdir -p "$FRAMES_DIR"
+exec > >(tee -a "$CAPTURE_DIR/capture.log") 2>&1
+
+printf '[%s] window flicker capture start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'Capture directory: %s\n' "$CAPTURE_DIR"
+printf 'Area: x=%s y=%s width=%s height=%s\n' "$X" "$Y" "$CAPTURE_WIDTH" "$HEIGHT"
+printf 'Duration=%s fps=%s sample_count=%s interval=%s delay=%s label=%s\n' "$DURATION" "$FPS" "$SAMPLE_COUNT" "$INTERVAL" "$DELAY" "$LABEL"
+printf 'Safety: observe-only; no Ableton launch, no registry writes, no KWin/X11 restart, no live xprop against Ableton.\n'
+
+printf '\n== Pre-capture windowing snapshot ==\n'
+./bin/windowing-check >"$CAPTURE_DIR/pre-windowing-check.txt" 2>&1 || true
+cat "$CAPTURE_DIR/pre-windowing-check.txt"
+
+write_tool_availability >"$CAPTURE_DIR/tool-availability.txt"
+write_process_snapshot >"$CAPTURE_DIR/process-snapshot-before.txt"
+write_kwin_support >"$CAPTURE_DIR/kwin-support-information.txt"
+if have_cmd xrandr; then
+  xrandr --listmonitors >"$CAPTURE_DIR/xrandr-listmonitors.txt" 2>&1 || true
+fi
+
+printf '\n== Frame capture ==\n'
+printf 'Frame capture begins in %s seconds. Move, cover, or minimize this terminal now so it is not captured over Ableton.\n' "$DELAY"
+sleep "$DELAY"
+if ! have_cmd flameshot && capture_sequence_with_ffmpeg_x11grab "$FRAMES_DIR"; then
+  while IFS= read -r frame; do
+    log_only "[$(date '+%H:%M:%S')] captured $(basename "$frame")"
+  done < <(find "$FRAMES_DIR" -maxdepth 1 -type f -name 'frame-*.png' | sort)
+else
+  for index in $(seq 1 "$SAMPLE_COUNT"); do
+    frame="$FRAMES_DIR/frame-$(printf '%04d' "$index").png"
+    if capture_frame "$frame"; then
+      log_only "[$(date '+%H:%M:%S')] captured $(basename "$frame")"
+    else
+      die "failed to capture frame $index"
+    fi
+    if [[ "$index" -lt "$SAMPLE_COUNT" ]]; then
+      sleep "$INTERVAL"
+    fi
+  done
+fi
+
+if ! find "$FRAMES_DIR" -maxdepth 1 -type f -name 'frame-*.png' | grep -q .; then
+  die "no frames were captured"
+fi
+
+write_process_snapshot >"$CAPTURE_DIR/process-snapshot-after.txt"
+
+printf '\n== Post-capture windowing snapshot ==\n'
+./bin/windowing-check >"$CAPTURE_DIR/post-windowing-check.txt" 2>&1 || true
+cat "$CAPTURE_DIR/post-windowing-check.txt"
+
+printf '\n== Analysis ==\n'
+analyze_frames "$FRAMES_DIR" "$CAPTURE_DIR/analysis.csv" "$REPRESENTATIVE_DIR"
+
+printf '\n[%s] window flicker capture end\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'Results: %s\n' "$CAPTURE_DIR"

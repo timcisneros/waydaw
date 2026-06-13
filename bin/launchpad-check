@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/launchpad-check.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+detect_ports() {
+  local label="$1"
+  local pattern="$2"
+  local data="$3"
+
+  if printf '%s\n' "$data" | grep -Ei "$pattern" >/dev/null 2>&1; then
+    printf 'VISIBLE: %s\n' "$label"
+    printf '%s\n' "$data" | grep -Ei "$pattern" || true
+  else
+    printf 'NOT VISIBLE: %s\n' "$label"
+  fi
+}
+
+printf '[%s] Launchpad check start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+lsusb_output=""
+aconnect_output=""
+amidi_output=""
+pw_link_output=""
+jack_output=""
+
+section "USB devices: lsusb Novation/Launchpad"
+if has_cmd lsusb; then
+  lsusb_output="$(lsusb 2>&1)"
+  if printf '%s\n' "$lsusb_output" | grep -Ei 'Novation|Launchpad' >/dev/null 2>&1; then
+    printf '%s\n' "$lsusb_output" | grep -Ei 'Novation|Launchpad' || true
+  else
+    printf 'NOT FOUND: Novation/Launchpad USB device\n'
+  fi
+else
+  printf 'WARN: lsusb not found\n'
+fi
+
+section "ALSA sequencer ports: aconnect -l"
+if has_cmd aconnect; then
+  aconnect_output="$(aconnect -l 2>&1)"
+  printf '%s\n' "$aconnect_output"
+else
+  printf 'WARN: aconnect not found\n'
+fi
+
+section "ALSA raw MIDI devices: amidi -l"
+if has_cmd amidi; then
+  amidi_output="$(amidi -l 2>&1)"
+  printf '%s\n' "$amidi_output"
+else
+  printf 'WARN: amidi not found\n'
+fi
+
+section "PipeWire links: pw-link -l"
+if has_cmd pw-link; then
+  pw_link_output="$(pw-link -l 2>&1)"
+  printf '%s\n' "$pw_link_output"
+else
+  printf 'WARN: pw-link not found\n'
+fi
+
+section "JACK/PipeWire ports: pw-jack jack_lsp -A"
+if has_cmd pw-jack && has_cmd jack_lsp; then
+  jack_output="$(pw-jack jack_lsp -A 2>&1)"
+  printf '%s\n' "$jack_output"
+else
+  printf 'WARN: pw-jack or jack_lsp not found\n'
+fi
+
+combined_output="$(printf '%s\n%s\n%s\n%s\n%s\n' "$lsusb_output" "$aconnect_output" "$amidi_output" "$pw_link_output" "$jack_output")"
+
+section "Highlighted Launchpad routing names"
+detect_ports "Launchpad" 'Launchpad' "$combined_output"
+detect_ports "Novation" 'Novation' "$combined_output"
+detect_ports "VirMIDI" 'VirMIDI|Virtual Raw MIDI|Virtual MIDI' "$combined_output"
+detect_ports "WINE midi driver" 'WINE midi driver|WINE ALSA' "$combined_output"
+
+printf '\n[%s] Launchpad check end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

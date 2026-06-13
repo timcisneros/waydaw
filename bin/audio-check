@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/audio-check.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+report_cmd() {
+  local cmd="$1"
+  if has_cmd "$cmd"; then
+    printf 'FOUND: %s -> %s\n' "$cmd" "$(command -v "$cmd")"
+  else
+    printf 'MISSING: %s\n' "$cmd"
+  fi
+}
+
+report_pipewire_jack() {
+  if has_cmd pw-jack; then
+    printf 'FOUND: pipewire-jack compatibility exposed through pw-jack\n'
+  else
+    printf 'MISSING: pipewire-jack compatibility not detected through pw-jack\n'
+  fi
+}
+
+printf '[%s] Audio check start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+printf '\n== Process status ==\n'
+if pgrep -x pipewire >/dev/null 2>&1; then
+  printf 'FOUND: pipewire process is running\n'
+else
+  printf 'MISSING: pipewire process is not running\n'
+fi
+
+if pgrep -x jackd >/dev/null 2>&1; then
+  printf 'FOUND: jackd process is running\n'
+else
+  printf 'MISSING: jackd process is not running\n'
+fi
+
+printf '\n== Tool availability ==\n'
+report_cmd pipewire
+report_pipewire_jack
+report_cmd pw-cli
+report_cmd pw-top
+report_cmd pw-jack
+report_cmd wine
+report_cmd wineasio
+report_cmd jackd
+report_cmd qjackctl
+
+printf '\n== PipeWire JACK compatibility hints ==\n'
+if has_cmd pw-jack; then
+  printf 'PASS: pw-jack is available. JACK clients can be launched against PipeWire JACK compatibility.\n'
+else
+  printf 'WARN: pw-jack is not available. PipeWire JACK compatibility may be missing or not exposed on PATH.\n'
+fi
+
+if has_cmd pw-cli && pw-cli info 0 >/dev/null 2>&1; then
+  printf 'PASS: PipeWire core responds to pw-cli info 0.\n'
+else
+  printf 'WARN: PipeWire core did not respond to pw-cli info 0.\n'
+fi
+
+printf '\n== WineASIO hints ==\n'
+if find "$WINEPREFIX" -iname 'wineasio.dll*' -o -iname 'wineasio*.dll*' 2>/dev/null | head -n 1 | grep -q .; then
+  printf 'PASS: wineasio file found inside WINEPREFIX.\n'
+else
+  printf 'WARN: wineasio file not found inside WINEPREFIX.\n'
+fi
+
+if has_cmd wine; then
+  if wine reg query 'HKCU\Software\Wine\DllOverrides' /v wineasio >/dev/null 2>&1 || wine reg query 'HKLM\Software\Wine\DllOverrides' /v wineasio >/dev/null 2>&1; then
+    printf 'PASS: wineasio DLL override appears in Wine registry.\n'
+  else
+    printf 'WARN: wineasio DLL override not found in Wine registry.\n'
+  fi
+else
+  printf 'WARN: wine not found; skipped WineASIO registry check.\n'
+fi
+
+printf '\n== Recommended current audio stack ==\n'
+if pgrep -x pipewire >/dev/null 2>&1 && has_cmd pw-jack; then
+  printf 'RECOMMENDED: PipeWire session with PipeWire JACK compatibility and WineASIO for Ableton.\n'
+elif pgrep -x pipewire >/dev/null 2>&1; then
+  printf 'RECOMMENDED: PipeWire is running. Add/enable PipeWire JACK compatibility and WineASIO externally if Ableton needs low-latency ASIO.\n'
+elif pgrep -x jackd >/dev/null 2>&1; then
+  printf 'CURRENT: jackd is running. WineASIO can use JACK, but this harness does not manage JACK startup.\n'
+else
+  printf 'WARN: No PipeWire or JACK server was detected. Low-latency WineASIO audio is unlikely to work until one is started externally.\n'
+fi
+
+printf '\nACTION: Select WineASIO in Ableton only after WineASIO is installed/registered and JACK/PipeWire JACK is running.\n'
+printf 'ACTION: Keep sample rate and buffer size consistent between PipeWire/JACK and Ableton.\n'
+printf 'ACTION: This script does not mutate audio settings or install packages.\n'
+
+printf '\n[%s] Audio check end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

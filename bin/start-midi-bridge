@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/midi-bridge.log"
+mkdir -p "$LOG_DIR"
+
+log() {
+  printf '%s\n' "$*" | tee -a "$LOG_FILE"
+}
+
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S'
+}
+
+log "[$(timestamp)] MIDI bridge check"
+
+if ! command -v a2jmidid >/dev/null 2>&1; then
+  log "a2jmidid not found; MIDI bridge not started"
+  exit 0
+fi
+
+if pgrep -x a2jmidid >/dev/null 2>&1 || pgrep -f 'a2jmidid.*-e' >/dev/null 2>&1; then
+  log "a2jmidid already running"
+  pgrep -a a2jmidid 2>/dev/null | tee -a "$LOG_FILE" || true
+  exit 0
+fi
+
+log "starting: a2jmidid -e"
+a2jmidid -e >>"$LOG_FILE" 2>&1 &
+bridge_pid="$!"
+sleep 1
+
+if kill -0 "$bridge_pid" 2>/dev/null; then
+  log "a2jmidid started with PID: $bridge_pid"
+else
+  set +e
+  wait "$bridge_pid"
+  bridge_status="$?"
+  set -e
+  log "a2jmidid exited during startup with code: $bridge_status"
+  exit "$bridge_status"
+fi

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+unset PYTHONHOME
+unset PYTHONPATH
+unset PYTHONSTARTUP
+unset PYTHONUSERBASE
+unset PYTHONEXECUTABLE
+unset PYTHON
+unset VIRTUAL_ENV
+unset CONDA_PREFIX
+unset CONDA_DEFAULT_ENV
+unset CONDA_PYTHON_EXE
+unset GDK_BACKEND
+unset QT_QPA_PLATFORM
+unset SDL_VIDEODRIVER
+
+export WINEPREFIX="$HOME/.wine_ableton12"

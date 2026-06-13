@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+MAINTENANCE_LOG="$LOG_DIR/maintenance.log"
+mkdir -p "$LOG_DIR"
+touch "$MAINTENANCE_LOG"
+
+log() {
+  printf '%s\n' "$*" | tee -a "$MAINTENANCE_LOG"
+}
+
+timestamp() {
+  date '+%Y%m%d-%H%M%S'
+}
+
+disable_path() {
+  local path="$1"
+  local stamp="$2"
+  local target="${path}.disabled.${stamp}"
+
+  if [[ -e "$path" ]]; then
+    if [[ -e "$target" ]]; then
+      log "ERROR: target already exists: $target"
+      return 1
+    fi
+
+    mv "$path" "$target"
+    log "disabled: $path"
+    log "      to: $target"
+  else
+    log "not present: $path"
+  fi
+}
+
+stamp="$(timestamp)"
+log "[$(date '+%Y-%m-%d %H:%M:%S')] disable Ableton updates start"
+disable_path "$WINEPREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/_autoupdates" "$stamp"
+disable_path "$WINEPREFIX/drive_c/ProgramData/Ableton/.Live 12 Suite_updated" "$stamp"
+log "[$(date '+%Y-%m-%d %H:%M:%S')] disable Ableton updates end"

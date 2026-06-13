@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/bome.log"
+DEBUG_LOG_FILE="$LOG_DIR/bome-debug.log"
+mkdir -p "$LOG_DIR"
+
+debug_mode=0
+if [[ "${1:-}" == "--debug" ]]; then
+  debug_mode=1
+  shift
+fi
+
+find_bome_exe() {
+  local drive_c="$WINEPREFIX/drive_c"
+  local candidate
+
+  for candidate in \
+    "$drive_c/Program Files/Bome MIDI Translator Pro/MIDITranslator.exe" \
+    "$drive_c/Program Files/Bome/Bome MIDI Translator Pro/MIDITranslator.exe" \
+    "$drive_c/Program Files (x86)/Bome MIDI Translator Pro/MIDITranslator.exe" \
+    "$drive_c/Program Files (x86)/Bome/Bome MIDI Translator Pro/MIDITranslator.exe"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  find "$drive_c" -type f \( -iname 'MIDITranslator*.exe' -o -iname 'Bome MIDI Translator*.exe' \) 2>/dev/null | head -n 1
+}
+
+if ! command -v wine >/dev/null 2>&1; then
+  printf 'ERROR: wine not found on PATH.\n' >&2
+  exit 1
+fi
+
+if [[ ! -d "$WINEPREFIX" ]]; then
+  printf 'ERROR: WINEPREFIX does not exist: %s\n' "$WINEPREFIX" >&2
+  exit 1
+fi
+
+bome_exe="$(find_bome_exe)"
+if [[ -z "$bome_exe" ]]; then
+  printf 'ERROR: Bome MIDI Translator Pro executable not found in %s\n' "$WINEPREFIX" >&2
+  printf 'Install Bome into the shared prefix, then rerun this launcher.\n' >&2
+  exit 1
+fi
+
+printf '[%s] launching Bome: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$bome_exe" >>"$LOG_FILE"
+
+if [[ "$debug_mode" -eq 1 ]]; then
+  {
+    printf '[%s] launching Bome debug\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+    printf 'Bome executable=%s\n' "$bome_exe"
+    printf 'WINEDEBUG=+seh,+loaddll\n'
+  } | tee -a "$DEBUG_LOG_FILE"
+
+  set +e
+  WINEDEBUG=+seh,+loaddll wine "$bome_exe" "$@" 2>&1 | tee -a "$DEBUG_LOG_FILE"
+  wine_status="${PIPESTATUS[0]}"
+  set -e
+
+  printf '[%s] Bome wine exit code: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$wine_status" | tee -a "$DEBUG_LOG_FILE"
+  exit "$wine_status"
+fi
+
+exec wine "$bome_exe" "$@" >>"$LOG_FILE" 2>&1

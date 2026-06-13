@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/ableton-contained.log"
+mkdir -p "$LOG_DIR"
+
+warn_if_ableton_updates_present() {
+  local autoupdates="$WINEPREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/_autoupdates"
+  local updated="$WINEPREFIX/drive_c/ProgramData/Ableton/.Live 12 Suite_updated"
+  local found=0
+
+  if [[ -e "$autoupdates" ]]; then
+    printf 'WARNING: Ableton auto-update directory is present: %s\n' "$autoupdates"
+    found=1
+  fi
+
+  if [[ -e "$updated" ]]; then
+    printf 'WARNING: Ableton updater swap marker is present: %s\n' "$updated"
+    found=1
+  fi
+
+  if [[ "$found" -eq 1 ]]; then
+    printf 'WARNING: Ableton auto-updater state is unstable under Wine and may cause sharing violations or updater loops.\n'
+    printf 'WARNING: Run ./bin/disable-ableton-updates before launching the DAW session.\n'
+  fi
+}
+
+if ! command -v wine >/dev/null 2>&1; then
+  printf 'ERROR: wine not found on PATH.\n' >&2
+  exit 1
+fi
+
+if [[ ! -d "$WINEPREFIX" ]]; then
+  printf 'ERROR: WINEPREFIX does not exist: %s\n' "$WINEPREFIX" >&2
+  exit 1
+fi
+
+ableton_exe="$WINEPREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe"
+ableton_win_path='C:\ProgramData\Ableton\Live 12 Suite\Program\Ableton Live 12 Suite.exe'
+
+if [[ ! -f "$ableton_exe" ]]; then
+  printf 'ERROR: Ableton Live 12 Suite executable not found: %s\n' "$ableton_exe" >&2
+  exit 1
+fi
+
+warn_if_ableton_updates_present | tee -a "$LOG_FILE"
+
+printf '[%s] launching contained Ableton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$ableton_win_path" >>"$LOG_FILE"
+{
+  printf '[%s] effective environment before contained Ableton launch\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+  printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+  printf 'GDK_BACKEND=%s\n' "${GDK_BACKEND:-}"
+  printf 'QT_QPA_PLATFORM=%s\n' "${QT_QPA_PLATFORM:-}"
+  printf 'SDL_VIDEODRIVER=%s\n' "${SDL_VIDEODRIVER:-}"
+  printf 'DISPLAY=%s\n' "${DISPLAY:-}"
+  printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY:-}"
+  printf 'Wine desktop=ableton,1910x1070\n'
+  printf 'Ableton executable=%s\n' "$ableton_win_path"
+  if env | grep -E '^PYTHON' >/dev/null; then
+    printf 'Remaining PYTHON* variables:\n'
+    env | grep -E '^PYTHON' | sort
+  else
+    printf 'Remaining PYTHON* variables: none\n'
+  fi
+} | tee -a "$LOG_FILE"
+
+set +e
+wine explorer /desktop=ableton,1910x1070 "$ableton_win_path" 2>&1 | tee -a "$LOG_FILE"
+wine_status="${PIPESTATUS[0]}"
+set -e
+
+printf '[%s] contained Ableton wine exit code: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$wine_status" | tee -a "$LOG_FILE"
+exit "$wine_status"

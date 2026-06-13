@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/windowing-check.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+print_cmd_version() {
+  local label="$1"
+  shift
+
+  if have_cmd "$1"; then
+    printf '%s: ' "$label"
+    "$@" 2>/dev/null | head -n 1 || printf 'detectable command failed\n'
+  else
+    printf '%s: unavailable\n' "$label"
+  fi
+}
+
+print_process_matches() {
+  local label="$1"
+  local pattern="$2"
+
+  if pgrep -af "$pattern" >/dev/null 2>&1; then
+    printf '%s: running\n' "$label"
+    pgrep -af "$pattern" || true
+  else
+    printf '%s: not running\n' "$label"
+  fi
+}
+
+wine_reg_value() {
+  local key="$1"
+  local value_name="$2"
+  local output
+
+  if ! have_cmd wine; then
+    return 1
+  fi
+
+  output="$(wine reg query "$key" /v "$value_name" 2>/dev/null)" || return 1
+
+  awk -v value_name="$value_name" '
+    $1 == value_name {
+      value = $0
+      sub("^[[:space:]]*" value_name "[[:space:]]+REG_[^[:space:]]+[[:space:]]+", "", value)
+      sub(/\r$/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' <<<"$output"
+}
+
+print_wine_reg_value() {
+  local label="$1"
+  local key="$2"
+  local value_name="$3"
+  local value
+
+  if value="$(wine_reg_value "$key" "$value_name")"; then
+    printf '%s=%s\n' "$label" "$value"
+  else
+    printf '%s=unset\n' "$label"
+  fi
+}
+
+first_wine_desktop_value() {
+  local value
+
+  if value="$(wine_reg_value 'HKCU\Software\Wine\Explorer' 'Desktop')"; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+
+  if value="$(wine_reg_value 'HKCU\Software\Wine\Explorer\Desktops' 'Default')"; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+
+  return 1
+}
+
+print_compositor_status() {
+  local qdbus_cmd=""
+
+  if have_cmd qdbus6; then
+    qdbus_cmd="qdbus6"
+  elif have_cmd qdbus; then
+    qdbus_cmd="qdbus"
+  fi
+
+  if [[ -n "$qdbus_cmd" ]]; then
+    if "$qdbus_cmd" org.kde.KWin /Compositor org.kde.kwin.Compositing.active >/dev/null 2>&1; then
+      printf 'Compositor active: %s\n' "$("$qdbus_cmd" org.kde.KWin /Compositor org.kde.kwin.Compositing.active 2>/dev/null)"
+      return 0
+    fi
+    if "$qdbus_cmd" org.kde.KWin /KWin org.kde.KWin.compositingActive >/dev/null 2>&1; then
+      printf 'Compositor active: %s\n' "$("$qdbus_cmd" org.kde.KWin /KWin org.kde.KWin.compositingActive 2>/dev/null)"
+      return 0
+    fi
+  fi
+
+  if pgrep -x kwin_wayland >/dev/null 2>&1 || pgrep -x kwin_x11 >/dev/null 2>&1; then
+    printf 'Compositor active: unknown; KWin process detected\n'
+  else
+    printf 'Compositor active: unknown\n'
+  fi
+}
+
+print_dxvk_vkd3d_files() {
+  local matches
+
+  if [[ ! -d "$WINEPREFIX" ]]; then
+    printf 'WINEPREFIX missing: %s\n' "$WINEPREFIX"
+    return 0
+  fi
+
+  matches="$(find "$WINEPREFIX" \( -iname '*dxvk*' -o -iname '*vkd3d*' \) -print 2>/dev/null | sort)"
+  if [[ -n "$matches" ]]; then
+    printf 'FOUND: DXVK/VKD3D-related files in prefix\n'
+    printf '%s\n' "$matches"
+  else
+    printf 'NOT FOUND: DXVK/VKD3D-related files in prefix\n'
+  fi
+}
+
+printf '[%s] windowing check start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+section "Session environment"
+printf 'XDG_SESSION_TYPE=%s\n' "${XDG_SESSION_TYPE:-unset}"
+printf 'DISPLAY=%s\n' "${DISPLAY:-unset}"
+printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY:-unset}"
+
+section "KDE and KWin"
+print_cmd_version "KDE Plasma version" plasmashell --version
+if have_cmd kwin_wayland; then
+  print_cmd_version "KWin Wayland version" kwin_wayland --version
+elif have_cmd kwin_x11; then
+  print_cmd_version "KWin X11 version" kwin_x11 --version
+else
+  printf 'KWin version: unavailable\n'
+fi
+print_compositor_status
+
+section "Wine processes"
+print_process_matches "Wine process list" '([w]ine|[W]ine|wineserver|winedevice|services\.exe|explorer\.exe|Ableton|MIDITranslator|Bome)'
+
+section "Application status"
+print_process_matches "Ableton Live 12" 'Ableton Live 12|Ableton Live 12 Suite\.exe|Ableton Live 12 Standard\.exe|Ableton Live 12 Intro\.exe'
+print_process_matches "Bome MIDI Translator Pro" 'Bome|MIDITranslator|MIDI Translator'
+
+section "Wine graphics registry"
+print_wine_reg_value "Decorated" 'HKCU\Software\Wine\X11 Driver' "Decorated"
+print_wine_reg_value "Managed" 'HKCU\Software\Wine\X11 Driver' "Managed"
+if desktop_value="$(first_wine_desktop_value)"; then
+  printf 'Desktop=%s\n' "$desktop_value"
+  printf 'Wine virtual desktop appears enabled: yes\n'
+else
+  printf 'Desktop=unset\n'
+  printf 'Wine virtual desktop appears enabled: no\n'
+fi
+
+section "DXVK and VKD3D hints"
+print_dxvk_vkd3d_files
+
+printf '\n[%s] windowing check end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

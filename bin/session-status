@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/session-status.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+show_process() {
+  local label="$1"
+  local pattern="$2"
+
+  if pgrep -af "$pattern" >/dev/null 2>&1; then
+    printf 'RUNNING: %s\n' "$label"
+    pgrep -af "$pattern" || true
+  else
+    printf 'NOT RUNNING: %s\n' "$label"
+  fi
+}
+
+detect_ports() {
+  local label="$1"
+  local pattern="$2"
+  local data="$3"
+
+  if printf '%s\n' "$data" | grep -Ei "$pattern" >/dev/null 2>&1; then
+    printf 'VISIBLE: %s\n' "$label"
+    printf '%s\n' "$data" | grep -Ei "$pattern" || true
+  else
+    printf 'NOT VISIBLE: %s\n' "$label"
+  fi
+}
+
+printf '[%s] session status start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+section "Process status"
+show_process "Bome MIDI Translator Pro" 'Bome|MIDITranslator'
+show_process "Ableton Live" 'Ableton Live 12|Ableton Live 12 Suite.exe'
+show_process "Ableton Web Connector" 'Ableton Web Connector'
+show_process "Ableton Index" 'Ableton Index'
+show_process "wineserver" 'wineserver'
+show_process "pipewire" 'pipewire'
+show_process "wireplumber" 'wireplumber'
+
+section "WineASIO readiness"
+./bin/wineasio-check || true
+
+section "MIDI port highlights"
+midi_highlight_output=""
+if has_cmd aconnect; then
+  midi_highlight_output="$(printf '%s\n%s\n' "$midi_highlight_output" "$(aconnect -l 2>&1)")"
+fi
+if has_cmd pw-link; then
+  midi_highlight_output="$(printf '%s\n%s\n' "$midi_highlight_output" "$(pw-link -l 2>&1)")"
+fi
+if has_cmd pw-jack && has_cmd jack_lsp; then
+  midi_highlight_output="$(printf '%s\n%s\n' "$midi_highlight_output" "$(pw-jack jack_lsp -A 2>&1)")"
+fi
+
+detect_ports "Launchpad" 'Launchpad' "$midi_highlight_output"
+detect_ports "Novation" 'Novation' "$midi_highlight_output"
+detect_ports "VirMIDI" 'VirMIDI|Virtual Raw MIDI|Virtual MIDI' "$midi_highlight_output"
+detect_ports "WINE midi driver" 'WINE midi driver|WINE ALSA' "$midi_highlight_output"
+detect_ports "Bome" 'Bome|BMIDI|MIDITranslator|MIDI Translator' "$midi_highlight_output"
+detect_ports "Ableton" 'Ableton|Live 12|Live:' "$midi_highlight_output"
+
+section "MIDI summary"
+./bin/bome-midi-check || true
+
+printf '\n[%s] session status end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

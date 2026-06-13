@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/virmidi-check.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+run_or_warn() {
+  local label="$1"
+  shift
+
+  section "$label"
+  if has_cmd "$1"; then
+    "$@" || printf 'WARN: %s exited with code %s\n' "$*" "$?"
+  else
+    printf 'WARN: %s not found\n' "$1"
+  fi
+}
+
+printf '[%s] VirMIDI check start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+section "snd_virmidi loaded"
+if lsmod | grep -q '^snd_virmidi'; then
+  printf 'LOADED: snd_virmidi\n'
+  lsmod | grep -E '^snd_virmidi|^snd_seq_virmidi|^snd_seq|^snd_rawmidi' || true
+else
+  printf 'NOT LOADED: snd_virmidi\n'
+  lsmod | grep -E '^snd_seq|^snd_rawmidi' || true
+fi
+
+section "modinfo snd-virmidi"
+if has_cmd modinfo; then
+  modinfo snd-virmidi || printf 'WARN: modinfo snd-virmidi exited with code %s\n' "$?"
+else
+  printf 'WARN: modinfo not found\n'
+fi
+
+run_or_warn "ALSA sequencer ports: aconnect -l" aconnect -l
+run_or_warn "ALSA raw MIDI devices: amidi -l" amidi -l
+run_or_warn "PipeWire links: pw-link -l" pw-link -l
+
+section "JACK/PipeWire ports: pw-jack jack_lsp -A"
+if has_cmd pw-jack && has_cmd jack_lsp; then
+  pw-jack jack_lsp -A || printf 'WARN: pw-jack jack_lsp -A exited with code %s\n' "$?"
+else
+  printf 'WARN: pw-jack or jack_lsp not found\n'
+fi
+
+printf '\n[%s] VirMIDI check end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

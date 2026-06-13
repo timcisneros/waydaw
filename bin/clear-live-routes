@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/live-routes.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+find_port() {
+  local client_pattern="$1"
+  local port_pattern="$2"
+  local client_id=""
+  local in_client=0
+
+  while IFS= read -r line; do
+    case "$line" in
+      client\ * )
+        in_client=0
+        if printf '%s\n' "$line" | grep -Ei "$client_pattern" >/dev/null 2>&1; then
+          client_id="$(printf '%s\n' "$line" | sed -n "s/^client \([0-9][0-9]*\):.*/\1/p")"
+          in_client=1
+        fi
+        ;;
+      * )
+        if [ "$in_client" -eq 1 ] && printf '%s\n' "$line" | grep -Ei "$port_pattern" >/dev/null 2>&1; then
+          local port_id
+          port_id="$(printf '%s\n' "$line" | sed -n "s/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p")"
+          if [ "$client_id" != "" ] && [ "$port_id" != "" ]; then
+            printf '%s:%s\n' "$client_id" "$port_id"
+            return 0
+          fi
+        fi
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+disconnect_route() {
+  local src_label="$1"
+  local src="$2"
+  local dst_label="$3"
+  local dst="$4"
+
+  printf 'disconnect %s -> %s\n' "$src_label ($src)" "$dst_label ($dst)"
+  if aconnect -d "$src" "$dst" >/dev/null 2>&1; then
+    printf 'disconnected: %s -> %s\n' "$src" "$dst"
+  else
+    printf 'not connected or already absent: %s -> %s\n' "$src" "$dst"
+  fi
+}
+
+printf '[%s] clear live routes start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+if ! has_cmd aconnect; then
+  printf 'ERROR: aconnect not found\n'
+  exit 1
+fi
+
+aconnect_output="$(aconnect -l 2>&1)"
+
+launchpad_port="$(printf '%s\n' "$aconnect_output" | find_port 'Launchpad' 'Launchpad.*MIDI|MIDI')"
+virmidi_port="$(printf '%s\n' "$aconnect_output" | find_port 'Virtual Raw MIDI 1-0|VirMIDI 1-0' 'VirMIDI 1-0')"
+wine_port="$(printf '%s\n' "$aconnect_output" | find_port 'WINE midi driver' 'WINE ALSA Input')"
+
+printf 'Launchpad S port: %s\n' "${launchpad_port:-NOT FOUND}"
+printf 'VirMIDI 1-0 port: %s\n' "${virmidi_port:-NOT FOUND}"
+printf 'WINE ALSA Input port: %s\n' "${wine_port:-NOT FOUND}"
+
+if [ "${wine_port:-}" = "" ]; then
+  printf 'WINE ALSA Input not found; no live routes to clear.\n'
+  printf '[%s] clear live routes end\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+  exit 0
+fi
+
+if [ "${launchpad_port:-}" != "" ]; then
+  disconnect_route "Launchpad S" "$launchpad_port" "WINE ALSA Input" "$wine_port"
+else
+  printf 'skip: Launchpad S not found\n'
+fi
+
+if [ "${virmidi_port:-}" != "" ]; then
+  disconnect_route "VirMIDI 1-0" "$virmidi_port" "WINE ALSA Input" "$wine_port"
+else
+  printf 'skip: VirMIDI 1-0 not found\n'
+fi
+
+printf '\nFinal ALSA MIDI summary:\n'
+aconnect -l || printf 'WARN: aconnect -l exited with code %s\n' "$?"
+
+printf '[%s] clear live routes end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

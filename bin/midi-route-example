@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+cat <<'EOF'
+MIDI route examples only. Nothing is executed by this script.
+
+ALSA aconnect direction is:
+
+  aconnect SOURCE DESTINATION
+
+Recommended topology:
+
+  Bome OUT -> VirMIDI -> Ableton IN
+
+Example routes:
+
+  aconnect "VirMIDI 1-0:0" "WINE midi driver:0"
+  aconnect "WINE midi driver:0" "VirMIDI 1-0:0"
+
+Directionality:
+
+  "VirMIDI 1-0:0" -> "WINE midi driver:0"
+    Sends MIDI arriving at the VirMIDI port into Wine/Ableton.
+
+  "WINE midi driver:0" -> "VirMIDI 1-0:0"
+    Sends MIDI emitted by Wine/Ableton back toward the VirMIDI port.
+
+Actual ALSA client names and numeric IDs vary by boot, module load order,
+Wine process, and session state. Run:
+
+  ./bin/midi-route-inspect
+
+Then use the exact client/port names or client:port IDs shown on this machine.
+EOF

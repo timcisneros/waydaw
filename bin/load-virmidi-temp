@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/virmidi.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+printf '[%s] temporary VirMIDI load start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'This loads snd-virmidi temporarily until reboot or sudo modprobe -r snd-virmidi.\n'
+sudo modprobe snd-virmidi midi_devs=4
+./bin/virmidi-check
+printf '[%s] temporary VirMIDI load end\n' "$(date '+%Y-%m-%d %H:%M:%S')"

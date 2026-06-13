@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+status=0
+
+pass() {
+  printf 'PASS: %s\n' "$1"
+}
+
+fail() {
+  printf 'FAIL: %s\n' "$1"
+  status=1
+}
+
+warn() {
+  printf 'WARN: %s\n' "$1"
+}
+
+find_ableton_exe() {
+  local drive_c="$WINEPREFIX/drive_c"
+  local candidate
+
+  for candidate in \
+    "$drive_c/ProgramData/Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe" \
+    "$drive_c/ProgramData/Ableton/Live 12 Standard/Program/Ableton Live 12 Standard.exe" \
+    "$drive_c/ProgramData/Ableton/Live 12 Intro/Program/Ableton Live 12 Intro.exe" \
+    "$drive_c/Program Files/Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe" \
+    "$drive_c/Program Files/Ableton/Live 12 Standard/Program/Ableton Live 12 Standard.exe" \
+    "$drive_c/Program Files/Ableton/Live 12 Intro/Program/Ableton Live 12 Intro.exe" \
+    "$drive_c/Program Files (x86)/Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe" \
+    "$drive_c/Program Files (x86)/Ableton/Live 12 Standard/Program/Ableton Live 12 Standard.exe" \
+    "$drive_c/Program Files (x86)/Ableton/Live 12 Intro/Program/Ableton Live 12 Intro.exe"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  find "$drive_c" -type f -iname 'Ableton Live 12*.exe' 2>/dev/null | head -n 1
+}
+
+find_bome_exe() {
+  local drive_c="$WINEPREFIX/drive_c"
+  local candidate
+
+  for candidate in \
+    "$drive_c/Program Files/Bome MIDI Translator Pro/MIDITranslator.exe" \
+    "$drive_c/Program Files/Bome/Bome MIDI Translator Pro/MIDITranslator.exe" \
+    "$drive_c/Program Files (x86)/Bome MIDI Translator Pro/MIDITranslator.exe" \
+    "$drive_c/Program Files (x86)/Bome/Bome MIDI Translator Pro/MIDITranslator.exe"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  find "$drive_c" -type f \( -iname 'MIDITranslator*.exe' -o -iname 'Bome MIDI Translator*.exe' \) 2>/dev/null | head -n 1
+}
+
+if command -v wine >/dev/null 2>&1; then
+  pass "wine found: $(command -v wine)"
+else
+  fail "wine not found. Install Wine and ensure it is on PATH."
+fi
+
+if command -v wineserver >/dev/null 2>&1; then
+  pass "wineserver found: $(command -v wineserver)"
+else
+  fail "wineserver not found. Install the matching Wine package for your distro."
+fi
+
+if [[ -d "$WINEPREFIX" ]]; then
+  pass "WINEPREFIX exists: $WINEPREFIX"
+else
+  fail "WINEPREFIX missing: $WINEPREFIX. Create or restore the shared Ableton/Bome prefix."
+fi
+
+ableton_exe="$(find_ableton_exe)"
+if [[ -n "$ableton_exe" ]]; then
+  pass "Ableton Live 12 executable found: $ableton_exe"
+else
+  fail "Ableton Live 12 executable not found in $WINEPREFIX. Install Live 12 into this shared prefix."
+fi
+
+bome_exe="$(find_bome_exe)"
+if [[ -n "$bome_exe" ]]; then
+  pass "Bome executable found: $bome_exe"
+else
+  warn "Bome executable not found. This is OK only if Bome is not installed yet."
+fi
+
+session_type="${XDG_SESSION_TYPE:-unknown}"
+case "$session_type" in
+  wayland)
+    pass "current session type: wayland"
+    ;;
+  x11)
+    warn "current session type: x11. Harness still forces Wine-adjacent toolkits toward X11/XWayland."
+    ;;
+  *)
+    warn "current session type: $session_type. Expected KDE Plasma Wayland with XWayland available."
+    ;;
+esac
+
+if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+  pass "WAYLAND_DISPLAY is set: $WAYLAND_DISPLAY"
+else
+  warn "WAYLAND_DISPLAY is not set. You may not be in a Wayland session."
+fi
+
+if [[ -n "${DISPLAY:-}" ]]; then
+  pass "DISPLAY is set for XWayland/X11 compatibility: $DISPLAY"
+else
+  fail "DISPLAY is not set. XWayland/X11 clients cannot open windows."
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl --user --quiet is-active pipewire.service 2>/dev/null || pgrep -x pipewire >/dev/null 2>&1; then
+    pass "PipeWire is running"
+  else
+    fail "PipeWire does not appear to be running. Start the user PipeWire session before launching the DAW."
+  fi
+elif pgrep -x pipewire >/dev/null 2>&1; then
+  pass "PipeWire is running"
+else
+  fail "PipeWire does not appear to be running."
+fi
+
+printf '\nConfigured environment:\n'
+printf '  WINEPREFIX=%s\n' "$WINEPREFIX"
+printf '  GDK_BACKEND=%s\n' "$GDK_BACKEND"
+printf '  QT_QPA_PLATFORM=%s\n' "$QT_QPA_PLATFORM"
+printf '  SDL_VIDEODRIVER=%s\n' "$SDL_VIDEODRIVER"
+printf '  WINEDLLOVERRIDES=%s\n' "${WINEDLLOVERRIDES:-unset}"
+
+exit "$status"

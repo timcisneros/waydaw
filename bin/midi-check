@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/midi-check.log"
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+status=0
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+pass() {
+  printf 'PASS: %s\n' "$1"
+}
+
+warn() {
+  printf 'WARN: %s\n' "$1"
+}
+
+fail() {
+  printf 'FAIL: %s\n' "$1"
+  status=1
+}
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+run_if_available() {
+  local label="$1"
+  shift
+
+  section "$label"
+  if has_cmd "$1"; then
+    "$@" || warn "$* exited with code $?"
+  else
+    warn "$1 not found"
+  fi
+}
+
+printf '[%s] MIDI check start\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+
+section "PipeWire core"
+if has_cmd pw-cli; then
+  if pw-cli info 0 >/dev/null 2>&1; then
+    pass "pw-cli info 0 succeeded"
+  else
+    fail "pw-cli exists, but pw-cli info 0 failed. PipeWire may not be reachable for this user session."
+  fi
+else
+  fail "pw-cli not found. PipeWire diagnostics are limited."
+fi
+
+section "PipeWire status"
+if has_cmd systemctl; then
+  if systemctl --user --quiet is-active pipewire.service 2>/dev/null; then
+    pass "pipewire.service is active"
+  elif pgrep -x pipewire >/dev/null 2>&1; then
+    pass "pipewire process is running"
+  else
+    fail "PipeWire does not appear to be running"
+  fi
+elif pgrep -x pipewire >/dev/null 2>&1; then
+  pass "pipewire process is running"
+else
+  fail "PipeWire does not appear to be running"
+fi
+
+section "Tool availability"
+if has_cmd pw-top; then pass "pw-top available: $(command -v pw-top)"; else warn "pw-top not found"; fi
+if has_cmd a2jmidid; then pass "a2jmidid available: $(command -v a2jmidid)"; else warn "a2jmidid not found; ALSA sequencer ports may not appear as JACK MIDI ports"; fi
+if has_cmd aconnect; then pass "aconnect available: $(command -v aconnect)"; else fail "aconnect not found; cannot list ALSA MIDI sequencer ports"; fi
+if has_cmd pw-link; then pass "pw-link available: $(command -v pw-link)"; else warn "pw-link not found; cannot list PipeWire links"; fi
+if has_cmd jack_lsp; then pass "jack_lsp available: $(command -v jack_lsp)"; else warn "jack_lsp not found; JACK MIDI listing unavailable"; fi
+
+section "WineASIO registration status"
+if find "$WINEPREFIX" -iname 'wineasio.dll*' -o -iname 'wineasio*.dll*' 2>/dev/null | head -n 1 | grep -q .; then
+  pass "wineasio file found inside WINEPREFIX"
+else
+  warn "wineasio file not found inside WINEPREFIX"
+fi
+
+if has_cmd wine; then
+  if wine reg query 'HKCU\Software\Wine\DllOverrides' /v wineasio >/dev/null 2>&1; then
+    pass "wineasio DLL override is present in HKCU"
+  elif wine reg query 'HKLM\Software\Wine\DllOverrides' /v wineasio >/dev/null 2>&1; then
+    pass "wineasio DLL override is present in HKLM"
+  else
+    warn "wineasio DLL override not found in Wine registry. If Ableton cannot select WineASIO, registration may be missing."
+  fi
+else
+  warn "wine not found; skipped WineASIO registry check"
+fi
+
+run_if_available "ALSA MIDI devices: aconnect -l" aconnect -l
+run_if_available "ALSA raw MIDI devices: amidi -l" amidi -l
+run_if_available "JACK MIDI devices: jack_lsp" jack_lsp
+run_if_available "PipeWire links: pw-link -l" pw-link -l
+
+section "PipeWire MIDI nodes"
+if has_cmd pw-cli; then
+  pw-cli ls Node 2>/dev/null | grep -Ei 'midi|alsa|jack|bome|ableton|wine' || warn "No obvious MIDI-related PipeWire nodes found"
+else
+  warn "pw-cli not found"
+fi
+
+section "Actionable diagnostics"
+if ! has_cmd aconnect; then
+  printf 'ACTION: Install or expose ALSA sequencer tools for aconnect-based MIDI visibility checks.\n'
+fi
+if ! has_cmd a2jmidid; then
+  printf 'ACTION: If Ableton/Bome need JACK MIDI ports, install/start a2jmidid externally; this harness will not install it.\n'
+fi
+if has_cmd aconnect && ! aconnect -l 2>/dev/null | grep -E 'client [0-9]+:' >/dev/null; then
+  printf 'ACTION: No ALSA sequencer clients were listed. Check hardware MIDI devices and snd_seq availability.\n'
+fi
+printf 'ACTION: Do not rely on Bome BMIDI virtual kernel drivers under Wine. Use native Linux ALSA/JACK/PipeWire MIDI routing.\n'
+printf 'ACTION: In Ableton, verify MIDI ports under Preferences > Link, Tempo & MIDI after starting the bridge.\n'
+
+printf '\n[%s] MIDI check end\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+exit "$status"

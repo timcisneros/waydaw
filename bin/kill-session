@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+patterns=(
+  'Ableton Live 12'
+  'Ableton Index'
+  'Ableton Plugin Scanner'
+  'MIDITranslator'
+  'Bome MIDI Translator'
+  'Max'
+  'MaxRT'
+)
+
+for pattern in "${patterns[@]}"; do
+  pkill -TERM -f "$WINEPREFIX.*$pattern" 2>/dev/null || true
+  pkill -TERM -f "$pattern.*$WINEPREFIX" 2>/dev/null || true
+done
+
+sleep 2
+
+for pattern in "${patterns[@]}"; do
+  pkill -KILL -f "$WINEPREFIX.*$pattern" 2>/dev/null || true
+  pkill -KILL -f "$pattern.*$WINEPREFIX" 2>/dev/null || true
+done
+
+if command -v wineserver >/dev/null 2>&1; then
+  wineserver -k
+else
+  printf 'WARN: wineserver not found; skipped wineserver -k\n' >&2
+fi
