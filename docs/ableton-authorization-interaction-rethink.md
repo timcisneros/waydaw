@@ -272,6 +272,87 @@ H1/H2 from H3, and those demand different fixes.
   a time, or repeats a launch without a new discriminating measurement,
   is evidence we are guessing again — stop and re-open this note.
 
+## Diagnostic result (2026-07-03/04) — recommended next move EXECUTED
+
+The section-5 diagnostic ran via the new read-only probe
+`bin/ableton-auth-liveness-probe` (run bundle:
+`logs/ableton-auth-liveness-probe/20260703-231014/`, plus manual follow-up
+captures in the same directory). Working prefix launched through the
+non-mutating diagnostic launcher mode; no prefix/KWin/DXVK mutation, no click
+or keystroke into Ableton, authorization boundary preserved. Ableton was left
+running afterward (unix pid 176090).
+
+### Control result — notepad
+
+`wine notepad` (same prefix, same `env -u WAYLAND_DISPLAY` session) mapped
+fine and showed the **same** `WM_HINTS input=False` + `WM_TAKE_FOCUS` profile
+as Ableton's windows — that hinting is standard Wine, **not** a
+disabled-window signal (kills H2's main clue). Notepad was **not** activated
+on map and `wmctrl -ia` did **not** activate it either. Meanwhile KWin
+activated Ableton's dialog on map and again on focus-fallback after notepad
+was killed. Conclusion: `wmctrl`-style external X-client activation requests
+are unreliable session-wide under this KWin/Wayland session (focus-stealing
+heuristics for script-launched X clients), so **the 2026-06-25 activation
+failures were a measurement artifact and implicate neither Ableton nor Wine
+focus handling**. H3 and H4 are retired as blocker candidates; H4 survives
+only as a benign measurement caveat.
+
+### Ableton client-liveness result — H1 confirmed, refined
+
+The one clean activation attempt against the real authorization dialog
+(`0x0aa00009`, 512x479) reproduced the June result exactly
+(`_NET_ACTIVE_WINDOW` unchanged at +1 s/+5 s) — now explained by the above.
+
+Thread evidence (winedbg attach/detach + `/proc` sampling, ptrace_scope=0):
+
+1. **Startup phase:** the main/UI thread ran at ~94% CPU with ~76 k context
+   switches per 3 s, three `WINPROC_wrapper` levels deep in re-entrant
+   sent-message handling (msgs `0x401`/`0x406`), innermost app code polling
+   `timeGetTime` — a nested pump spin, not a healthy message wait.
+2. **End state (persistent across 23:17 → 05:02, ten identical samples):**
+   the main thread is parked in `RtlAcquireSRWLockExclusive(0xB34E90)` called
+   from `d3d11` (the prefix's DXVK debug 2.7 build), reached from *inside* a
+   winproc that is itself handling a synchronous cross-thread message.
+   CPU is now **0**; total lifetime CPU ~65 s over a 6 h process. The thread
+   never ran again.
+3. **The lock word reads `owners=0x0003, exclusive_waiters=0x0001`** — the
+   SRW lock is genuinely held by three shared owners that never released it;
+   the sole exclusive waiter is the UI thread. No living thread shows a
+   d3d11 frame holding it (all DXVK workers idle in
+   `SleepConditionVariableSRW`, which releases their locks) — the shared
+   ownership is leaked/orphaned.
+4. **Collateral:** Ableton helper thread `0188` is wedged in a synchronous
+   `SendMessageW` to the dead UI thread. Every input, focus
+   (`WM_TAKE_FOCUS`), cursor (`WM_SETCURSOR`) and close/ping message for both
+   Ableton windows queues behind a thread that will never resume.
+5. WebView2 was fully alive this session (browser/GPU-SwiftShader/renderer/
+   network processes present, no crash-out during the probe) — the deadlock
+   happened anyway, further detaching the blocker from WebView2.
+
+### Verdict
+
+**H1 confirmed with a specific mechanism: the UI thread first spins in
+Ableton's nested sent-message pump, then deadlocks permanently on a leaked
+shared-mode SRW lock inside the d3d11 (DXVK) layer under wine-staging 11.0.**
+Every user-visible symptom (visible-but-dead authorization dialog, no focus
+response, vanishing cursor, freeze, crash-on-interaction, X11-vs-Wayland
+invariance, WebView2 independence) is downstream of this. Focus/KWin work,
+virtual-desktop trials, and WebView2 suppression are all dead ends for this
+blocker.
+
+### Single next recommended move
+
+Rerun the **existing reversible DXVK-version A/B**
+(`bin/ableton-dxvk-version-test`, official 2.7.1 vs the installed 19 MB debug
+2.7 build) **with thread-stack capture added** (the probe's winedbg sequence)
+and compare end-state main-thread stacks. The earlier A/B judged only
+user-visible usability; it never established whether the official build
+reaches the *same* lock deadlock. Outcome decides the layer:
+same deadlock under official DXVK → Wine 11.0 SRW/base problem (pursue newer
+system Wine); no deadlock under official DXVK → the custom debug DXVK build
+is the culprit (replace it). This uses an already-approved reversible
+procedure and one launch.
+
 ## Relationship to existing constraints
 
 This note changes no constraint. It flags one for conditional review: the

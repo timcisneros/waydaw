@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# Read-only diagnostic for the authorization-dialog interaction blocker.
+# Implements the recommended next move from
+# docs/ableton-authorization-interaction-rethink.md:
+#   1. launch (or reuse) Ableton via the non-mutating diagnostic launcher mode
+#   2. record window/focus/KWin state while the authorization dialog is visible
+#   3. sample unix-level thread activity (no attach)
+#   4. perform exactly ONE activation attempt against the dialog (no clicks)
+#   5. run a same-session `wine notepad` focus control (killed hard afterward
+#      so it cannot write exit-time state into the prefix)
+#   6. attach gdb and winedbg non-interactively, dump thread backtraces, detach
+#
+# Hard rules enforced here: no wine reg writes, no winecfg, no prefix file
+# changes, no KWin/DXVK changes, no clicks or typing into Ableton, Ableton is
+# left running afterward.
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+export DISPLAY="${DISPLAY:-:0}"
+
+TS="$(date +%Y%m%d-%H%M%S)"
+RUN_DIR="$ROOT_DIR/logs/ableton-auth-liveness-probe/$TS"
+mkdir -p "$RUN_DIR"
+SUMMARY="$RUN_DIR/summary.env"
+
+kv() { printf '%s=%s\n' "$1" "${2:-}" | tee -a "$SUMMARY"; }
+log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+
+active_window_id() {
+  xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | awk '{print $NF}'
+}
+
+window_title() {
+  local id="$1"
+  [[ "$id" =~ ^0x[0-9a-fA-F]+$ ]] || { printf 'none'; return; }
+  xprop -id "$id" _NET_WM_NAME WM_NAME 2>/dev/null | head -2 | tr '\n' ' '
+}
+
+active_snapshot() {
+  local label="$1" id
+  id="$(active_window_id)"
+  kv "${label}_active_window" "$id"
+  kv "${label}_active_title" "$(window_title "$id" | sed 's/=/:/g')"
+}
+
+dialog_focused_state() {
+  local label="$1"
+  local state
+  state="$(xprop -id "$DIALOG_ID" _NET_WM_STATE 2>/dev/null | sed 's/^[^=]*= *//')"
+  kv "${label}_dialog_net_wm_state" "${state:-unreadable}"
+}
+
+# ---------------------------------------------------------------- preflight
+log "run dir: $RUN_DIR"
+kv run_dir "${RUN_DIR#"$ROOT_DIR"/}"
+kv probe_started "$(date '+%Y-%m-%d %H:%M:%S')"
+kv wineprefix "$WINEPREFIX"
+kv display "$DISPLAY"
+kv wayland_display_host "${WAYLAND_DISPLAY:-empty}"
+
+for t in wmctrl xprop xwininfo winedbg gdb; do
+  if command -v "$t" >/dev/null 2>&1; then kv "tool_$t" present; else kv "tool_$t" missing; fi
+done
+kv ptrace_scope "$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo unknown)"
+
+fsp="$(kreadconfig6 --file kwinrc --group Windows --key FocusStealingPreventionLevel 2>/dev/null)"
+fpol="$(kreadconfig6 --file kwinrc --group Windows --key FocusPolicy 2>/dev/null)"
+kv kwin_focus_stealing_prevention "${fsp:-default(1)}"
+kv kwin_focus_policy "${fpol:-default(ClickToFocus)}"
+sed -n '/^\[Windows\]/,/^\[/p' "$HOME/.config/kwinrc" > "$RUN_DIR/kwinrc-windows-section.txt" 2>/dev/null || true
+
+# ------------------------------------------------------- session (launch/reuse)
+find_ableton_pid() { pgrep -f 'Ableton Live 12 Suite\.exe' | head -1; }
+
+ABLETON_PID="$(find_ableton_pid)"
+if [[ -n "$ABLETON_PID" ]]; then
+  kv session_source reused_existing
+else
+  kv session_source launched_diagnostic_mode
+  kv launch_command 'WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY=1 WAYDAW_ABLETON_GRAPHICS=dxvk ./bin/ableton'
+  setsid env WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY=1 WAYDAW_ABLETON_GRAPHICS=dxvk \
+    "$ROOT_DIR/bin/ableton" >"$RUN_DIR/launcher.out" 2>&1 &
+  kv launcher_shell_pid "$!"
+  for _ in $(seq 1 60); do
+    ABLETON_PID="$(find_ableton_pid)"
+    [[ -n "$ABLETON_PID" ]] && break
+    sleep 2
+  done
+fi
+
+if [[ -z "$ABLETON_PID" ]]; then
+  kv ableton_process_found no
+  kv probe_result aborted_no_ableton_process
+  exit 1
+fi
+kv ableton_process_found yes
+kv ableton_unix_pid "$ABLETON_PID"
+
+# --------------------------------------------------- wait for the auth dialog
+# Transient dialog-typed windows exist during early startup and vanish within
+# seconds; a candidate only counts once the same window id survives two
+# consecutive polls with readable properties.
+DIALOG_ID=""
+PARENT_ID=""
+prev_candidate=""
+log "waiting for Ableton authorization dialog window"
+for _ in $(seq 1 150); do
+  candidate=""
+  candidate_tf=""
+  while IFS= read -r line; do
+    id="$(awk '{print $1}' <<<"$line")"
+    wtype="$(xprop -id "$id" _NET_WM_WINDOW_TYPE 2>/dev/null)"
+    [[ "$wtype" == *DIALOG* ]] || continue
+    tf="$(xprop -id "$id" WM_TRANSIENT_FOR 2>/dev/null | awk '{print $NF}')"
+    [[ "$tf" =~ ^0x[0-9a-fA-F]+$ ]] || continue
+    candidate="$id"
+    candidate_tf="$tf"
+    break
+  done < <(wmctrl -lx 2>/dev/null | grep -i 'ableton live 12 suite\.exe' || true)
+  if [[ -n "$candidate" && "$candidate" == "$prev_candidate" ]] \
+    && xprop -id "$candidate" WM_HINTS >/dev/null 2>&1; then
+    DIALOG_ID="$candidate"
+    PARENT_ID="$candidate_tf"
+    break
+  fi
+  prev_candidate="$candidate"
+  sleep 2
+done
+
+if [[ -z "$DIALOG_ID" ]]; then
+  kv dialog_detected no
+  kv probe_result aborted_no_dialog_window
+  wmctrl -lpG -x >"$RUN_DIR/wmctrl-no-dialog.txt" 2>&1 || true
+  exit 1
+fi
+kv dialog_detected yes
+kv dialog_window_id "$DIALOG_ID"
+kv parent_window_id "$PARENT_ID"
+sleep 5
+
+# --------------------------------------------------------- static evidence
+log "collecting static window/process evidence"
+ps -eo pid,ppid,stat,etime,args | grep -Ei 'ableton|wine|msedge' | grep -v grep \
+  >"$RUN_DIR/process-snapshot.txt" 2>&1 || true
+kv webview2_process_count "$(grep -ci 'msedgewebview2\.exe' "$RUN_DIR/process-snapshot.txt" || true)"
+
+wmctrl -lpG -x >"$RUN_DIR/wmctrl-lpGx.txt" 2>&1 || true
+"$ROOT_DIR/bin/ableton-window-ownership-probe" >"$RUN_DIR/ownership-probe.txt" 2>&1 || true
+
+for pair in "dialog:$DIALOG_ID" "parent:$PARENT_ID"; do
+  name="${pair%%:*}"; id="${pair#*:}"
+  xprop -id "$id" WM_HINTS WM_PROTOCOLS _NET_WM_STATE _NET_WM_WINDOW_TYPE \
+    WM_TRANSIENT_FOR _NET_WM_PID WM_CLASS WM_NAME _NET_WM_NAME \
+    >"$RUN_DIR/xprop-$name.txt" 2>&1 || true
+  accepts="$(grep -i 'accepts input or input focus' "$RUN_DIR/xprop-$name.txt" | awk -F: '{gsub(/ /,"",$2); print $2}')"
+  protos="$(grep -m1 '^WM_PROTOCOLS' "$RUN_DIR/xprop-$name.txt" | sed 's/^[^:]*: *//')"
+  kv "${name}_accepts_focus_hint" "${accepts:-unreadable}"
+  kv "${name}_wm_protocols" "${protos:-unreadable}"
+done
+
+active_snapshot pre_activation
+
+# ------------------------------------- unix-level thread activity (no attach)
+log "sampling unix-level thread activity"
+sample_threads() {
+  local out="$1" tid
+  for tdir in /proc/"$ABLETON_PID"/task/*/; do
+    tid="$(basename "$tdir")"
+    stat_line="$(cat "$tdir/stat" 2>/dev/null)" || continue
+    name="$(awk -F'[()]' '{print $2}' <<<"$stat_line")"
+    state="$(awk -F') ' '{split($2,a," "); print a[1]}' <<<"$stat_line")"
+    cpu="$(awk -F') ' '{split($2,a," "); print a[12]+a[13]}' <<<"$stat_line")"
+    vctx="$(grep -m1 voluntary_ctxt_switches "$tdir/status" 2>/dev/null | awk '{print $2}')"
+    nvctx="$(grep -m1 nonvoluntary_ctxt_switches "$tdir/status" 2>/dev/null | awk '{print $2}')"
+    printf '%s|%s|%s|%s|%s|%s\n' "$tid" "$name" "$state" "$cpu" "${vctx:-0}" "${nvctx:-0}"
+  done >"$out"
+}
+sample_threads "$RUN_DIR/threads-sample-1.txt"
+sleep 3
+sample_threads "$RUN_DIR/threads-sample-2.txt"
+join -t'|' -j1 <(sort "$RUN_DIR/threads-sample-1.txt") <(sort "$RUN_DIR/threads-sample-2.txt") 2>/dev/null | awk -F'|' '
+  { delta_cpu=$9-$4; delta_ctx=($10+$11)-($5+$6);
+    printf "tid=%s name=%s state=%s->%s delta_cpu_ticks=%d delta_ctx_switches=%d\n",
+      $1,$2,$3,$8,delta_cpu,delta_ctx }' >"$RUN_DIR/threads-delta.txt" || true
+kv thread_count "$(wc -l <"$RUN_DIR/threads-sample-2.txt")"
+kv threads_with_ctx_activity "$(awk '/delta_ctx_switches=/{n=$NF; sub(/.*=/,"",n); if (n+0>0) c++} END{print c+0}' "$RUN_DIR/threads-delta.txt")"
+main_delta="$(grep "^tid=$ABLETON_PID " "$RUN_DIR/threads-delta.txt" || true)"
+kv main_thread_delta "${main_delta:-unreadable}"
+
+# ---------------------------------------------- single activation observation
+log "single activation attempt against the dialog"
+dialog_focused_state pre_activation
+kv activation_command "wmctrl -ia $DIALOG_ID"
+wmctrl -ia "$DIALOG_ID" 2>>"$RUN_DIR/activation.err" || kv activation_command_failed yes
+sleep 1
+active_snapshot post_activation_1s
+dialog_focused_state post_activation_1s
+sleep 4
+active_snapshot post_activation_5s
+dialog_focused_state post_activation_5s
+
+# ------------------------------------------------------- notepad focus control
+log "same-session wine notepad control"
+active_snapshot pre_notepad
+setsid env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" wine notepad \
+  >"$RUN_DIR/notepad.out" 2>&1 &
+NOTEPAD_ID=""
+for _ in $(seq 1 30); do
+  NOTEPAD_ID="$(wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /notepad/ {print $1; exit}')"
+  [[ -n "$NOTEPAD_ID" ]] && break
+  sleep 2
+done
+if [[ -z "$NOTEPAD_ID" ]]; then
+  kv notepad_window_detected no
+else
+  kv notepad_window_detected yes
+  kv notepad_window_id "$NOTEPAD_ID"
+  sleep 2
+  xprop -id "$NOTEPAD_ID" WM_HINTS WM_PROTOCOLS _NET_WM_STATE WM_CLASS \
+    >"$RUN_DIR/xprop-notepad.txt" 2>&1 || true
+  n_accepts="$(grep -i 'accepts input or input focus' "$RUN_DIR/xprop-notepad.txt" | awk -F: '{gsub(/ /,"",$2); print $2}')"
+  n_protos="$(grep -m1 '^WM_PROTOCOLS' "$RUN_DIR/xprop-notepad.txt" | sed 's/^[^:]*: *//')"
+  kv notepad_accepts_focus_hint "${n_accepts:-unreadable}"
+  kv notepad_wm_protocols "${n_protos:-unreadable}"
+  auto_active="$(active_window_id)"
+  kv notepad_active_after_map "$([[ "${auto_active,,}" == "${NOTEPAD_ID,,}" ]] && echo yes || echo no)"
+  if [[ "${auto_active,,}" != "${NOTEPAD_ID,,}" ]]; then
+    wmctrl -ia "$NOTEPAD_ID" 2>>"$RUN_DIR/activation.err" || true
+    sleep 1
+    kv notepad_active_after_wmctrl "$([[ "$(active_window_id)" == "${NOTEPAD_ID,,}" ]] && echo yes || echo no)"
+    kv notepad_net_wm_state_after_wmctrl "$(xprop -id "$NOTEPAD_ID" _NET_WM_STATE 2>/dev/null | sed 's/^[^=]*= *//')"
+  fi
+  # hard-kill so notepad cannot write exit-time settings into the prefix
+  NOTEPAD_PID="$(xprop -id "$NOTEPAD_ID" _NET_WM_PID 2>/dev/null | awk '{print $NF}')"
+  if [[ "$NOTEPAD_PID" =~ ^[0-9]+$ && -r "/proc/$NOTEPAD_PID/cmdline" ]] \
+    && tr '\0' ' ' <"/proc/$NOTEPAD_PID/cmdline" | grep -qi notepad; then
+    kill -9 "$NOTEPAD_PID" 2>/dev/null && kv notepad_killed yes || kv notepad_killed no
+  else
+    kv notepad_killed pid_not_confirmed
+  fi
+fi
+active_snapshot post_notepad
+
+# ------------------------------------------- debugger attach (gdb + winedbg)
+log "gdb batch thread backtraces"
+timeout 120 gdb -batch -p "$ABLETON_PID" \
+  -ex 'set pagination off' -ex 'info threads' -ex 'thread apply all bt' \
+  >"$RUN_DIR/gdb-threads.txt" 2>&1
+kv gdb_exit_code "$?"
+kv gdb_thread_count "$(grep -c '^Thread ' "$RUN_DIR/gdb-threads.txt" || true)"
+
+log "winedbg process list + attach backtraces"
+timeout 90 env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" \
+  winedbg --command "info process" >"$RUN_DIR/winedbg-process-list.txt" 2>&1
+kv winedbg_list_exit_code "$?"
+WINPID="$(grep -i 'ableton live 12 suite\.exe' "$RUN_DIR/winedbg-process-list.txt" \
+  | awk '{gsub(/^0+/,"",$1); print $1; exit}')"
+kv ableton_win_pid "${WINPID:-not_found}"
+if [[ -n "$WINPID" ]]; then
+  {
+    printf 'attach 0x%s\n' "$WINPID"
+    printf 'info process\ninfo threads\nbt all\ndetach\nquit\n'
+  } >"$RUN_DIR/winedbg-commands.txt"
+  timeout 300 env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" \
+    winedbg <"$RUN_DIR/winedbg-commands.txt" >"$RUN_DIR/winedbg-bt.txt" 2>&1
+  kv winedbg_bt_exit_code "$?"
+else
+  kv winedbg_bt_exit_code not_run
+fi
+
+# ------------------------------------------------------------------ post-state
+kv ableton_alive_after_probe "$([[ -n "$(find_ableton_pid)" ]] && echo yes || echo no)"
+active_snapshot final
+kv authorization_control_activated no
+kv keyboard_or_click_sent_to_ableton no
+kv prefix_registry_mutated_by_probe no
+kv kwin_config_mutated no
+kv probe_result completed
+log "done: $RUN_DIR"
