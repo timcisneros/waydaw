@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Controlled, REVERSIBLE DXVK-version A/B for the 64-bit Ableton (system32 x64).
+#
+# Usage:
+#   bin/ableton-dxvk-version-test <alt_dxvk_dir> [label]
+#
+# <alt_dxvk_dir> must contain the alternate x64 d3d11.dll and dxgi.dll (a DXVK
+# release's x64/ folder, or a folder holding those two files). The CURRENT DXVK
+# dlls are backed up to a timestamped dir, the alternate is swapped in, Ableton is
+# launched (normal DXVK logging — NOT DXVK_LOG_LEVEL=none), the session probe runs,
+# then the ORIGINAL dlls are restored automatically (trap). A restore command is
+# printed BEFORE anything is moved.
+#
+# Safety: copies only (no deletes); does not touch syswow64, launcher, dxvk.conf,
+# KWin, Wine build, or virtual desktop. Working prefix is restored to its exact
+# pre-test bytes (sha256-verified).
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+LOG_DIR="$ROOT_DIR/logs"
+SYS="$WINEPREFIX/drive_c/windows/system32"
+TS="$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="$WINEPREFIX/_waydaw_dxvk_version_backup_$TS"
+
+kv() { printf '%s=%s\n' "$1" "${2:-unknown}"; }
+ver_of() { strings -n4 "$1" 2>/dev/null | grep -m1 -oE 'DXVK[: ]*v?[0-9]+\.[0-9]+(\.[0-9]+)?' || echo none; }
+
+alt_dir="${1:-}"
+label="${2:-}"
+if [[ -z "$alt_dir" ]]; then
+  echo "usage: $(basename "$0") <alt_dxvk_dir> [label]" >&2; exit 2
+fi
+# accept either the dir with the dlls, or a release root containing x64/
+if [[ -f "$alt_dir/d3d11.dll" && -f "$alt_dir/dxgi.dll" ]]; then :;
+elif [[ -f "$alt_dir/x64/d3d11.dll" && -f "$alt_dir/x64/dxgi.dll" ]]; then alt_dir="$alt_dir/x64";
+else
+  echo "ERROR: $alt_dir must contain d3d11.dll and dxgi.dll (or x64/d3d11.dll, x64/dxgi.dll)" >&2; exit 2
+fi
+[[ -z "$label" ]] && label="$(ver_of "$alt_dir/d3d11.dll" | tr -d ' :' )"
+[[ -z "$label" || "$label" == "none" ]] && label="alt$TS"
+
+printf '[dxvk_version_test]\n'
+kv "alt_dxvk_dir" "$alt_dir"
+kv "label" "$label"
+
+printf '\n[current_dxvk_fingerprint]\n'
+for f in d3d11.dll dxgi.dll; do
+  kv "current_${f}_sha256" "$(sha256sum "$SYS/$f" 2>/dev/null | awk '{print $1}')"
+  kv "current_${f}_size" "$(stat -c '%s' "$SYS/$f" 2>/dev/null)"
+  kv "current_${f}_version" "$(ver_of "$SYS/$f")"
+done
+
+printf '\n[alternate_dxvk_fingerprint]\n'
+for f in d3d11.dll dxgi.dll; do
+  kv "alt_${f}_sha256" "$(sha256sum "$alt_dir/$f" 2>/dev/null | awk '{print $1}')"
+  kv "alt_${f}_size" "$(stat -c '%s' "$alt_dir/$f" 2>/dev/null)"
+  kv "alt_${f}_version" "$(ver_of "$alt_dir/$f")"
+done
+
+# Backup current, print restore command.
+mkdir -p "$BACKUP_DIR"
+cp -f "$SYS/d3d11.dll" "$BACKUP_DIR/d3d11.dll"
+cp -f "$SYS/dxgi.dll"  "$BACKUP_DIR/dxgi.dll"
+printf '\n[fallback_restore_command]\n'
+printf 'cp -f "%s/d3d11.dll" "%s/d3d11.dll"; cp -f "%s/dxgi.dll" "%s/dxgi.dll"\n' "$BACKUP_DIR" "$SYS" "$BACKUP_DIR" "$SYS"
+
+restored=0
+restore() {
+  printf '\n[restore]\n'
+  cp -f "$BACKUP_DIR/d3d11.dll" "$SYS/d3d11.dll" 2>/dev/null
+  cp -f "$BACKUP_DIR/dxgi.dll"  "$SYS/dxgi.dll"  2>/dev/null
+  local ok=1
+  for f in d3d11.dll dxgi.dll; do
+    if [[ "$(sha256sum "$SYS/$f" 2>/dev/null | awk '{print $1}')" == "$(sha256sum "$BACKUP_DIR/$f" 2>/dev/null | awk '{print $1}')" ]]; then
+      kv "restored_$f" "ok"
+    else
+      kv "restored_$f" "MISMATCH"; ok=0
+    fi
+  done
+  kv "restore_verified" "$([[ $ok -eq 1 ]] && echo true || echo false)"
+  kv "backup_dir_kept" "$BACKUP_DIR"
+  restored=1
+}
+trap 'restore' EXIT INT TERM
+
+# Swap in the alternate.
+printf '\n[swap_in_alternate]\n'
+"$ROOT_DIR/bin/kill-session" >/dev/null 2>&1 || true
+sleep 1
+cp -f "$alt_dir/d3d11.dll" "$SYS/d3d11.dll"
+cp -f "$alt_dir/dxgi.dll"  "$SYS/dxgi.dll"
+kv "active_d3d11_version_now" "$(ver_of "$SYS/d3d11.dll")"
+kv "active_d3d11_size_now" "$(stat -c '%s' "$SYS/d3d11.dll" 2>/dev/null)"
+
+# Launch (normal logging) + wait for tall main window.
+printf '\n[launch_and_probe]\n'
+"$ROOT_DIR/bin/ableton" > "$LOG_DIR/ableton-dxvk-$label-launch.log" 2>&1 &
+launched=no
+for i in $(seq 1 90); do
+  if wmctrl -lxG 2>/dev/null | grep -iF 'ableton live 12 suite' | grep -v xwaylandvideobridge | awk '$6>500{f=1} END{exit !f}'; then
+    launched=yes; kv "main_window_after_s" "$i"; break
+  fi
+  sleep 1
+done
+kv "ableton_launched" "$launched"
+if [[ "$launched" != yes ]]; then
+  kv "derived_issue" "dxvk_${label}_failed_to_launch"
+  kv "launch_log_tail" "see $LOG_DIR/ableton-dxvk-$label-launch.log"
+  tail -n 25 "$LOG_DIR/ableton-dxvk-$label-launch.log" 2>/dev/null
+  "$ROOT_DIR/bin/kill-session" >/dev/null 2>&1 || true
+  exit 0   # trap restores
+fi
+sleep 3
+
+# Opt-in end-state thread capture (WAYDAW_DXVK_AB_ENDSTATE=1): dwell until the
+# session reaches its steady failure state, then capture thread stacks via
+# bin/ableton-thread-endstate-capture before the probe/kill/restore flow.
+if [[ "${WAYDAW_DXVK_AB_ENDSTATE:-0}" == 1 ]]; then
+  dwell="${WAYDAW_DXVK_AB_ENDSTATE_DWELL:-480}"
+  printf '\n[endstate_capture]\n'
+  kv "endstate_dwell_seconds" "$dwell"
+  sleep "$dwell"
+  ENDSTATE_DIR="$LOG_DIR/ableton-dxvk-endstate-ab/$TS-$label"
+  "$ROOT_DIR/bin/ableton-thread-endstate-capture" "$ENDSTATE_DIR" "$label"
+  kv "endstate_dir" "$ENDSTATE_DIR"
+fi
+PROBE_FILE="$LOG_DIR/ableton-session-probe-dxvk-$label.txt"
+"$ROOT_DIR/bin/ableton-session-probe" | tee "$PROBE_FILE"
+"$ROOT_DIR/bin/kill-session" >/dev/null 2>&1 || true
+
+printf '\n[result]\n'
+kv "dxvk_version" "$label"
+kv "probe_file" "$PROBE_FILE"
+grep -E '^(window_detected|backend_effective|VK_SUBOPTIMAL_KHR_count|recreating_swapchain_count|Presenter_count|swapchain_buffer_size_values|log_line_count)=' "$PROBE_FILE" 2>/dev/null
+kv "user_flicker_observation" "NEEDS_USER_OBSERVATION"
+kv "user_responsiveness_observation" "NEEDS_USER_OBSERVATION"
+# trap restores original DXVK on exit
+exit 0

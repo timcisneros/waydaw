@@ -353,6 +353,62 @@ system Wine); no deadlock under official DXVK → the custom debug DXVK build
 is the culprit (replace it). This uses an already-approved reversible
 procedure and one launch.
 
+## DXVK-version A/B with end-state thread capture (2026-07-04) — EXECUTED
+
+Mechanism: `bin/ableton-dxvk-version-test` (reversible swap, sha256-verified
+restore) with a new opt-in end-state block (`WAYDAW_DXVK_AB_ENDSTATE=1`,
+480 s dwell) that calls `bin/ableton-thread-endstate-capture` — the winedbg
+capture logic factored out of `bin/ableton-auth-liveness-probe`. Launches ran
+through the non-mutating diagnostic launcher env
+(`WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY=1 WAYDAW_ABLETON_GRAPHICS=dxvk`).
+
+### Arm results
+
+| | custom/debug DXVK 2.7 (19 MB) | official DXVK 2.7.1 (release) |
+|---|---|---|
+| End-state evidence | run `20260703-231014` (previous night, same launch path) | run `logs/ableton-dxvk-endstate-ab/20260704-122125-official271b` |
+| Auth dialog appears | yes | yes (`0x0a600009`, transient for `0xa600003`) |
+| Main thread end state | `RtlAcquireSRWLockExclusive(0xB34E90)` from **d3d11**, inside nested winprocs | `RtlAcquireSRWLockExclusive(0x12B4ADD0)` from **dxgi**, same nesting |
+| Main thread CPU at end | 0 ticks/3 s | 0 ticks/3 s (state S, 2331 lifetime ticks) |
+| SRW lock word | `owners=0x0003 exclusive_waiters=0x0001` | `owners=0x0003 exclusive_waiters=0x0001` |
+| Thread stuck in `SendMessageW` to UI thread | yes (`0188`) | yes (`0190`) |
+| WebView2 at capture | alive (full tree) | absent (count 0) |
+| Ableton caller frames into the lock | `+0x311af7f +0x30b5d5a +0x30ae8a9 +0x31211bd +0x312e725` | identical offsets |
+| UI interactable | no; user click while deadlocked → fatal SEH on thread 0024: `Exception frame is not in stack limits` (2026-07-04 launch log) | no (untested by click; hands-off run) |
+
+Both today's arm-1 dwell (user click-crash destroyed the session mid-run) and
+an aborted first official run (`official271`, SIGTERM ~80 s in) produced no
+end state; the table's custom-arm column therefore cites the prior night's
+full capture, which used the same launcher path and persisted 6 h. DXVK
+restore was sha256-verified after every run; prefix DXVK is the original
+debug build again.
+
+### Verdict
+
+**The custom/debug DXVK build is NOT the cause.** The identical deadlock —
+same Ableton call path, same lock-word signature (three leaked shared owners,
+one exclusive waiter), same `SendMessageW` collateral — occurs under the
+official DXVK 2.7.1, merely surfacing in `dxgi` instead of `d3d11`. The
+recurring exact `owners=0x0003` across different DXVK builds and different
+lock objects points at the layer both builds share: **wine-staging 11.0's SRW
+lock / wait-on-address implementation** (or its interaction with Ableton's
+re-entrant nested message pumps). WebView2 presence/absence is again
+irrelevant.
+
+The user-click fatal exception on the deadlocked thread also explains the
+historical `crash_on_interaction` observations.
+
+### Next move after this A/B
+
+Test a **genuinely different Wine base** — but unlike the abandoned runner
+exploration, the target is now precise and falsifiable: does the UI thread
+still park in `RtlAcquireSRWLockExclusive` with `owners=3/waiters=1`? The
+cheapest constraint-compliant candidate is plain (non-staging) Wine or a
+newer Wine release, checked with the same end-state capture. This narrow
+question also makes an upstream WineHQ bug search / report actionable for
+the first time ("SRW shared owners leak under re-entrant sent-message
+pumping, wine-staging 11.0, DXVK client").
+
 ## Relationship to existing constraints
 
 This note changes no constraint. It flags one for conditional review: the

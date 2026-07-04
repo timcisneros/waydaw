@@ -1809,3 +1809,30 @@ retired_as_blockers=KWin focus, Wine WM_TAKE_FOCUS, WebView2 ownership, geometry
 next=reversible DXVK-version A/B (official 2.7.1) WITH thread-stack capture
 working_prefix_touched=no (probe); Ableton left running deadlocked, pid 176090
 ```
+
+## DXVK-Version A/B With End-State Capture — CUSTOM DXVK EXONERATED (2026-07-04)
+
+Reversible A/B via `bin/ableton-dxvk-version-test` + new opt-in
+`WAYDAW_DXVK_AB_ENDSTATE=1` end-state block calling
+`bin/ableton-thread-endstate-capture` (capture logic factored out of the
+liveness probe). Diagnostic launcher env; sha256-verified restore after every
+run. Full comparison table:
+`docs/ableton-authorization-interaction-rethink.md`.
+
+```text
+DXVK_AB_ENDSTATE_1:
+custom_arm_evidence=run 20260703-231014 (same launch path; today's fresh arm lost to user click-crash mid-dwell)
+official_arm_evidence=logs/ableton-dxvk-endstate-ab/20260704-122125-official271b
+official_dxvk=2.7.1 release, sha256-verified vs 2026-06-16 records
+official_arm_main_thread=RtlAcquireSRWLockExclusive(0x12B4ADD0) from dxgi; CPU 0
+custom_arm_main_thread=RtlAcquireSRWLockExclusive(0xB34E90) from d3d11; CPU 0
+srw_lock_word_both_arms=owners=0x0003 exclusive_waiters=0x0001
+sendmessage_wedged_thread_both_arms=yes (0188 / 0190)
+ableton_caller_frames=identical offsets both arms
+webview2=alive in custom-arm session, absent in official-arm session (irrelevant either way)
+click_on_deadlocked_window=fatal SEH on UI thread: "Exception frame is not in stack limits" (explains crash_on_interaction)
+verdict=custom/debug DXVK NOT the cause; deadlock reproduces under official DXVK 2.7.1
+leading_suspect=wine-staging 11.0 SRW/wait-on-address behavior under Ableton's re-entrant nested message pumps
+next=same end-state capture under a genuinely different Wine base (plain/newer Wine); upstream bug search now actionable
+prefix_dxvk_restored=yes (sha256 557c1f50…/f31cd64b…); backup dirs kept per harness design
+```
