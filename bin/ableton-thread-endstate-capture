@@ -13,6 +13,10 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../config/env
 source "$ROOT_DIR/config/env"
+# Runner comparisons capture against a copied test prefix; the caller must
+# also put the runner's bin dir first in PATH so winedbg matches the session's
+# wineserver protocol.
+WINEPREFIX="${WAYDAW_CAPTURE_WINEPREFIX:-$WINEPREFIX}"
 export DISPLAY="${DISPLAY:-:0}"
 
 OUT="${1:-}"
@@ -27,8 +31,17 @@ kv() { printf '%s=%s\n' "$1" "${2:-}" | tee -a "$SUMMARY"; }
 kv capture_label "$LABEL"
 kv capture_time "$(date '+%Y-%m-%d %H:%M:%S')"
 
-ABLETON_PID="$(pgrep -f 'Ableton Live 12 Suite\.exe' | head -1)"
+# Ableton spawns several unix processes (a bootstrapper plus the real UI
+# process). Under Proton especially, pgrep order is not the UI process. Pick
+# the matching pid with the most threads (the UI process has ~90; helpers 1-4).
+ABLETON_PID=""
+best_threads=-1
+for p in $(pgrep -f 'Ableton Live 12 Suite\.exe'); do
+  n="$(ls /proc/"$p"/task 2>/dev/null | wc -l)"
+  if (( n > best_threads )); then best_threads="$n"; ABLETON_PID="$p"; fi
+done
 kv ableton_unix_pid "${ABLETON_PID:-none}"
+kv ableton_unix_pid_threads "${best_threads}"
 if [[ -z "$ABLETON_PID" ]]; then
   kv capture_result no_ableton_process
   exit 1
@@ -40,16 +53,20 @@ ps -eo pid,ppid,stat,etime,args | grep -Ei 'ableton|wine|msedge' | grep -v grep 
 kv webview2_process_count "$(grep -ci 'msedgewebview2\.exe' "$OUT/process-snapshot.txt" || true)"
 wmctrl -lpG -x >"$OUT/wmctrl-lpGx.txt" 2>&1 || true
 
+# Detect the transient dialog by window TYPE + a title/class Ableton signal,
+# not a fixed WM_CLASS (Proton sets WM_CLASS steam_proton, system Wine sets
+# ableton live 12 suite.exe). Both expose "Ableton" in the title.
 DIALOG_ID=""
 PARENT_ID=""
 while IFS= read -r line; do
   id="$(awk '{print $1}' <<<"$line")"
-  wtype="$(xprop -id "$id" _NET_WM_WINDOW_TYPE 2>/dev/null)"
-  [[ "$wtype" == *DIALOG* ]] || continue
+  props="$(xprop -id "$id" _NET_WM_WINDOW_TYPE WM_NAME _NET_WM_NAME WM_CLASS 2>/dev/null)"
+  [[ "$props" == *DIALOG* ]] || continue
+  grep -qi 'ableton\|steam_proton' <<<"$props" || continue
   tf="$(xprop -id "$id" WM_TRANSIENT_FOR 2>/dev/null | awk '{print $NF}')"
   [[ "$tf" =~ ^0x[0-9a-fA-F]+$ ]] || continue
   DIALOG_ID="$id"; PARENT_ID="$tf"; break
-done < <(wmctrl -lx 2>/dev/null | grep -i 'ableton live 12 suite\.exe' || true)
+done < <(wmctrl -l 2>/dev/null | grep -i 'ableton' || true)
 kv dialog_window_id "${DIALOG_ID:-none}"
 kv parent_window_id "${PARENT_ID:-none}"
 
@@ -78,8 +95,10 @@ kv main_thread_total_cpu_ticks "${main2:-unknown}"
 # ---- winedbg full backtraces
 timeout 90 env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" \
   winedbg --command "info process" >"$OUT/winedbg-process-list.txt" 2>&1
-WINPID="$(grep -i 'ableton live 12 suite\.exe' "$OUT/winedbg-process-list.txt" \
-  | awk '{gsub(/^0+/,"",$1); print $1; exit}')"
+# winedbg lists "<pid> <threadcount> '<name>'"; pick the Ableton line with the
+# most threads (the UI process, not the bootstrapper).
+WINPID="$(grep -i "'Ableton Live 12 Suite\.exe'" "$OUT/winedbg-process-list.txt" \
+  | sort -k2 -n -r | awk '{gsub(/^0+/,"",$1); print $1; exit}')"
 kv ableton_win_pid "${WINPID:-not_found}"
 if [[ -z "$WINPID" ]]; then
   kv capture_result no_winedbg_pid
@@ -117,6 +136,30 @@ if [[ -n "$LOCK_ADDR" ]]; then
     winedbg <"$OUT/winedbg-lockword-commands.txt" >"$OUT/winedbg-lockword.txt" 2>&1
   kv srw_lock_word "$(grep -oE '0x[0-9a-f]+:  [0-9a-f]+ [0-9a-f]+' "$OUT/winedbg-lockword.txt" | head -1 | awk '{print $2" "$3}')"
 fi
+
+# ---- forward-progress check: re-sample the main thread's top frames a few
+# times. Identical every time = frozen (deadlock, matching the 6h-stable
+# staging capture); changing = the UI thread is still executing (healthy).
+progress_sig() {
+  # winedbg only prints the "=>0" current-frame marker for the active thread;
+  # a per-tid `bt` prints bare "N 0xADDR" frames. Match both, take first 4.
+  printf 'attach 0x%s\nbt %s\ndetach\nquit\n' "$WINPID" "$MAIN_TID" >"$OUT/pp-cmd.txt"
+  timeout 60 env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" \
+    winedbg <"$OUT/pp-cmd.txt" 2>/dev/null \
+    | grep -oE '(=>)?[0-9]+ 0x[0-9a-f]+' | sed -E 's/\(.*//; s/ +$//' \
+    | head -4 | tr '\n' ';'
+}
+prev=""; changed=0; samples=0
+for _ in 1 2 3 4; do
+  s="$(progress_sig)"
+  samples=$((samples + 1))
+  printf 'sample_%s=%s\n' "$samples" "$s" >>"$OUT/main-thread-progress.txt"
+  [[ -n "$prev" && "$s" != "$prev" ]] && changed=1
+  prev="$s"
+  sleep 4
+done
+kv main_thread_top_frames_changed_across_samples "$([[ $changed -eq 1 ]] && echo yes || echo no)"
+kv main_thread_forward_progress "$([[ $changed -eq 1 ]] && echo executing || echo frozen)"
 
 kv ableton_alive_after_capture "$([[ -d /proc/$ABLETON_PID ]] && echo yes || echo no)"
 kv capture_result completed

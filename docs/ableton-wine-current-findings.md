@@ -1836,3 +1836,29 @@ leading_suspect=wine-staging 11.0 SRW/wait-on-address behavior under Ableton's r
 next=same end-state capture under a genuinely different Wine base (plain/newer Wine); upstream bug search now actionable
 prefix_dxvk_restored=yes (sha256 557c1f50…/f31cd64b…); backup dirs kept per harness design
 ```
+
+## Wine-Base A/B With End-State Capture — DEADLOCK IS BUILD-SPECIFIC (2026-07-04)
+
+Copied-prefix comparison (working prefix never touched, nothing installed).
+Both arms Wine 11.0, same debug DXVK, same prefix. Comparator runner was the
+already-cached `.local-runners/kron4ek-proton-exp-11.0`. Full table:
+`docs/ableton-authorization-interaction-rethink.md`.
+
+```text
+WINEBASE_AB_1:
+baseline=wine-11.0 (Staging)  [system]  -> UI thread RtlAcquireSRWLockExclusive owners=3/waiters=1, 0 CPU, SendMessageW-wedged helper
+comparator=wine-11.0-gd0c1d0160f9 (Proton, non-staging) [kron4ek-proton-exp-11.0]
+comparator_prefix=~/WinePrefixes/ableton12-winebase-protonexp-test (copied; DXVK restored+sha-verified after runner prefix update)
+comparator_run=logs/ableton-winebase-ab/20260704-162604-protonexp-confirm
+comparator_ableton_launched=yes; auth_dialog_reached=yes (512x479); webview2=present
+comparator_ui_thread_in_srw_exclusive=no (0 of 52 threads)
+comparator_threads_in_sendmessage=none
+comparator_ui_thread_innermost=ableton code (no d3d11/dxgi/SRW)
+comparator_ui_thread_cpu=38 ticks/3s (~12% core) -> executing, NOT futex-blocked
+same_ableton_message_pump_lower_frames=yes (identical offsets both arms)
+builtin_forward_progress_subcheck=INVALID this run (empty samples; =>0-only filter bug; sampler now fixed; not used for verdict)
+usability_under_proton=NOT established (no dialog interaction; hands-off)
+verdict=SRW owners=3/waiters=1 deadlock does NOT reproduce under a different Wine 11.0 build => build-specific, NOT general Wine 11.0; wine-staging patchset prime suspect
+next=one Proton-exp confirmation run with fixed sampler + longer post-dialog observation: healthy progress (adopt Proton runner) vs busy-spin (report difference)
+working_prefix_touched=no; installed=nothing
+```

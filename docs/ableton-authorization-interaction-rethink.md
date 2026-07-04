@@ -409,6 +409,78 @@ question also makes an upstream WineHQ bug search / report actionable for
 the first time ("SRW shared owners leak under re-entrant sent-message
 pumping, wine-staging 11.0, DXVK client").
 
+## Wine-base A/B with end-state thread capture (2026-07-04) — EXECUTED
+
+One question: does the UI thread still deadlock in
+`RtlAcquireSRWLockExclusive` with `owners=3 / exclusive_waiters=1` under a
+genuinely different Wine base? Method: copy the working prefix, boot it with
+the comparator runner, restore the debug DXVK DLLs into the copy after the
+runner's prefix-update overwrote them (sha256-verified), launch Ableton
+directly (no forced `WINEDLLOVERRIDES`, no virtual desktop), dwell 480 s, then
+`bin/ableton-thread-endstate-capture`. Working prefix never touched; nothing
+installed.
+
+**Bases compared** — both Wine **11.0**, same DXVK (debug 2.7), same prefix
+contents:
+- Baseline: system `wine-11.0 (Staging)`.
+- Comparator: `.local-runners/kron4ek-proton-exp-11.0`,
+  `wine-11.0-gd0c1d0160f9 (Proton)` — non-staging, already cached from the
+  June runner exploration. (The June runs were blocked only on a DXVK-loader
+  technicality that is irrelevant to today's thread-end-state question.)
+
+### Result
+
+| | baseline: wine-staging 11.0 | comparator: Proton-exp 11.0 (non-staging) |
+|---|---|---|
+| Evidence | `logs/ableton-dxvk-endstate-ab/…official271b` + 6 h liveness capture | `logs/ableton-winebase-ab/20260704-162604-protonexp-confirm` |
+| Ableton launches | yes | yes (10 s) |
+| Auth dialog reached | yes (512x479) | yes (512x479, `0x0b00000e` transient) |
+| WebView2 | present | present (2 procs) |
+| UI thread innermost | `RtlAcquireSRWLockExclusive` via d3d11/dxgi | Ableton code (frames 0–7), **no** d3d11/dxgi/SRW |
+| Thread in `RtlAcquireSRWLockExclusive` | yes (the UI thread) | **none** (0 of 52 threads) |
+| SRW lock word | `owners=0x0003 waiters=0x0001` | n/a — no SRW wait |
+| Thread wedged in `SendMessageW` | yes | **none** |
+| UI-thread CPU at capture | **0** ticks/3 s (kernel futex wait) | **38** ticks/3 s (~12% core; ~62 s total) |
+| Same Ableton message-pump lower frames | yes | yes (identical offsets) |
+
+The comparator reaches the identical Ableton nested message-pump/winproc code
+path as the baseline, but instead of descending into d3d11/dxgi and blocking
+forever on the SRW lock, its UI thread stays in Ableton code and keeps
+consuming CPU. **The `owners=3 / waiters=1` SRW deadlock signature does not
+reproduce under the different Wine base.**
+
+Honesty caveats (do not overclaim): (a) this run's built-in forward-progress
+sub-check returned empty samples because the per-thread `bt` filter keyed on
+winedbg's `=>0` marker, which only tags the active thread — its "frozen"
+label is a filter artifact and is disregarded; the script's sampler is now
+fixed. The verdict rests on the `bt all` capture (no SRW / no SendMessageW)
+plus the non-zero CPU delta, which together exclude the staging futex
+deadlock. (b) The auth dialog was **not** interacted with, so Ableton is not
+shown to be *usable* under Proton — only that its UI thread is not in the
+staging deadlock. Whether the CPU-active state is healthy progress or a
+different busy state is the next thing to confirm with the fixed sampler.
+
+### Verdict
+
+**Not a general Wine 11.0 / SRW-layer defect. The deadlock is
+build-specific:** a different Wine 11.0 build (Proton-exp, non-staging), with
+the same DXVK and prefix, does not reproduce the `RtlAcquireSRWLockExclusive`
+`owners=3/waiters=1` signature and keeps the UI thread executing. wine-staging
+11.0's patchset (or a build difference it carries — SRW/WaitOnAddress/ntsync)
+is the prime suspect; this single comparator does not isolate the exact patch,
+so "staging-specific" is likely but not proven versus "Proton-carries-a-fix."
+
+### Single next recommended move
+
+One Proton-exp confirmation run with the **fixed** forward-progress sampler and
+a longer post-dialog observation, to establish whether the CPU-active UI
+thread is making real progress (→ Proton-exp is a viable Wine-base
+replacement; pivot to standing it up as the WayDAW runner) or busy-spinning
+(→ Ableton fails differently under Proton; report the exact difference rather
+than adopt it). This needs no new download and no working-prefix mutation.
+Only after that should an upstream WineHQ report be framed — and it would now
+be a *staging-specific* SRW report, not "Wine 11.0."
+
 ## Relationship to existing constraints
 
 This note changes no constraint. It flags one for conditional review: the
