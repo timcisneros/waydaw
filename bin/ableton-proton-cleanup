@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Controlled cleanup of the copied-prefix Proton-exp Ableton session ONLY.
+#
+# Scoped deliberately to the Proton test prefix and the Proton runner's own
+# wineserver — NOT bin/kill-session, which targets the working prefix's
+# wineserver. Refuses to act on the working prefix.
+#
+# Usage:
+#   bin/ableton-proton-cleanup [--dry-run]
+#
+# Honors WAYDAW_ABLETON_RUNNER_PREFIX (same default as the runner mode).
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Resolve the WORKING prefix independently of any inherited runner selection,
+# so the refusal guard is meaningful even if the caller exported the runner var.
+_saved_runner="${WAYDAW_ABLETON_RUNNER:-}"
+unset WAYDAW_ABLETON_RUNNER
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+WORKING_PREFIX="$WINEPREFIX"
+[[ -n "$_saved_runner" ]] && export WAYDAW_ABLETON_RUNNER="$_saved_runner"
+
+RUNNER_BIN="$ROOT_DIR/.local-runners/kron4ek-proton-exp-11.0/bin"
+PROTON_PREFIX="${WAYDAW_ABLETON_RUNNER_PREFIX:-$HOME/WinePrefixes/ableton12-winebase-protonexp-test}"
+
+dry_run=0
+[[ "${1:-}" == "--dry-run" ]] && dry_run=1
+
+kv() { printf '%s=%s\n' "$1" "${2:-}"; }
+kv target_proton_prefix "$PROTON_PREFIX"
+kv working_prefix "$WORKING_PREFIX"
+kv runner_wineserver "$RUNNER_BIN/wineserver"
+kv dry_run "$dry_run"
+
+if [[ "$PROTON_PREFIX" == "$WORKING_PREFIX" ]]; then
+  printf 'ERROR: refusing to clean the working prefix (%s).\n' "$WORKING_PREFIX" >&2
+  exit 1
+fi
+
+_pids_now() { pgrep -f "$PROTON_PREFIX" 2>/dev/null | grep -v "^$$\$" || true; }
+kv proton_prefix_procs_before "$(_pids_now | wc -l | tr -d ' ')"
+
+cmd1="pkill -TERM -f \"$PROTON_PREFIX.*Ableton Live 12 Suite\\.exe\""
+cmd2="env WINEPREFIX=\"$PROTON_PREFIX\" \"$RUNNER_BIN/wineserver\" -k"
+cmd3="pkill -KILL -f \"$PROTON_PREFIX\""
+
+if [[ "$dry_run" -eq 1 ]]; then
+  printf '\n[would_run]\n%s\n%s\n%s\n' "$cmd1" "$cmd2" "$cmd3"
+  exit 0
+fi
+
+printf '\n[cleanup]\n'
+pkill -TERM -f "$PROTON_PREFIX.*Ableton Live 12 Suite\.exe" && echo "sent SIGTERM to Ableton" || echo "no Ableton process matched"
+sleep 3
+if [[ -x "$RUNNER_BIN/wineserver" ]]; then
+  env WINEPREFIX="$PROTON_PREFIX" "$RUNNER_BIN/wineserver" -k && echo "runner wineserver -k done" || echo "runner wineserver -k returned nonzero"
+else
+  echo "WARN: runner wineserver not found at $RUNNER_BIN/wineserver" >&2
+fi
+sleep 2
+pkill -KILL -f "$PROTON_PREFIX" 2>/dev/null && echo "killed stragglers" || echo "no stragglers"
+sleep 1
+
+remaining="$(_pids_now | wc -l | tr -d ' ')"
+kv proton_prefix_procs_after "$remaining"
+kv cleanup_result "$([[ "$remaining" -eq 0 ]] && echo clean || echo residual)"
+[[ "$remaining" -eq 0 ]]

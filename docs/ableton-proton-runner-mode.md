@@ -69,6 +69,30 @@ Expected: `wine_binary=…/kron4ek-proton-exp-11.0/bin/wine`,
 `wineprefix=…-winebase-protonexp-test`, `graphics_mode=dxvk`,
 `registry_mutation_enabled=no`, `virtual_desktop_mutation_enabled=no`.
 
+## Verification suite
+
+`bin/test-proton-runner-mode` runs a launch-free, dry-run check of the whole
+mode (default resolution, Proton resolution, unknown-runner rejection,
+working-prefix refusal, DXVK reassertion against throwaway test DLLs, and
+cleanup scoping). It never touches the working prefix (it reads its DXVK DLLs
+read-only as the reassert source) and exits nonzero on any failure:
+
+```bash
+./bin/test-proton-runner-mode
+```
+
+## Controlled cleanup
+
+`bin/ableton-proton-cleanup` terminates only the copied-prefix Proton session,
+using the runner's own `wineserver -k` bound to the copied prefix — never
+`bin/kill-session` (which targets the working prefix). It refuses to act on the
+working prefix. Preview with `--dry-run`:
+
+```bash
+./bin/ableton-proton-cleanup --dry-run   # show scoped commands, do nothing
+./bin/ableton-proton-cleanup             # actually clean the copied session
+```
+
 ## Do not yet
 
 - Do not make Proton-exp the default.
@@ -76,9 +100,22 @@ Expected: `wine_binary=…/kron4ek-proton-exp-11.0/bin/wine`,
 - Do not perform or automate a real Ableton authorization without explicit
   user action.
 
-## Next step
+## When you are ready later (authorization is a user-owned step, not required now)
 
-Run the opt-in mode against the copied prefix and let the user perform a
-legitimate authorization attempt. Only after successful authorization **and**
-confirmed editor interactivity should Proton-exp be considered for the working
-prefix or the default launcher.
+Authorization is **not** a prerequisite for this project phase. Whenever you
+choose to do it:
+
+1. Launch: `WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton`
+2. Wait for the 512x479 authorization dialog. **You** perform the legitimate
+   authorization (online login or offline/no-internet) — the assistant will
+   not click or type into it.
+3. Confirm the editor becomes visible and interactable (menus, track clicks).
+4. Ask the assistant to capture post-authorization state
+   (`bin/ableton-thread-endstate-capture`) and check that:
+   - no thread is in `RtlAcquireSRWLockExclusive`
+   - no thread is wedged in `SendMessageW`
+   - the UI thread shows forward progress
+5. Relaunch once more (copied prefix) to confirm the authorization persists.
+6. Do **not** change yet: the default launcher, the working prefix, KWin, or
+   DXVK. A working-prefix migration plan is drafted only after copied-prefix
+   authorization + editor interactivity + persistence are all confirmed.

@@ -1923,3 +1923,22 @@ editor_window_present=yes (1920x1080 mapped); editor_interactable=NOT_YET_CONFIR
 webview2=running (6 -> 2-4 churn), no blocking crash cascade
 next=resume copied-prefix session for legitimate authorization + editor-interactivity check; if auth succeeds, relaunch to verify persistence before any working-prefix migration plan; do NOT change default
 ```
+
+## Pre-Authorization Phase COMPLETE (2026-07-04)
+
+The Proton-exp runner path is complete for the pre-authorization phase:
+clean, documented, reproducible, opt-in, safe to use later for authorization,
+working prefix never touched. Detail + checklist:
+`docs/ableton-proton-phase-completion.md`.
+
+```text
+PHASE_COMPLETE_PREAUTH:
+runner_mode=WAYDAW_ABLETON_RUNNER=proton-exp (only Proton entry; default=system Wine unchanged)
+new_this_phase=bin/ableton-proton-cleanup (scoped runner-wineserver cleanup), bin/test-proton-runner-mode (22-check launch-free dry-run suite), docs/ableton-proton-phase-completion.md
+verification=22/22 pass; working prefix DXVK read-only, untouched
+cleanup_scope=runner wineserver + copied prefix; refuses working prefix; NOT bin/kill-session
+dxvk_reassert=deterministic, verified via throwaway test DLLs
+authorization=NOT required for phase completion; user-owned LATER step
+dirty_left_untouched=.gitignore, README.md, bin/ableton-contained (M) + broader ruled-out investigation tooling (untracked) — unrelated to runner path, not swept in
+next_later=WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton -> user authorizes -> post-auth capture -> persistence relaunch -> only then a working-prefix migration plan
+```

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Dry-run verification suite for the opt-in Proton-exp runner mode.
+# Launches NOTHING. Never touches the working prefix (reads its DXVK DLLs
+# read-only as the reassert source). Exits nonzero if any check fails.
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+PASS=0; FAIL=0
+ok()   { printf '  PASS: %s\n' "$1"; PASS=$((PASS+1)); }
+bad()  { printf '  FAIL: %s\n' "$1"; FAIL=$((FAIL+1)); }
+check(){ local desc="$1" hay="$2" needle="$3"; [[ "$hay" == *"$needle"* ]] && ok "$desc" || bad "$desc (missing: $needle)"; }
+ncheck(){ local desc="$1" hay="$2" needle="$3"; [[ "$hay" != *"$needle"* ]] && ok "$desc" || bad "$desc (unexpected: $needle)"; }
+
+WORKING_PREFIX="$HOME/WinePrefixes/ableton12"
+PROTON_PREFIX="$HOME/WinePrefixes/ableton12-winebase-protonexp-test"
+RUNNER_WINE="$ROOT_DIR/.local-runners/kron4ek-proton-exp-11.0/bin/wine"
+DXVK_D3D11_SHA=557c1f50e7ff73bcd24968a02352519df89d8b3fe037d47580091ffafe1940dd
+DXVK_DXGI_SHA=f31cd64b547c59441956b17e2a013791dcb62abb1e671fb31d49ff4d6c2b3fd7
+
+printf '== 1. default runner resolution (system Wine, working prefix) ==\n'
+out="$(WAYDAW_ABLETON_GRAPHICS=dxvk WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>/dev/null)"
+err="$(WAYDAW_ABLETON_GRAPHICS=dxvk WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>&1 >/dev/null)"
+check "default wine is /usr/bin/wine"        "$out" "wine_binary=/usr/bin/wine"
+check "default prefix is working prefix"     "$out" "wineprefix=$WORKING_PREFIX"
+check "default keeps registry mutation"      "$out" "registry_mutation_enabled=yes"
+ncheck "default prints no runner line"       "$err" "WAYDAW runner="
+
+printf '== 2. proton-exp runner resolution (copied prefix) ==\n'
+out="$(WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>/dev/null)"
+err="$(WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>&1 >/dev/null)"
+check "proton wine is the runner binary"     "$out" "wine_binary=$RUNNER_WINE"
+check "proton prefix is the copied prefix"   "$out" "wineprefix=$PROTON_PREFIX"
+check "proton keeps DXVK (graphics=dxvk)"    "$out" "graphics_mode=dxvk"
+check "proton empties WINEDLLOVERRIDES"      "$out" "winedlloverrides="
+check "proton disables registry mutation"    "$out" "registry_mutation_enabled=no"
+check "proton uses no virtual desktop"       "$out" "virtual_desktop_mutation_enabled=no"
+check "proton preserves -u WAYLAND_DISPLAY"  "$out" "env -u WAYLAND_DISPLAY"
+check "proton drops WINEDLLOVERRIDES on cmd" "$out" "-u WINEDLLOVERRIDES"
+check "proton logs runner resolution"        "$err" "WAYDAW runner=proton-exp"
+
+printf '== 3. unknown runner rejected ==\n'
+err="$(WAYDAW_ABLETON_RUNNER=bogus WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>&1 >/dev/null)"
+check "unknown runner is rejected"           "$err" "unknown WAYDAW_ABLETON_RUNNER=bogus"
+
+printf '== 4. proton-exp refuses the working prefix ==\n'
+err="$(WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_RUNNER_PREFIX="$WORKING_PREFIX" WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>&1 >/dev/null)"
+check "refuses working prefix"               "$err" "refuses to target the working prefix"
+
+printf '== 5. DXVK reassertion (test DLLs only; working prefix read-only) ==\n'
+wp_before="$(sha256sum "$WORKING_PREFIX/drive_c/windows/system32/d3d11.dll" | awk '{print $1}')"
+SCRATCH="$(mktemp -d)"; SSYS="$SCRATCH/drive_c/windows/system32"; mkdir -p "$SSYS"
+printf 'not-dxvk-drifted' > "$SSYS/d3d11.dll"                 # drifted -> should be restored
+cp "$WORKING_PREFIX/drive_c/windows/system32/dxgi.dll" "$SSYS/dxgi.dll"  # already correct
+WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_RUNNER_PREFIX="$SCRATCH" \
+  bash -c 'source config/env >/dev/null 2>&1' 2>/dev/null
+d3d11_after="$(sha256sum "$SSYS/d3d11.dll" | awk '{print $1}')"
+dxgi_after="$(sha256sum "$SSYS/dxgi.dll" | awk '{print $1}')"
+wp_after="$(sha256sum "$WORKING_PREFIX/drive_c/windows/system32/d3d11.dll" | awk '{print $1}')"
+[[ "$d3d11_after" == "$DXVK_D3D11_SHA" ]] && ok "drifted d3d11 restored to debug DXVK" || bad "drifted d3d11 NOT restored ($d3d11_after)"
+[[ "$dxgi_after" == "$DXVK_DXGI_SHA" ]] && ok "correct dxgi left intact" || bad "dxgi changed unexpectedly"
+[[ "$wp_after" == "$wp_before" ]] && ok "working prefix DXVK untouched by reassert" || bad "working prefix DXVK CHANGED"
+rm -rf "$SCRATCH"
+
+printf '== 6. cleanup scope (targets copied prefix + runner wineserver, not working) ==\n'
+out="$(./bin/ableton-proton-cleanup --dry-run 2>&1)"
+check "cleanup targets the copied prefix"     "$out" "target_proton_prefix=$PROTON_PREFIX"
+check "cleanup uses the runner wineserver"    "$out" "kron4ek-proton-exp-11.0/bin/wineserver"
+ncheck "cleanup does not kill working prefix"  "$out" "pkill -KILL -f \"$WORKING_PREFIX\""
+outw="$(WAYDAW_ABLETON_RUNNER_PREFIX="$WORKING_PREFIX" ./bin/ableton-proton-cleanup --dry-run 2>&1 || true)"
+check "cleanup refuses working prefix"         "$outw" "refusing to clean the working prefix"
+
+printf '\n== summary ==\npass=%s fail=%s\n' "$PASS" "$FAIL"
+[[ "$FAIL" -eq 0 ]]
