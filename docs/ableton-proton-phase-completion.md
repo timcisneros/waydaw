@@ -105,6 +105,32 @@ future cleanup, not deleted here):
   `.local-tools/` (built PE probe), `tools/` (cursor helper sources) —
   abandoned runner-candidate loader audit.
 
+## Merge status — ON HOLD (deliberate, user-gated)
+
+Closeout audit accepted 2026-07-04 at commit `e90bc4c` on
+`diagnosis/auth-dialog-interaction-rethink`. The branch is **merge-ready in
+principle**: 9 commits ahead of `main` (`7cb64ab`), merge-base is `main`
+itself, so a **fast-forward of `main` to `e90bc4c` is possible** with no
+conflicts. Verification suite passed 22/22 at closeout.
+
+The actual merge is deliberately **on hold** until explicitly instructed, and
+must be preceded by deliberate handling of the unrelated dirty **tracked**
+files in the working tree: `.gitignore`, `README.md`, `bin/ableton-contained`.
+Do not merge from the dirty tree.
+
+Known cosmetic issue to resolve at merge time: the **committed** `.gitignore`
+ignores `docs/*` wholesale while this branch tracks five docs files; the
+user's uncommitted allowlist covers the six older investigation docs but not
+the four newer committed ones
+(`ableton-authorization-interaction-rethink.md`, `ableton-proton-runner-mode.md`,
+`ableton-proton-phase-completion.md`, `ableton-proton-user-auth-validation.md`).
+Tracked files stay tracked regardless, but the allowlist should be extended
+with those four `!docs/…` negations when `.gitignore` is next committed.
+
+Agreed future merge procedure (execute only when explicitly instructed):
+protect/resolve the three unrelated dirty tracked files first, then
+fast-forward `main` to `e90bc4c`.
+
 ## Single next action — LATER, when the user chooses to authorize
 
 Run `WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton`, perform the legitimate
