@@ -188,10 +188,59 @@ window; remove it any time with `bin/install-ableton-proton-kwin-rule --uninstal
 2. Authorization remains a separate, user-owned step and is **not** required to
    resolve this presentation issue.
 
+### Root cause found + fix (2026-07-05) — copied-prefix window-placement seed
+
+The maximize-state follow-up located the real source. Under Proton the Wine
+**Windows user is `steamuser`** (`wine cmd /c echo %USERNAME%` → `steamuser`;
+registry `USERNAME=steamuser`; the active run's crash files are written under
+`steamuser`). System Wine runs as `timcis`.
+
+- The `timcis` profile holds the working-prefix-derived `Preferences.cfg`
+  (a saved **maximized-vertical, 848-wide** window placement).
+- The `steamuser` profile has **no `Preferences.cfg`**, so Ableton opens with
+  its **default fullscreen (maximized both) window**, which Wine renders with
+  `_MOTIF_WM_HINTS decorations=0` → frameless. This is why the KWin decoration
+  rule could not help: KWin does not decorate a fully-maximized no-decoration
+  window.
+
+**Fix (copied prefix only, reversible):** seed `steamuser`'s `Preferences.cfg`
+from the prefix's own `timcis` profile. With it, Ableton under Proton opens a
+normal **maximized-vertical 848×1052 window at 165,28** — and Wine then emits
+`_MOTIF_WM_HINTS decorations=0x7a` (it requests decorations for the non-
+fullscreen window), so KWin draws the 28px titlebar. Geometry now matches the
+decorated system-Wine window exactly.
+
+Implemented durably in `config/ableton-runner.sh` (proton-exp branch): when the
+copied prefix's `steamuser` Ableton `Preferences.cfg` is **absent** and the
+`timcis` one exists, it is copied in. Guarded by "absent" so Ableton's own
+later saves win. Working prefix is never read or written (the seed source is
+the copied prefix's own `timcis` profile). Manual revert:
+`rm "<test-prefix>/drive_c/users/steamuser/AppData/Roaming/Ableton/Live */Preferences/Preferences.cfg"`.
+
+Before → after (copied prefix, no authorization):
+
+```
+before: geom 0,0 1920x1080   _NET_WM_STATE=MAXIMIZED_VERT+HORZ  frame=0,0,0,0   (frameless fullscreen)
+after:  geom 165,28 848x1052 _NET_WM_STATE=MAXIMIZED_VERT       frame=0,0,28,0  (titlebar present)
+```
+
+Screenshot confirms a normal decorated window (titlebar + min/max/close, menu
+bar, desktop visible around it) — no fullscreen, no bottom black bar.
+
+Residual: during the **unauthorized** startup churn (Ableton's double-init +
+auth dialog window re-creation), the titlebar intermittently flickers
+(`frame` toggles 28 ↔ 0) while the window stays `MAXIMIZED_VERT`. A separate
+manual-seed run settled to a **stable** 28px titlebar for 50+ s. The flicker is
+plausibly tied to the repeated re-init while unauthorized; re-confirm stability
+once the app is authorized (out of scope here). Liveness stayed healthy
+throughout (no SRW deadlock, no `SendMessageW` wedge, executing).
+
 ### Branch status
 
-`fix/proton-exp-window-presentation` is **NOT merge-ready**: the presentation
-fix is not validated (rule insufficient after clean-load). The branch holds a
-correct diagnosis and a reversible, correctly-scoped rule that is not by itself
-enough; the maximize-state follow-up is required before this can be called
-fixed.
+The structural defect is **fixed**: Proton no longer opens Ableton
+fullscreen-frameless; it opens a normal decorated maximized-vertical window
+like system Wine. Titlebar is restored (with startup flicker to re-confirm once
+authorized). The KWin rule from the prior commit is left in place (harmless;
+now largely redundant since Wine itself requests decorations on the non-
+fullscreen window). Recommend the user visually confirm the presentation is
+acceptable; merge-readiness is a user call pending that confirmation.

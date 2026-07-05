@@ -76,6 +76,23 @@ if [[ -n "$_waydaw_runner" && "$_waydaw_runner" != system ]]; then
       done
       unset -f _waydaw_sha 2>/dev/null
 
+      # Window-placement seed (copied prefix only). Proton runs Ableton as the
+      # Windows user "steamuser", which has NO Preferences.cfg, so Ableton opens
+      # with its default fullscreen (maximized both) window that Wine renders
+      # frameless. Seed steamuser's Preferences.cfg from the prefix's own
+      # "timcis" profile (the working-prefix-derived prefs, which open a normal
+      # maximized-vertical decorated window). Only when steamuser has none, so
+      # Ableton's own later saves win. See docs/ableton-proton-window-presentation.md.
+      _abl="AppData/Roaming/Ableton"
+      _su_pref="$(ls -d "$WINEPREFIX"/drive_c/users/steamuser/"$_abl"/Live\ */Preferences 2>/dev/null | head -1)"
+      _tc_pref="$(ls -d "$WINEPREFIX"/drive_c/users/timcis/"$_abl"/Live\ */Preferences 2>/dev/null | head -1)"
+      if [[ -n "$_su_pref" && -n "$_tc_pref" \
+            && ! -f "$_su_pref/Preferences.cfg" && -f "$_tc_pref/Preferences.cfg" ]]; then
+        cp -f "$_tc_pref/Preferences.cfg" "$_su_pref/Preferences.cfg" \
+          && printf 'WAYDAW runner: seeded steamuser Ableton Preferences.cfg (decorated window placement)\n' >&2
+      fi
+      unset _abl _su_pref _tc_pref
+
       printf 'WAYDAW runner=proton-exp | wine=%s | prefix=%s | graphics=%s | no_registry=%s\n' \
         "$_rbin/wine" "$WINEPREFIX" "$WAYDAW_ABLETON_GRAPHICS" "$WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY" >&2
       ;;
