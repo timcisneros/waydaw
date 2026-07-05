@@ -1862,3 +1862,25 @@ verdict=SRW owners=3/waiters=1 deadlock does NOT reproduce under a different Win
 next=one Proton-exp confirmation run with fixed sampler + longer post-dialog observation: healthy progress (adopt Proton runner) vs busy-spin (report difference)
 working_prefix_touched=no; installed=nothing
 ```
+
+## Proton-exp Forward-Progress Confirmation — VIABLE RUNNER CANDIDATE (2026-07-04)
+
+Copied Proton prefix, 720 s post-dialog dwell, fixed forward-progress sampler
+(full `bt all` per sample, extract main thread by TID). Full analysis:
+`docs/ableton-authorization-interaction-rethink.md`.
+
+```text
+PROTON_FORWARD_PROGRESS_1:
+run=logs/ableton-winebase-ab/20260704-173436-protonexp-progress
+runner=kron4ek-proton-exp-11.0  wine-11.0-gd0c1d0160f9 (Proton, non-staging)
+auth_dialog_reached=yes (512x479, 0x0b20000f transient); ui_process_threads=69; webview2=present
+forward_progress_samples_nonempty=6/6; distinct_signatures=3; forward_progress=executing
+sample_regions=win32u message-wait (1-4) -> user32/ntdll dispatch (5) -> deep Ableton code (6)
+threads_in_RtlAcquireSRWLockExclusive=0; threads_in_SendMessageW=0; main_thread_in_d3d11=no; srw_lock_addr=none
+main_thread_cpu=35 ticks/3s (~12% core; ~82s total) -> periodic pump, not 100% spin
+staging_contrast=byte-identical stack across 10 samples over 6h (hard deadlock)
+verdict=Proton-exp 11.0 is the leading WayDAW runner candidate; UI thread makes real progress, no SRW deadlock, no SendMessageW wedge
+not_proven=full end-to-end usability (auth dialog not interacted with; authorization boundary preserved)
+dxvk_debug_build_unchanged_pre_post=yes; working_prefix_touched=no; installed=nothing; processes_cleaned=yes
+next=opt-in WAYDAW_ABLETON_RUNNER=proton-exp mode (prepend runner bin, keep XWayland+DXVK, re-assert+verify DXVK hashes after wineboot); copied-prefix user-driven authorization attempt before any working-prefix use
+```

@@ -141,23 +141,27 @@ fi
 # times. Identical every time = frozen (deadlock, matching the 6h-stable
 # staging capture); changing = the UI thread is still executing (healthy).
 progress_sig() {
-  # winedbg only prints the "=>0" current-frame marker for the active thread;
-  # a per-tid `bt` prints bare "N 0xADDR" frames. Match both, take first 4.
-  printf 'attach 0x%s\nbt %s\ndetach\nquit\n' "$WINPID" "$MAIN_TID" >"$OUT/pp-cmd.txt"
-  timeout 60 env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" \
-    winedbg <"$OUT/pp-cmd.txt" 2>/dev/null \
-    | grep -oE '(=>)?[0-9]+ 0x[0-9a-f]+' | sed -E 's/\(.*//; s/ +$//' \
-    | head -4 | tr '\n' ';'
+  # Re-attach and capture a full bt-all (proven to emit frames), then extract
+  # the top frames of the main thread by its known TID. Returns the innermost
+  # 6 frame addresses joined; empty only if the process/thread is gone.
+  local cmd="$OUT/pp-cmd.txt" raw="$1"
+  printf 'attach 0x%s\ninfo threads\nbt all\ndetach\nquit\n' "$WINPID" >"$cmd"
+  timeout 90 env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" \
+    winedbg <"$cmd" >"$raw" 2>/dev/null
+  awk -v t="thread $MAIN_TID" \
+    '$0 ~ "^Backtracing for "t" "{p=1;next} p&&/^Backtracing/{exit} p' "$raw" \
+    | grep -oE '0x[0-9a-f]{6,}' | head -6 | tr '\n' ';'
 }
 prev=""; changed=0; samples=0
-for _ in 1 2 3 4; do
-  s="$(progress_sig)"
+for i in 1 2 3 4 5 6; do
+  s="$(progress_sig "$OUT/pp-raw-$i.txt")"
   samples=$((samples + 1))
   printf 'sample_%s=%s\n' "$samples" "$s" >>"$OUT/main-thread-progress.txt"
-  [[ -n "$prev" && "$s" != "$prev" ]] && changed=1
+  [[ -n "$prev" && -n "$s" && "$s" != "$prev" ]] && changed=1
   prev="$s"
-  sleep 4
+  sleep 5
 done
+kv main_thread_progress_samples_nonempty "$(grep -c '=0x' "$OUT/main-thread-progress.txt" 2>/dev/null || echo 0)"
 kv main_thread_top_frames_changed_across_samples "$([[ $changed -eq 1 ]] && echo yes || echo no)"
 kv main_thread_forward_progress "$([[ $changed -eq 1 ]] && echo executing || echo frozen)"
 

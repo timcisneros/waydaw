@@ -481,6 +481,68 @@ than adopt it). This needs no new download and no working-prefix mutation.
 Only after that should an upstream WineHQ report be framed — and it would now
 be a *staging-specific* SRW report, not "Wine 11.0."
 
+## Proton-exp forward-progress confirmation (2026-07-04) — EXECUTED
+
+Question: after Ableton reaches the auth dialog under Proton-exp, is the UI
+thread making real forward progress, or busy-spinning in one small stack
+region? Method: relaunch the copied Proton prefix (debug DXVK verified
+pre/post), wait for the 512x479 auth dialog, dwell **720 s**, then
+`bin/ableton-thread-endstate-capture` with the **fixed** forward-progress
+sampler (each sample now takes a full `bt all` and extracts the main thread's
+innermost frames by TID — the previous run's `=>0`-only filter that produced
+empty samples is corrected).
+Run: `logs/ableton-winebase-ab/20260704-173436-protonexp-progress`.
+
+### Result
+
+- Auth dialog reached in ~12 s (`0x0b20000f`, transient for `0xb200003`),
+  69-thread UI process, WebView2 present.
+- **Forward-progress sampler: 6/6 samples non-empty, 3 distinct signatures.**
+  Samples 1–4 caught the thread in a win32u message-wait region; sample 5 in a
+  message-dispatch path (user32/ntdll); sample 6 deep in Ableton code
+  (`+0x2e870d3 ← +0x36e94b9 ← …`). `forward_progress=executing`.
+- Contrast: staging's UI thread was byte-identical across 10 samples over 6 h.
+  Proton's visits ≥3 stack regions in ~30 s → a live message pump, not a
+  pinned spin.
+- **No thread in `RtlAcquireSRWLockExclusive` (0 hits), none in
+  `SendMessageW` (0 hits)** across all 69 threads. `srw_lock_addr=none`,
+  `main_thread_in_d3d11=no`.
+- CPU: `35` ticks/3 s (~12 % core; total ~82 s) — periodic work, not a
+  100 %-pegged busy loop.
+- DXVK debug build unchanged pre/post; working prefix untouched; processes
+  cleaned up.
+
+The stable-looking full-capture snapshot (`main_thread_top_frames` all in
+Ableton, `message_wait=no`) is just the single instant of the `bt all` grab;
+the time-series sampler shows the thread cycling through wait → dispatch →
+app-code, i.e. a normal Win32 UI loop **gated at the unauthorized auth
+dialog** — the expected healthy state for an un-activated install.
+
+### Verdict
+
+**Proton-exp 11.0 is the leading WayDAW runner candidate.** Under it the UI
+thread makes genuine forward progress, the `owners=3/waiters=1` SRW deadlock
+does not reappear, and no `SendMessageW` wedge forms — while system
+wine-staging 11.0 hard-deadlocks at the same point. This corroborates the
+build-specific (staging-implicated) conclusion.
+
+Not yet proven: full end-to-end usability. The auth dialog was **not**
+interacted with (authorization boundary preserved), so "the app is usable
+under Proton" is unconfirmed — but the thread state is healthy and correctly
+gated, which is the most that can be shown without a real authorization.
+
+### Single next recommended move
+
+Stand up Proton-exp behind an **explicit, opt-in WayDAW runner mode** (e.g. a
+`WAYDAW_ABLETON_RUNNER=proton-exp` path in `bin/ableton` that prepends the
+runner bin dir, keeps `env -u WAYLAND_DISPLAY`, keeps DXVK, and — because
+Proton's prefix-update overwrites the DXVK DLLs — re-asserts+verifies the
+debug DXVK hashes after any wineboot). Run it once against the **copied**
+prefix for a user-driven authorization attempt; only after a successful,
+legitimate authorization + confirmed editor interactivity should it be
+considered for the working prefix. Do not change the default launcher until
+then.
+
 ## Relationship to existing constraints
 
 This note changes no constraint. It flags one for conditional review: the
