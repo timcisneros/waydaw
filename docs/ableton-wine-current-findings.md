@@ -1904,3 +1904,22 @@ dry_run=WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 
 working_prefix_touched=no; installed=nothing; prerequisite diagnostic launcher (bin/ableton no-registry mode) + config/env WINEPREFIX fix committed alongside
 next=copied-prefix launch for a user-driven legitimate authorization + editor-interactivity check before any working-prefix/default use
 ```
+
+## Proton-exp Copied-Prefix User Validation — DIALOG INTERACTABLE (2026-07-04)
+
+First user-driven run of `WAYDAW_ABLETON_RUNNER=proton-exp`. User performed all
+interaction. Full detail: `docs/ableton-proton-user-auth-validation.md`.
+
+```text
+PROTON_USER_AUTH_1:
+run=logs/ableton-proton-user-auth/20260704-181143
+runner=proton-exp; prefix=~/WinePrefixes/ableton12-winebase-protonexp-test (copied); working_prefix_touched=no
+auth_dialog_interactable=YES (user clicks registered; dialog dismissed to reveal main editor window) <- decisive vs staging (dead to input)
+auth_completed=NO_deferred_by_user ("authorize another time")
+crash_on_interaction=no
+srw_deadlock_reappeared=no; sendmessage_wedge_reappeared=no (even post-interaction)
+main_thread=executing; 6/6 progress samples changed; cpu ~13%; 0 threads in RtlAcquireSRWLockExclusive; 0 in SendMessageW
+editor_window_present=yes (1920x1080 mapped); editor_interactable=NOT_YET_CONFIRMED (user deferred)
+webview2=running (6 -> 2-4 churn), no blocking crash cascade
+next=resume copied-prefix session for legitimate authorization + editor-interactivity check; if auth succeeds, relaunch to verify persistence before any working-prefix migration plan; do NOT change default
+```
