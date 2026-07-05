@@ -235,6 +235,57 @@ plausibly tied to the repeated re-init while unauthorized; re-confirm stability
 once the app is authorized (out of scope here). Liveness stayed healthy
 throughout (no SRW deadlock, no `SendMessageW` wedge, executing).
 
+### Flicker observation (2026-07-05) — Wine Motif decoration-hint churn
+
+High-frequency probe `bin/observe-ableton-proton-flicker` sampled the seeded
+Proton-exp window every 300 ms for 100 s (248 samples), copied prefix, no
+authorization.
+
+Timeline / property behaviour:
+
+```
+window_id      = 0x07a00003   (1 distinct — NEVER changes)
+pid            = 16086        (stable)
+wm_state       = MAXIMIZED_VERT+DEMANDS_ATTENTION (constant — never HORZ/fullscreen)
+_MOTIF_WM_HINTS dec: 0x7a (217 samples, 87%)  <->  0x0 (31 samples, 13%)
+_NET_FRAME_EXTENTS top: 28 (decorated, 87%)   <->  0 (frameless, 13%)   -- follows Motif exactly
+geometry: 848x1052 (decorated)  <->  848x1080 (frameless, +28px height reclaimed)
+frame transitions: 28 in 100 s, in bursts (~0-8s, 20-26s, 58-65s, 86-99s), stable-decorated between
+webview2 procs: 2 (mostly), 3-4 occasionally — NOT correlated with the frameless bursts
+DXVK presentation lines (VK_SUBOPTIMAL/recreate/Presenter): 0
+d3d11/dxgi errors: 0 ; wine window-lifecycle lines: 2 (no recreation)
+main-thread CPU at end: ~345 ticks/3s (~115% of a core) vs ~35-45 when settled
+```
+
+Classification (per the decision rules): **Wine Motif decoration-hint churn.**
+The frame toggles 28↔0 while the window id is unchanged, and the
+`_MOTIF_WM_HINTS` decorations field changes in lock-step (0x7a↔0x0) — so Wine
+(not KWin on its own) is flipping the decoration hint, and KWin faithfully
+follows. Ruled out by the data: window recreation (id/pid stable), maximize/
+fullscreen churn (state constant), DXVK/presentation flicker (0 presentation
+lines, 0 d3d11/dxgi errors), and WebView2-count correlation (proportional in
+both states).
+
+Interpretation: the churn is a symptom of Ableton's **unauthorized** busy-loop
+— constant `DEMANDS_ATTENTION`, ~115% CPU on the UI thread, and repeated
+re-management of the main window (each re-manage re-emits the Motif hint,
+toggling the frame). It does not fully settle within 100 s (still bursting at
+t=99 s), though the window is decorated 87% of the time. Liveness stayed
+healthy (no SRW deadlock, no `SendMessageW` wedge, executing).
+
+Note: the probe's first-run CSV used commas and its `_NET_FRAME_EXTENTS`/geom
+fields (which contain commas) misaligned the auto-classifier; the numbers above
+are from a corrected re-parse, and the probe now emits pipe-delimited output
+with a single `frame_top` column so its own classification is correct.
+
+Single next fix path (NOT done — needs the app out of its unauthorized loop
+first): the leading hypothesis is that the Motif churn stops once Ableton is
+**authorized** (ending the busy re-init loop). Verify that first (user-owned,
+out of scope). Only if the churn persists post-authorization consider a
+copied-prefix/local override — e.g. a KWin *force* decoration policy that pins
+`noborder=false` regardless of Wine's Motif toggling — validated at clean-load.
+Do not add that while the app is still in its unauthorized busy state.
+
 ### Branch status
 
 The structural defect is **fixed**: Proton no longer opens Ableton

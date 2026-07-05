@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Read-only high-frequency observation probe for the Proton-exp Ableton window
+# presentation flicker. Launches nothing itself — the CALLER launches
+# `WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton`; this samples the main
+# window's presentation properties every ~300ms and writes a compact per-sample
+# CSV plus a classification summary. Never touches the working prefix, KWin, or
+# DXVK; never authorizes or interacts with any window.
+#
+# Usage: observe-ableton-proton-flicker <out_dir> [duration_seconds] [interval_ms]
+set -uo pipefail
+export DISPLAY="${DISPLAY:-:0}"
+
+OUT="${1:?usage: observe-ableton-proton-flicker <out_dir> [duration_s] [interval_ms]}"
+DUR="${2:-100}"
+IVAL_MS="${3:-300}"
+mkdir -p "$OUT"
+CSV="$OUT/samples.csv"
+SUM="$OUT/summary.txt"
+sleep_s="$(awk "BEGIN{print $IVAL_MS/1000}")"
+
+prop() { xprop -id "$1" "$2" 2>/dev/null | sed 's/.*= //; s/\r$//' | tr -d '\n'; }
+
+# Wait for the tall main window (title "Untitled - Ableton Live 12 Suite").
+MAIN=""
+for _ in $(seq 1 200); do
+  MAIN="$(wmctrl -lx 2>/dev/null | grep -i 'Untitled - Ableton Live 12 Suite' | awk 'NR==1{print $1}')"
+  [[ -n "$MAIN" ]] && break
+  sleep 0.5
+done
+if [[ -z "$MAIN" ]]; then echo "no_main_window" > "$SUM"; exit 1; fi
+# Pipe-delimited: frame_extents and geom contain commas, so comma-CSV misaligns.
+printf 't_ms|win_id|pid|frame_top|motif_dec|wm_state|geom|type|auth_dialog|webview2_n\n' > "$CSV"
+
+start_ns="$(date +%s%N)"
+end_ns=$(( start_ns + DUR*1000000000 ))
+declare -A seen_win seen_frame seen_state seen_motif seen_geom
+n=0
+while (( $(date +%s%N) < end_ns )); do
+  t_ms=$(( ($(date +%s%N) - start_ns)/1000000 ))
+  # re-resolve the main window each sample so window recreation is captured
+  cur="$(wmctrl -lx 2>/dev/null | grep -i 'Untitled - Ableton Live 12 Suite' | awk 'NR==1{print $1}')"
+  [[ -z "$cur" ]] && cur="$MAIN"
+  pid="$(prop "$cur" _NET_WM_PID)"
+  fe="$(prop "$cur" _NET_FRAME_EXTENTS)"
+  ftop="$(awk -F', *' '{print $3}' <<<"$fe")"; ftop="${ftop:-none}"   # top frame extent
+  motif="$(prop "$cur" _MOTIF_WM_HINTS)"
+  mdec="$(awk -F', *' '{print $3}' <<<"$motif")"; mdec="${mdec:-none}"
+  state="$(prop "$cur" _NET_WM_STATE | sed 's/_NET_WM_STATE_//g; s/, /+/g')"; state="${state:-none}"
+  geom="$(xwininfo -id "$cur" 2>/dev/null | awk '/upper-left X/{x=$NF} /upper-left Y/{y=$NF} /Width:/{w=$NF} /Height:/{h=$NF} END{print x"+"y"_"w"x"h}')"
+  typ="$(prop "$cur" _NET_WM_WINDOW_TYPE | sed 's/_NET_WM_WINDOW_TYPE_//')"
+  auth="$(wmctrl -lG 2>/dev/null | grep -i ableton | awk '$5==512 && $6==479{print "yes"; exit}')"; auth="${auth:-no}"
+  wv="$(pgrep -cf 'msedgewebview2\.exe' 2>/dev/null || echo 0)"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$t_ms" "$cur" "$pid" "$ftop" "$mdec" "$state" "$geom" "$typ" "$auth" "$wv" >> "$CSV"
+  seen_win["$cur"]=1; seen_frame["$ftop"]=1; seen_state["$state"]=1; seen_motif["$mdec"]=1; seen_geom["$geom"]=1
+  n=$((n+1))
+  sleep "$sleep_s"
+done
+
+# ---- classification (pipe-delimited: t=1 win=2 pid=3 frame_top=4 motif=5
+#      state=6 geom=7 type=8 auth=9 webview2=10)
+frame_top_values="$(awk -F'|' 'NR>1{print $4}' "$CSV" | sort -u | tr '\n' ' ')"
+frame_toggled=$([[ "${#seen_frame[@]}" -gt 1 ]] && echo yes || echo no)
+winid_changed=$([[ "${#seen_win[@]}" -gt 1 ]] && echo yes || echo no)
+state_changed=$([[ "${#seen_state[@]}" -gt 1 ]] && echo yes || echo no)
+motif_changed=$([[ "${#seen_motif[@]}" -gt 1 ]] && echo yes || echo no)
+geom_changed=$([[ "${#seen_geom[@]}" -gt 1 ]] && echo yes || echo no)
+wv_min="$(awk -F'|' 'NR>1{print $10}' "$CSV" | sort -n | head -1)"
+wv_max="$(awk -F'|' 'NR>1{print $10}' "$CSV" | sort -n | tail -1)"
+auth_seen="$(awk -F'|' 'NR>1 && $9=="yes"{c++} END{print c+0}' "$CSV")"
+frame_decorated_pct="$(awk -F'|' 'NR>1{n++; if($4==28)d++} END{if(n)printf "%d", 100*d/n}' "$CSV")"
+
+# count frame_top transitions (28<->0 style)
+transitions="$(awk -F'|' 'NR>1{f=$4; if(prev!="" && f!=prev) c++; prev=f} END{print c+0}' "$CSV")"
+
+{
+  echo "samples=$n  duration_s=$DUR  interval_ms=$IVAL_MS"
+  echo "distinct_window_ids=${#seen_win[@]} : ${!seen_win[*]}"
+  echo "window_id_changed=$winid_changed"
+  echo "frame_extents_toggled=$frame_toggled  frame_top_values_seen={ $frame_top_values}  decorated_pct=${frame_decorated_pct}  transitions=$transitions"
+  echo "maximize_state_changed=$state_changed  states_seen={ ${!seen_state[*]} }"
+  echo "motif_decorations_changed=$motif_changed  motif_dec_seen={ ${!seen_motif[*]} }"
+  echo "geometry_changed=$geom_changed  geoms_seen={ ${!seen_geom[*]} }"
+  echo "webview2_count_range=${wv_min}..${wv_max}"
+  echo "auth_dialog_samples=$auth_seen / $n"
+  # classification
+  cls="unknown_or_insufficient"
+  if [[ "$winid_changed" == yes ]]; then cls="ableton_window_recreation"
+  elif [[ "$state_changed" == yes ]]; then cls="maximize_state_churn"
+  elif [[ "$frame_toggled" == yes && "$motif_changed" == yes ]]; then cls="wine_motif_decoration_churn"
+  elif [[ "$frame_toggled" == yes ]]; then cls="kwin_decoration_toggle"
+  elif [[ "$geom_changed" == yes ]]; then cls="geometry_churn"
+  else cls="window_props_stable_check_presentation_layer"; fi
+  echo "flicker_classification=$cls"
+} | tee "$SUM"
