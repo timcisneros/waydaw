@@ -9,6 +9,11 @@ LOG_DIR="$ROOT_DIR/logs"
 LOG_FILE="$LOG_DIR/ableton.log"
 mkdir -p "$LOG_DIR"
 
+diagnostic_no_registry="${WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY:-0}"
+dry_run="${WAYDAW_ABLETON_DRY_RUN:-0}"
+registry_mutation_enabled=yes
+virtual_desktop_mutation_enabled=yes
+
 warn_if_ableton_updates_present() {
   local autoupdates="$WINEPREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/_autoupdates"
   local updated="$WINEPREFIX/drive_c/ProgramData/Ableton/.Live 12 Suite_updated"
@@ -53,6 +58,154 @@ find_ableton_exe() {
   find "$drive_c" -type f -iname 'Ableton Live 12*.exe' 2>/dev/null | head -n 1
 }
 
+wine_reg_value() {
+  local key="$1"
+  local value_name="$2"
+  local output
+
+  output="$(env -u WAYLAND_DISPLAY wine reg query "$key" /v "$value_name" 2>/dev/null)" || return 1
+
+  awk -v value_name="$value_name" '
+    $1 == value_name {
+      value = $0
+      sub("^[[:space:]]*" value_name "[[:space:]]+REG_[^[:space:]]+[[:space:]]+", "", value)
+      sub(/\r$/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' <<<"$output"
+}
+
+print_wine_reg_value() {
+  local label="$1"
+  local key="$2"
+  local value_name="$3"
+  local value
+
+  if value="$(wine_reg_value "$key" "$value_name")"; then
+    printf '%s=%s\n' "$label" "$value"
+  else
+    printf '%s=unset\n' "$label"
+  fi
+}
+
+configure_ableton_windowing() {
+  env -u WAYLAND_DISPLAY wine reg add 'HKCU\Software\Wine\X11 Driver' /v Managed /t REG_SZ /d Y /f >/dev/null || return 1
+  env -u WAYLAND_DISPLAY wine reg add 'HKCU\Software\Wine\X11 Driver' /v Decorated /t REG_SZ /d Y /f >/dev/null || return 1
+  env -u WAYLAND_DISPLAY wine reg delete 'HKCU\Software\Wine\Explorer' /v Desktop /f >/dev/null 2>&1 || true
+  env -u WAYLAND_DISPLAY wine reg delete 'HKCU\Software\Wine\Explorer\Desktops' /v Default /f >/dev/null 2>&1 || true
+}
+
+configure_ableton_graphics() {
+  ableton_graphics="${WAYDAW_ABLETON_GRAPHICS:-wined3d}"
+
+  if [[ "$diagnostic_no_registry" == 1 && "$ableton_graphics" != dxvk ]]; then
+    printf 'ERROR: WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY=1 requires WAYDAW_ABLETON_GRAPHICS=dxvk.\n' >&2
+    return 1
+  fi
+
+  case "$ableton_graphics" in
+    wined3d)
+      ableton_winedlloverrides="dxgi,d3d11=b"
+      ableton_dxvk_state="disabled requested"
+      ;;
+    dxvk)
+      if [[ "$diagnostic_no_registry" == 1 ]]; then
+        ableton_winedlloverrides=""
+      else
+        ableton_winedlloverrides="${WINEDLLOVERRIDES:-}"
+      fi
+      ableton_dxvk_state="enabled"
+      ;;
+    *)
+      printf 'ERROR: invalid WAYDAW_ABLETON_GRAPHICS=%s\n' "$ableton_graphics" >&2
+      printf 'Expected WAYDAW_ABLETON_GRAPHICS=wined3d or WAYDAW_ABLETON_GRAPHICS=dxvk.\n' >&2
+      return 1
+      ;;
+  esac
+}
+
+print_launch_config() {
+  printf '[%s] effective environment before Ableton launch\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+  printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+  printf 'WAYDAW_ABLETON_GRAPHICS=%s\n' "$ableton_graphics"
+  printf 'WINEDLLOVERRIDES=%s\n' "${ableton_winedlloverrides:-}"
+  printf 'Ableton DXVK=%s\n' "$ableton_dxvk_state"
+  printf 'GDK_BACKEND=%s\n' "${GDK_BACKEND:-}"
+  printf 'QT_QPA_PLATFORM=%s\n' "${QT_QPA_PLATFORM:-}"
+  printf 'SDL_VIDEODRIVER=%s\n' "${SDL_VIDEODRIVER:-}"
+  printf 'DISPLAY=%s\n' "${DISPLAY:-}"
+  printf 'WAYLAND_DISPLAY=(unset for wine process; host value was %s)\n' "${WAYLAND_DISPLAY:-empty}"
+  printf 'Registry mutation enabled=%s\n' "$registry_mutation_enabled"
+  printf 'Virtual desktop mutation enabled=%s\n' "$virtual_desktop_mutation_enabled"
+  if [[ "$diagnostic_no_registry" == 1 ]]; then
+    printf 'Wine registry inspection=skipped in diagnostic no-registry mode\n'
+  else
+    print_wine_reg_value "Wine X11 Managed" 'HKCU\Software\Wine\X11 Driver' "Managed"
+    print_wine_reg_value "Wine X11 Decorated" 'HKCU\Software\Wine\X11 Driver' "Decorated"
+    print_wine_reg_value "Wine Explorer Desktop" 'HKCU\Software\Wine\Explorer' "Desktop"
+    print_wine_reg_value "Wine Explorer Default Desktop" 'HKCU\Software\Wine\Explorer\Desktops' "Default"
+  fi
+  printf 'Ableton executable=%s\n' "$ableton_exe"
+  printf 'Launch command=env -u WAYLAND_DISPLAY WINEPREFIX=%q' "$WINEPREFIX"
+  if [[ -n "${ableton_winedlloverrides:-}" ]]; then
+    printf ' WINEDLLOVERRIDES=%q' "$ableton_winedlloverrides"
+  fi
+  printf ' wine %q' "$ableton_exe"
+  if [[ "$#" -gt 0 ]]; then
+    printf ' %q' "$@"
+  fi
+  printf '\n'
+  if env | grep -E '^PYTHON' >/dev/null; then
+    printf 'Remaining PYTHON* variables:\n'
+    env | grep -E '^PYTHON' | sort
+  else
+    printf 'Remaining PYTHON* variables: none\n'
+  fi
+}
+
+print_dry_run() {
+  local wine_binary launch_command
+  wine_binary="$(command -v wine)"
+  if [[ "$diagnostic_no_registry" == 1 ]]; then
+    printf -v launch_command 'env -u WAYLAND_DISPLAY -u WINEDLLOVERRIDES WINEPREFIX=%q wine %q' \
+      "$WINEPREFIX" "$ableton_exe"
+  elif [[ -n "${ableton_winedlloverrides:-}" ]]; then
+    printf -v launch_command 'env -u WAYLAND_DISPLAY WINEPREFIX=%q WINEDLLOVERRIDES=%q wine %q' \
+      "$WINEPREFIX" "$ableton_winedlloverrides" "$ableton_exe"
+  else
+    printf -v launch_command 'env -u WAYLAND_DISPLAY WINEPREFIX=%q wine %q' \
+      "$WINEPREFIX" "$ableton_exe"
+  fi
+  if [[ "$#" -gt 0 ]]; then
+    local arg
+    for arg in "$@"; do
+      printf -v launch_command '%s %q' "$launch_command" "$arg"
+    done
+  fi
+
+  printf 'wine_binary=%s\n' "$wine_binary"
+  printf 'wineprefix=%s\n' "$WINEPREFIX"
+  printf 'graphics_mode=%s\n' "$ableton_graphics"
+  printf 'winedlloverrides=%s\n' "${ableton_winedlloverrides:-}"
+  printf 'registry_mutation_enabled=%s\n' "$registry_mutation_enabled"
+  printf 'virtual_desktop_mutation_enabled=%s\n' "$virtual_desktop_mutation_enabled"
+  printf 'dxvk_expected_active=%s\n' "$([[ "$ableton_graphics" == dxvk ]] && echo yes || echo no)"
+  printf 'would_launch_command=%s\n' "$launch_command"
+}
+
+print_only=0
+if [[ "${1:-}" == "--print-launch-config" ]]; then
+  print_only=1
+  shift
+fi
+
 if ! command -v wine >/dev/null 2>&1; then
   printf 'ERROR: wine not found on PATH.\n' >&2
   exit 1
@@ -71,28 +224,45 @@ if [[ -z "$ableton_exe" ]]; then
 fi
 
 warn_if_ableton_updates_present | tee -a "$LOG_FILE"
+if ! configure_ableton_graphics; then
+  exit 1
+fi
+if [[ "$diagnostic_no_registry" == 1 ]]; then
+  registry_mutation_enabled=no
+  virtual_desktop_mutation_enabled=no
+fi
+
+if [[ "$dry_run" == 1 ]]; then
+  print_dry_run "$@"
+  exit 0
+fi
+
+if [[ "$diagnostic_no_registry" != 1 ]]; then
+  if ! configure_ableton_windowing; then
+    printf 'ERROR: failed to configure Ableton Wine windowing in WINEPREFIX=%s\n' "$WINEPREFIX" | tee -a "$LOG_FILE" >&2
+    printf 'ERROR: unable to set Managed=Y, Decorated=Y, and disable Wine virtual desktop before launch.\n' | tee -a "$LOG_FILE" >&2
+    exit 1
+  fi
+fi
 
 printf '[%s] launching Ableton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$ableton_exe" >>"$LOG_FILE"
-{
-  printf '[%s] effective environment before Ableton launch\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-  printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
-  printf 'GDK_BACKEND=%s\n' "${GDK_BACKEND:-}"
-  printf 'QT_QPA_PLATFORM=%s\n' "${QT_QPA_PLATFORM:-}"
-  printf 'SDL_VIDEODRIVER=%s\n' "${SDL_VIDEODRIVER:-}"
-  printf 'DISPLAY=%s\n' "${DISPLAY:-}"
-  printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY:-}"
-  printf 'Ableton executable=%s\n' "$ableton_exe"
-  if env | grep -E '^PYTHON' >/dev/null; then
-    printf 'Remaining PYTHON* variables:\n'
-    env | grep -E '^PYTHON' | sort
-  else
-    printf 'Remaining PYTHON* variables: none\n'
-  fi
-} | tee -a "$LOG_FILE"
+print_launch_config "$@" | tee -a "$LOG_FILE"
+
+if [[ "$print_only" -eq 1 ]]; then
+  exit 0
+fi
 
 set +e
-wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
-wine_status="${PIPESTATUS[0]}"
+if [[ "$diagnostic_no_registry" == 1 ]]; then
+  env -u WAYLAND_DISPLAY -u WINEDLLOVERRIDES WINEPREFIX="$WINEPREFIX" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
+  wine_status="${PIPESTATUS[0]}"
+elif [[ -n "${ableton_winedlloverrides:-}" ]]; then
+  env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" WINEDLLOVERRIDES="$ableton_winedlloverrides" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
+  wine_status="${PIPESTATUS[0]}"
+else
+  env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
+  wine_status="${PIPESTATUS[0]}"
+fi
 set -e
 
 printf '[%s] Ableton wine exit code: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$wine_status" | tee -a "$LOG_FILE"

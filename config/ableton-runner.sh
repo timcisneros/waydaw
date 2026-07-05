@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# WayDAW runner selection — sourced by config/env AFTER WINEPREFIX is set.
+#
+# Default (WAYDAW_ABLETON_RUNNER unset/empty or "system"): no-op. System Wine
+# and the working prefix are used exactly as before. This file must not change
+# any behavior unless a non-default runner is explicitly requested.
+#
+# WAYDAW_ABLETON_RUNNER=proton-exp: EXPERIMENTAL. Routes Ableton through the
+# cached non-staging Proton-exp 11.0 runner, which (unlike system wine-staging
+# 11.0) does not hit the RtlAcquireSRWLockExclusive UI-thread deadlock. This
+# mode is intentionally restricted to the COPIED test prefix; it refuses to
+# target the working prefix. See docs/ableton-proton-runner-mode.md.
+#
+# Design notes:
+#   * PATH is prepended with the runner bin dir so unqualified wine/wineserver/
+#     winedbg resolve to the runner.
+#   * Proton mode forces the diagnostic no-registry launch path so bin/ableton
+#     does NOT issue `wine reg` writes; those trigger a Proton prefix-update
+#     that overwrites the prefix's DXVK d3d11/dxgi with Wine builtins. Skipping
+#     them keeps the debug DXVK DLLs intact through launch (matches the
+#     validated 2026-07-04 progress runs).
+#   * DXVK is force-enabled and, defensively, the debug-DXVK DLL hashes are
+#     re-asserted into the test prefix (restored read-only from the working
+#     prefix) in case a prior boot drifted them.
+
+_waydaw_runner="${WAYDAW_ABLETON_RUNNER:-}"
+
+if [[ -n "$_waydaw_runner" && "$_waydaw_runner" != system ]]; then
+  _waydaw_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  # Known-good debug DXVK (2.7) DLL hashes — the mandatory backend for this
+  # prefix. The working prefix is the authoritative read-only source.
+  _dxvk_d3d11_sha=557c1f50e7ff73bcd24968a02352519df89d8b3fe037d47580091ffafe1940dd
+  _dxvk_dxgi_sha=f31cd64b547c59441956b17e2a013791dcb62abb1e671fb31d49ff4d6c2b3fd7
+
+  case "$_waydaw_runner" in
+    proton-exp)
+      _rbin="$_waydaw_root/.local-runners/kron4ek-proton-exp-11.0/bin"
+      if [[ ! -x "$_rbin/wine" ]]; then
+        printf 'WAYDAW runner ERROR: proton-exp wine not found at %s\n' "$_rbin/wine" >&2
+        return 1
+      fi
+
+      _working_prefix="$WINEPREFIX"
+      # Proton mode targets the copied test prefix only.
+      WINEPREFIX="${WAYDAW_ABLETON_RUNNER_PREFIX:-$HOME/WinePrefixes/ableton12-winebase-protonexp-test}"
+      export WINEPREFIX
+      if [[ "$WINEPREFIX" == "$_working_prefix" ]]; then
+        printf 'WAYDAW runner ERROR: proton-exp refuses to target the working prefix (%s).\n' "$_working_prefix" >&2
+        printf 'Set WAYDAW_ABLETON_RUNNER_PREFIX to a copied test prefix.\n' >&2
+        return 1
+      fi
+      if [[ ! -d "$WINEPREFIX" ]]; then
+        printf 'WAYDAW runner ERROR: proton-exp test prefix does not exist: %s\n' "$WINEPREFIX" >&2
+        return 1
+      fi
+
+      export PATH="$_rbin:$PATH"
+      # Keep DXVK on and skip registry writes (see design notes above).
+      export WAYDAW_ABLETON_GRAPHICS="${WAYDAW_ABLETON_GRAPHICS:-dxvk}"
+      export WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY="${WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY:-1}"
+
+      # Defensive DXVK re-assert into the test prefix (working prefix read-only).
+      _tsys="$WINEPREFIX/drive_c/windows/system32"
+      _wsys="$_working_prefix/drive_c/windows/system32"
+      _waydaw_sha() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
+      for _pair in "d3d11.dll:$_dxvk_d3d11_sha" "dxgi.dll:$_dxvk_dxgi_sha"; do
+        _f="${_pair%%:*}"; _want="${_pair#*:}"
+        if [[ "$(_waydaw_sha "$_tsys/$_f")" != "$_want" ]]; then
+          if [[ "$(_waydaw_sha "$_wsys/$_f")" == "$_want" ]]; then
+            cp -f "$_wsys/$_f" "$_tsys/$_f" \
+              && printf 'WAYDAW runner: re-asserted debug DXVK %s into test prefix\n' "$_f" >&2
+          else
+            printf 'WAYDAW runner WARN: DXVK %s drifted and working-prefix source hash mismatch; not restored\n' "$_f" >&2
+          fi
+        fi
+      done
+      unset -f _waydaw_sha 2>/dev/null
+
+      printf 'WAYDAW runner=proton-exp | wine=%s | prefix=%s | graphics=%s | no_registry=%s\n' \
+        "$_rbin/wine" "$WINEPREFIX" "$WAYDAW_ABLETON_GRAPHICS" "$WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY" >&2
+      ;;
+    *)
+      printf 'WAYDAW runner ERROR: unknown WAYDAW_ABLETON_RUNNER=%s (expected: system, proton-exp)\n' "$_waydaw_runner" >&2
+      return 1
+      ;;
+  esac
+  unset _rbin _working_prefix _tsys _wsys _pair _f _want
+fi
+
+unset _waydaw_runner _waydaw_root _dxvk_d3d11_sha _dxvk_dxgi_sha

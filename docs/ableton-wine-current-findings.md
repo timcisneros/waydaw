@@ -1884,3 +1884,23 @@ not_proven=full end-to-end usability (auth dialog not interacted with; authoriza
 dxvk_debug_build_unchanged_pre_post=yes; working_prefix_touched=no; installed=nothing; processes_cleaned=yes
 next=opt-in WAYDAW_ABLETON_RUNNER=proton-exp mode (prepend runner bin, keep XWayland+DXVK, re-assert+verify DXVK hashes after wineboot); copied-prefix user-driven authorization attempt before any working-prefix use
 ```
+
+## Proton-exp Opt-In Runner Mode — LANDED (2026-07-04)
+
+Runner selection centralized in `config/ableton-runner.sh` (sourced by
+`config/env`); `bin/ableton` body unchanged. See
+`docs/ableton-proton-runner-mode.md`.
+
+```text
+PROTON_RUNNER_MODE:
+entrypoint=WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton
+default_unchanged=yes (unset/system -> /usr/bin/wine + working prefix + registry_mutation=yes)
+proton_resolution=.local-runners/kron4ek-proton-exp-11.0/bin/wine
+proton_prefix=~/WinePrefixes/ableton12-winebase-protonexp-test (copied; refuses working prefix)
+proton_forces=graphics=dxvk, DIAGNOSTIC_NO_REGISTRY=1 (skip reg writes -> no Proton DXVK clobber), no vdesktop, env -u WAYLAND_DISPLAY kept, KWin untouched
+dxvk_reassert=verifies test-prefix d3d11/dxgi vs 557c1f50…/f31cd64b…; restores read-only from working prefix on drift (tested: clobber -> restored)
+guards=unknown runner rejected; refuses working prefix; missing runner/prefix errors
+dry_run=WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton (no launch)
+working_prefix_touched=no; installed=nothing; prerequisite diagnostic launcher (bin/ableton no-registry mode) + config/env WINEPREFIX fix committed alongside
+next=copied-prefix launch for a user-driven legitimate authorization + editor-interactivity check before any working-prefix/default use
+```

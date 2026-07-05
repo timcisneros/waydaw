@@ -14,4 +14,8 @@ unset GDK_BACKEND
 unset QT_QPA_PLATFORM
 unset SDL_VIDEODRIVER
 
-export WINEPREFIX="$HOME/.wine_ableton12"
+export WINEPREFIX="$HOME/WinePrefixes/ableton12"
+
+# Optional opt-in runner selection (default: system Wine, no-op). Set
+# WAYDAW_ABLETON_RUNNER=proton-exp for the experimental Proton-exp path.
+source "$(dirname "${BASH_SOURCE[0]}")/ableton-runner.sh"
