@@ -1934,7 +1934,7 @@ working prefix never touched. Detail + checklist:
 ```text
 PHASE_COMPLETE_PREAUTH:
 runner_mode=WAYDAW_ABLETON_RUNNER=proton-exp (only Proton entry; default=system Wine unchanged)
-new_this_phase=bin/ableton-proton-cleanup (scoped runner-wineserver cleanup), bin/test-proton-runner-mode (22-check launch-free dry-run suite), docs/ableton-proton-phase-completion.md
+new_this_phase=bin/ableton-proton-cleanup (scoped runner-wineserver cleanup), bin/verify-proton-runner-mode (22-check launch-free dry-run suite), docs/ableton-proton-phase-completion.md
 verification=22/22 pass; working prefix DXVK read-only, untouched
 cleanup_scope=runner wineserver + copied prefix; refuses working prefix; NOT bin/kill-session
 dxvk_reassert=deterministic, verified via throwaway test DLLs

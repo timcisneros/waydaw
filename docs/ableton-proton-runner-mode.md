@@ -71,14 +71,14 @@ Expected: `wine_binary=…/kron4ek-proton-exp-11.0/bin/wine`,
 
 ## Verification suite
 
-`bin/test-proton-runner-mode` runs a launch-free, dry-run check of the whole
+`bin/verify-proton-runner-mode` runs a launch-free, dry-run check of the whole
 mode (default resolution, Proton resolution, unknown-runner rejection,
 working-prefix refusal, DXVK reassertion against throwaway test DLLs, and
 cleanup scoping). It never touches the working prefix (it reads its DXVK DLLs
 read-only as the reassert source) and exits nonzero on any failure:
 
 ```bash
-./bin/test-proton-runner-mode
+./bin/verify-proton-runner-mode
 ```
 
 ## Controlled cleanup

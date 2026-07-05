@@ -29,7 +29,7 @@ now and without touching the working prefix.
   working prefix on drift).
 - Reproducible cleanup: `bin/ableton-proton-cleanup` (runner wineserver, copied
   prefix; refuses the working prefix). Not `bin/kill-session`.
-- Verification: `bin/test-proton-runner-mode` (launch-free dry-run suite,
+- Verification: `bin/verify-proton-runner-mode` (launch-free dry-run suite,
   22 checks, working prefix read-only).
 
 ## Readiness checklist
@@ -63,6 +63,47 @@ Gated by authorization (LATER, user-owned — NOT required for this phase):
 - The broader ruled-out investigation tooling (KWin/geometry/WebView2/
   DXVK-loader probes) remains as untracked working-tree files; it is unrelated
   to the runner path and is neither committed nor removed by this phase.
+
+## Dirty/untracked file classification (as of phase completion)
+
+Nothing in the working tree is still required for this phase — the runner
+path, verification, cleanup, and docs are all committed. Everything below is
+intentionally left untouched.
+
+Unrelated pre-existing work (tracked, modified):
+
+- `.gitignore` — user's docs allowlist edits (predates this work).
+- `README.md` — pre-existing edits.
+- `bin/ableton-contained` — pre-existing edits.
+
+Unrelated pre-existing diagnostic tooling (untracked; historically useful,
+referenced by the findings record, not part of the runner path):
+
+- `bin/ableton-session-probe` — session snapshot probe. Note: the committed
+  `bin/ableton-dxvk-version-test` calls it; that dependency predates this
+  phase and only matters when re-running the DXVK A/B harness.
+- `bin/ableton-runner-test` — copied-prefix runner comparison harness.
+- `bin/ableton-window-ownership-probe`, `bin/ableton-windowing-status`,
+  `bin/diagnose-ableton-graphics-backend`, `bin/diagnose-ableton-interaction`,
+  `bin/diagnose-ableton-windowing` — investigation probes.
+- `docs/ableton-custom-compat-layer.md`, `docs/ableton-dxvk-loader-audit.md`,
+  `docs/ableton-runner-candidate-plan.md`,
+  `docs/ableton-runner-test-harness.md`,
+  `docs/ableton-system-wine-baseline-next.md`, `docs/ableton-x11-ab-test.md`
+  — investigation records for closed branches (gitignored by `docs/*`).
+
+Obsolete diagnostic leftovers (untracked; belong to ruled-out branches —
+KWin/geometry/cursor/WebView2/wined3d/loader — candidates for deletion in a
+future cleanup, not deleted here):
+
+- `bin/ableton-cursor-guard`, `bin/fix-ableton-window-bounds`,
+  `bin/install-ableton-kwin-rule`, `bin/log-ableton-window-geometry`,
+  `bin/watch-ableton-window-geometry` — geometry/cursor/KWin branch (ruled out).
+- `bin/ableton-webview2-mode` — WebView2 flag modes (ruled out as fix).
+- `bin/ableton-graphics-wined3d-cleantest` — wined3d test (not viable).
+- `bin/ableton-dxvk-loader-probe`, `bin/ableton-dxvk-pe-loader-probe`,
+  `.local-tools/` (built PE probe), `tools/` (cursor helper sources) —
+  abandoned runner-candidate loader audit.
 
 ## Single next action — LATER, when the user chooses to authorize
 
