@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Narrowly-scoped KWin rule that restores the titlebar/frame for the Ableton
+# main window WHEN RUN UNDER PROTON-EXP.
+#
+# Why: Wine emits _MOTIF_WM_HINTS decorations=0 for Ableton's main window under
+# both system Wine and Proton. The pre-existing rule (wmclass=ableton live 12
+# suite.exe) re-adds the border under system Wine, but Proton sets
+# WM_CLASS=steam_proton, so that rule does not match and the window is frameless.
+# See docs/ableton-proton-window-presentation.md.
+#
+# Scope (all must match — AND): WM_CLASS exactly "steam_proton", title contains
+# "Ableton Live 12 Suite", window type Normal. This does NOT affect other
+# steam_proton/Proton apps (different titles) or the auth dialog (type Dialog).
+#
+# Reversible: backs up kwinrulesrc before editing; `--uninstall` removes the
+# rule and restores the [General] list. Idempotent (stable rule id).
+#
+# Usage:
+#   bin/install-ableton-proton-kwin-rule            # install/update
+#   bin/install-ableton-proton-kwin-rule --uninstall
+#   bin/install-ableton-proton-kwin-rule --dry-run  # show intended keys only
+set -uo pipefail
+
+RULE_ID="waydaw-ableton-proton-decoration"
+RULE_DESC="WayDAW: Ableton (Proton-exp) titlebar restore"
+FILE="kwinrulesrc"
+FULL="$HOME/.config/$FILE"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+for t in kwriteconfig6 kreadconfig6; do
+  have "$t" || { printf 'ERROR: %s not found\n' "$t" >&2; exit 1; }
+done
+
+mode="install"
+case "${1:-}" in
+  --uninstall) mode="uninstall" ;;
+  --dry-run)   mode="dry-run" ;;
+  "") ;;
+  *) printf 'usage: %s [--uninstall|--dry-run]\n' "$(basename "$0")" >&2; exit 2 ;;
+esac
+
+reconfigure_kwin() {
+  if have qdbus6; then qdbus6 org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+  elif have qdbus; then qdbus org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+  elif have dbus-send; then dbus-send --session --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure >/dev/null 2>&1 || true
+  fi
+}
+
+# The exact keys this rule writes (noborderrule value mirrors the proven
+# staging rule for this Plasma 6.7 — see docs/ableton-proton-window-presentation.md).
+print_intended_keys() {
+  cat <<EOF
+[$RULE_ID]
+Description=$RULE_DESC
+wmclass=steam_proton          # match Proton's WM_CLASS
+wmclassmatch=1                # 1 = exact
+title=Ableton Live 12 Suite   # substring of "Untitled - Ableton Live 12 Suite"
+titlematch=2                  # 2 = substring
+types=1                       # 1 = Normal window only (excludes Dialog)
+noborder=false                # false = window HAS a titlebar/frame
+noborderrule=3                # mirrors the proven staging rule's policy value in
+                              # this Plasma 6.7 (the value that yields a stable
+                              # decorated Ableton window under system Wine)
+EOF
+}
+
+if [[ "$mode" == "dry-run" ]]; then
+  printf 'Intended KWin rule (%s):\n\n' "$FULL"
+  print_intended_keys
+  exit 0
+fi
+
+# Backup before any edit.
+if [[ -f "$FULL" ]]; then
+  BACKUP="$FULL.waydaw-backup-$(date +%Y%m%d-%H%M%S)"
+  cp -f "$FULL" "$BACKUP"
+  printf 'kwin_rules_backup=%s\n' "$BACKUP"
+fi
+
+# Read current [General] rules list into an array.
+current="$(kreadconfig6 --file "$FILE" --group General --key rules 2>/dev/null)"
+IFS=',' read -ra ids <<<"$current"
+present=0
+newlist=""
+for id in "${ids[@]}"; do
+  [[ -z "$id" ]] && continue
+  [[ "$id" == "$RULE_ID" ]] && present=1
+  newlist="${newlist:+$newlist,}$id"
+done
+
+if [[ "$mode" == "uninstall" ]]; then
+  # Drop the rule group and remove its id from the list.
+  kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key Description --delete 2>/dev/null || true
+  for k in wmclass wmclassmatch title titlematch types noborder noborderrule; do
+    kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key "$k" --delete 2>/dev/null || true
+  done
+  rebuilt=""
+  for id in "${ids[@]}"; do
+    [[ -z "$id" || "$id" == "$RULE_ID" ]] && continue
+    rebuilt="${rebuilt:+$rebuilt,}$id"
+  done
+  kwriteconfig6 --file "$FILE" --group General --key rules "$rebuilt"
+  cnt=0; IFS=',' read -ra r2 <<<"$rebuilt"; for i in "${r2[@]}"; do [[ -n "$i" ]] && cnt=$((cnt+1)); done
+  kwriteconfig6 --file "$FILE" --group General --key count "$cnt"
+  reconfigure_kwin
+  printf 'uninstalled=%s\n' "$RULE_ID"
+  exit 0
+fi
+
+# Install / update the rule group.
+kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key Description "$RULE_DESC"
+kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key wmclass "steam_proton"
+kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key wmclassmatch 1
+kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key title "Ableton Live 12 Suite"
+kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key titlematch 2
+kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key types 1
+kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key noborder false
+kwriteconfig6 --file "$FILE" --group "$RULE_ID" --key noborderrule 3
+
+if [[ "$present" -eq 0 ]]; then
+  newlist="${newlist:+$newlist,}$RULE_ID"
+fi
+kwriteconfig6 --file "$FILE" --group General --key rules "$newlist"
+cnt=0; IFS=',' read -ra r3 <<<"$newlist"; for i in "${r3[@]}"; do [[ -n "$i" ]] && cnt=$((cnt+1)); done
+kwriteconfig6 --file "$FILE" --group General --key count "$cnt"
+
+reconfigure_kwin
+printf 'installed_rule_id=%s\n' "$RULE_ID"
+printf 'rules_list=%s\n' "$newlist"
+printf 'match=wmclass=steam_proton(exact) AND title~="Ableton Live 12 Suite"(substring) AND type=Normal\n'
+printf 'effect=noborder=false forced (titlebar/frame restored)\n'

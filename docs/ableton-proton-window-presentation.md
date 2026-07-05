@@ -91,11 +91,63 @@ correct and cannot override the per-window Motif hint); DXVK/Wine-base changes
 (out of scope and not the cause); a launch-time geometry clamp (would fight the
 app and not restore the titlebar).
 
-## What remains later (still excludes authorization)
+## Fix applied (2026-07-04/05, user-approved KWin-rule option)
 
-- Choose and apply one of the two fix options above (option 1 needs KWin-rule
-  approval; option 2 needs a Proton `WM_CLASS` investigation).
-- Re-verify after the fix: top bar present, framed window, no bottom black bar,
-  and re-confirm thread health (no SRW deadlock, no `SendMessageW` wedge).
-- Authorization remains a separate, user-owned step and is **not** required to
-  resolve this presentation issue.
+Option 1 was approved and implemented as a **narrowly-scoped, reversible** KWin
+rule via `bin/install-ableton-proton-kwin-rule`:
+
+```
+[waydaw-ableton-proton-decoration]
+wmclass=steam_proton      wmclassmatch=1   # exact
+title=Ableton Live 12 Suite  titlematch=2  # substring
+types=1                                    # Normal window only (not the Dialog)
+noborder=false  noborderrule=3             # force titlebar/frame on
+```
+
+- Scope: matches ONLY normal windows whose `WM_CLASS` is exactly `steam_proton`
+  **and** whose title contains "Ableton Live 12 Suite". It does **not** affect
+  other Proton/`steam_proton` apps or the authorization Dialog. The pre-existing
+  staging rule (`ableton live 12 suite.exe`) is left untouched.
+- `noborderrule=3` mirrors the proven staging rule's policy value in this Plasma
+  6.7.1 (the value that yields a stable decorated Ableton window under system
+  Wine).
+- Reversible: the installer backs up `kwinrulesrc` before editing and supports
+  `--uninstall`. Canonical pre-change backup:
+  `~/.config/kwinrulesrc.waydaw-backup-20260704-231534` (contains only the
+  original staging rule). Remove the rule with
+  `bin/install-ableton-proton-kwin-rule --uninstall`.
+
+### Verification status: PARTIAL — needs a clean KWin rule load
+
+- **The rule matches and can decorate the Proton window** — confirmed: after
+  KWin loaded the rule, a fresh Proton window appeared with
+  `_NET_FRAME_EXTENTS = 0, 0, 28, 0` (a 28px titlebar) at map time, with
+  `WM_CLASS=steam_proton`. This proves the `steam_proton`+title match works and
+  KWin will re-add the frame.
+- **A stable decorated window was NOT confirmed in-session.** Two confounds
+  prevented a clean in-session result: (a) KWin's mid-session rule reload via
+  `org.kde.KWin.reconfigure` is unreliable/laggy in this Plasma 6.7 — new rule
+  values take many reconfigures (or a restart) to load, so iterating on the rule
+  in-session is not deterministic; and (b) Ableton double-initialises at startup
+  (a known behaviour), spawning a second window generation, and the persistent
+  window settled back to frameless in-session.
+- A **KWin restart / relogin** (a clean rulebook load at session start, exactly
+  how the staging rule loads) is required to validate the stable end state. A
+  compositor restart was deliberately **not** forced here: it is a disruptive,
+  session-wide action and out of scope for this task.
+- Liveness stayed healthy throughout (`main_thread_in_srw_exclusive=no`, no
+  `SendMessageW` wedge, `forward_progress=executing`) — the rule work did not
+  regress the Proton runner.
+
+### What remains later (still excludes authorization)
+
+1. Log out / back in (or restart KWin) so the rule loads cleanly at session
+   start, then launch `WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton` and
+   confirm: titlebar present and stable, window framed, bottom black bar gone.
+2. If the maximized-both window still drops the frame after a clean load, the
+   next step is to also constrain its maximize state (the decorated staging
+   window is maximized **vertically only**, not both) — e.g. extend the rule to
+   force `maximizehoriz=false`, or adjust the copied-prefix Ableton window
+   placement. This is a follow-up, not done here.
+3. Authorization remains a separate, user-owned step and is **not** required to
+   resolve this presentation issue.
