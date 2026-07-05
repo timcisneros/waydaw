@@ -139,15 +139,59 @@ noborder=false  noborderrule=3             # force titlebar/frame on
   `SendMessageW` wedge, `forward_progress=executing`) — the rule work did not
   regress the Proton runner.
 
+### Clean-load validation (2026-07-05) — RULE INSUFFICIENT
+
+The user logged out and back in (a clean KWin rulebook load at session start,
+exactly how the staging rule loads). Rule verified present and correct after
+the relogin. Then `WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton` (copied
+prefix; no authorization).
+
+Result: the rule **does not decorate the window**, even though the window
+satisfies **every** rule criterion:
+
+```
+window: WM_CLASS="steam_proton","steam_proton"   (rule: steam_proton exact  -> MATCH)
+        _NET_WM_WINDOW_TYPE=_NET_WM_WINDOW_TYPE_NORMAL  (rule: types=1       -> MATCH)
+        _NET_WM_NAME="Untitled - Ableton Live 12 Suite" (rule: substring      -> MATCH)
+        _NET_WM_STATE=MAXIMIZED_VERT + MAXIMIZED_HORZ
+        _MOTIF_WM_HINTS=0x3,0x6,0x0,0x0,0x0 (decorations=0)
+stable _NET_FRAME_EXTENTS = 0, 0, 0, 0   (frameless, for 90s, single window)
+```
+
+The earlier in-session "28px at map" observation did **not** reproduce after a
+clean load — it was a transient during window creation / Ableton's double-init,
+not a stable rule application. Liveness stayed healthy
+(`main_thread_in_srw_exclusive=no`, no `SendMessageW` wedge, executing).
+
+**Leading explanation:** the window is maximized in **both** directions
+(fullscreen-maximized, 0,0 1920x1080). KWin does not add a titlebar to a
+fully-maximized window that requests no decoration via Motif — even with a
+`noborder=false` force rule. The staging window that the analogous rule *does*
+decorate is maximized **vertically only** (848px wide, not full-screen). So the
+`noborder` rule alone is insufficient; the maximize/fullscreen state is the
+next variable.
+
+Per the task decision rule, KWin mutation was **stopped** here (the rule does
+not apply after clean-load). The rule remains installed but inert for this
+window; remove it any time with `bin/install-ableton-proton-kwin-rule --uninstall`.
+
 ### What remains later (still excludes authorization)
 
-1. Log out / back in (or restart KWin) so the rule loads cleanly at session
-   start, then launch `WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton` and
-   confirm: titlebar present and stable, window framed, bottom black bar gone.
-2. If the maximized-both window still drops the frame after a clean load, the
-   next step is to also constrain its maximize state (the decorated staging
-   window is maximized **vertically only**, not both) — e.g. extend the rule to
-   force `maximizehoriz=false`, or adjust the copied-prefix Ableton window
-   placement. This is a follow-up, not done here.
-3. Authorization remains a separate, user-owned step and is **not** required to
+1. Investigate the **maximize/fullscreen state** (approval-gated, not done): the
+   decorated staging window is maximized vertically only, the frameless Proton
+   window is maximized both. Candidate directions — (a) a KWin rule that also
+   unsets `maximizehoriz` (force) or sets a size/placement so the window is not
+   edge-to-edge fullscreen; (b) adjust the copied-prefix Ableton window
+   placement so it does not open fullscreen-maximized; (c) determine why Proton
+   opens maximized-both while system Wine opens maximized-vert (Ableton reads
+   the same-family prefs — the copied prefix's saved window state differs).
+2. Authorization remains a separate, user-owned step and is **not** required to
    resolve this presentation issue.
+
+### Branch status
+
+`fix/proton-exp-window-presentation` is **NOT merge-ready**: the presentation
+fix is not validated (rule insufficient after clean-load). The branch holds a
+correct diagnosis and a reversible, correctly-scoped rule that is not by itself
+enough; the maximize-state follow-up is required before this can be called
+fixed.
