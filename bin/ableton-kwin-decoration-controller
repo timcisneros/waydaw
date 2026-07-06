@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# WayDAW KWin decoration controller for the Proton-exp Ableton window.
+#
+# Loads/unloads config/kwin/waydaw-ableton-decoration.js through KWin's
+# RUNTIME scripting D-Bus interface (org.kde.kwin.Scripting). This changes no
+# KWin settings, writes no kwinrc/kwinrulesrc, installs nothing: the script
+# lives only in the running compositor and is gone on unload or KWin restart.
+#
+# Usage:
+#   ableton-kwin-decoration-controller --load       (alias: --install)
+#   ableton-kwin-decoration-controller --unload     (alias: --uninstall)
+#   ableton-kwin-decoration-controller --status
+#   ableton-kwin-decoration-controller --dry-run    (show commands, do nothing)
+#
+# Design + measurements: docs/ableton-proton-custom-presentation-controller.md
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_SRC="$ROOT_DIR/config/kwin/waydaw-ableton-decoration.js"
+PLUGIN_NAME="waydaw-ableton-decoration"
+
+BUS=(busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting)
+
+usage() { grep '^# ' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+is_loaded() {
+  # -> "b true" / "b false"
+  "${BUS[@]}" isScriptLoaded s "$PLUGIN_NAME" 2>/dev/null | awk '{print $2}'
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  --load|--install)
+    [[ -f "$SCRIPT_SRC" ]] || { echo "missing script source: $SCRIPT_SRC" >&2; exit 1; }
+    if [[ "$(is_loaded)" == "true" ]]; then
+      echo "already loaded: $PLUGIN_NAME"; exit 0
+    fi
+    out="$("${BUS[@]}" loadScript ss "$SCRIPT_SRC" "$PLUGIN_NAME")" || {
+      echo "loadScript failed: $out" >&2; exit 1; }
+    id="$(awk '{print $2}' <<<"$out")"
+    if [[ "$id" == "-1" ]]; then
+      echo "loadScript rejected (id=-1); is the name already taken?" >&2; exit 1
+    fi
+    # start() runs all loaded-but-idle scripts; ours is the only one we manage.
+    "${BUS[@]}" start || { echo "start failed" >&2; exit 1; }
+    if [[ "$(is_loaded)" == "true" ]]; then
+      echo "loaded: $PLUGIN_NAME (kwin script id=$id)"
+      echo "journal: journalctl --user -b | grep $PLUGIN_NAME"
+    else
+      echo "load appeared to succeed but isScriptLoaded=false" >&2; exit 1
+    fi
+    ;;
+  --unload|--uninstall)
+    out="$("${BUS[@]}" unloadScript s "$PLUGIN_NAME" 2>/dev/null)" || out="call_failed"
+    res="$(awk '{print $2}' <<<"$out")"
+    if [[ "$res" == "true" ]]; then
+      echo "unloaded: $PLUGIN_NAME"
+    else
+      echo "not loaded (nothing to unload): $PLUGIN_NAME"
+    fi
+    if [[ "$(is_loaded)" == "true" ]]; then
+      echo "ERROR: still loaded after unload" >&2; exit 1
+    fi
+    ;;
+  --status)
+    st="$(is_loaded)"
+    echo "plugin=$PLUGIN_NAME loaded=${st:-unknown}"
+    [[ "$st" == "true" || "$st" == "false" ]] || {
+      echo "could not query org.kde.KWin /Scripting (is KWin running?)" >&2; exit 1; }
+    ;;
+  --dry-run)
+    echo "script_source=$SCRIPT_SRC"
+    echo "plugin_name=$PLUGIN_NAME"
+    echo "would_run_load:   ${BUS[*]} loadScript ss $SCRIPT_SRC $PLUGIN_NAME ; ${BUS[*]} start"
+    echo "would_run_unload: ${BUS[*]} unloadScript s $PLUGIN_NAME"
+    echo "would_run_status: ${BUS[*]} isScriptLoaded s $PLUGIN_NAME"
+    echo "kwin_settings_touched=none (runtime scripting only; nothing persists a KWin restart)"
+    ;;
+  *) usage ;;
+esac

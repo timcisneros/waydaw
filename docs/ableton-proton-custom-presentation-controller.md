@@ -269,8 +269,89 @@ sub-perceptual (< 3/100 s with no multi-second frameless dwell).
 
 ## 9. Status
 
-Design note only. No prototype implemented, no KWin state changed, no
-Ableton launch performed for this note (all discovery was read-only:
-introspection, library strings, stock-script reading). Branch remains
-**held**. Next step requires explicit approval: implement §6
-(`bin/ableton-kwin-decoration-controller` + one measured validation launch).
+Design note only (2026-07-06 first commit). The §6 prototype was then
+explicitly approved and implemented — results in §10. Branch remains
+**held**.
+
+## 10. Prototype result (2026-07-06) — FLICKER ELIMINATED, VIABLE
+
+The §6 prototype was approved and implemented:
+
+- `bin/ableton-kwin-decoration-controller` — `--load/--install`,
+  `--unload/--uninstall`, `--status`, `--dry-run`. Talks only to
+  `org.kde.KWin /Scripting org.kde.kwin.Scripting` via `busctl`; changes no
+  KWin settings/files; nothing persists a KWin restart.
+- `config/kwin/waydaw-ableton-decoration.js` — the tracked KWin script
+  source. Scope predicate exactly as designed:
+  `normalWindow && resourceClass === "steam_proton" && caption.includes("Ableton Live 12 Suite")`.
+
+### Iteration 1 finding — `noBorderChanged` never fires (missing-data #2 resolved)
+
+The as-designed script (pin on `noBorderChanged` + `captionChanged`) matched
+the target window but logged **zero** re-pins across a full churn run
+(92% decorated / 28 transitions — baseline noise). Ground truth from the
+journal: **KWin's X11 Motif-hint handler drops the decoration and sets its
+internal no-border flag WITHOUT emitting `noBorderChanged`.** The signal
+path the design assumed simply never runs for hint-driven drops. (This also
+plausibly explains the earlier rule-policy failures beyond the reconfigure
+confound — the hint path is special-cased inside KWin.)
+
+### Iteration 2 — trigger on `frameGeometryChanged` (works)
+
+Every decoration drop changes the frame geometry (client reclaims the 28px
+titlebar), and `frameGeometryChanged` **does** fire on that path. The script
+now additionally connects it; the handler reads `w.noBorder` (which does
+reflect the silently-set internal flag — confirmed `true` at churn moments)
+and re-pins `noBorder = false`. Re-entrancy-safe: the restore fires one more
+geometry change, after which `noBorder` reads false and the handler no-ops.
+
+### Measurements (same probe/protocol as baseline: 300 ms × 100 s, copied prefix, unauthorized)
+
+| metric | baseline (no controller) | iteration 1 | **iteration 2** |
+|---|---|---|---|
+| decorated (frame_top=28) | 87% | 92% | **100%** |
+| frame transitions / 100 s | 28 | 28 | **0** |
+| `_MOTIF_WM_HINTS` toggling | yes (0x7a↔0x0) | yes | **yes — untouched, by design** |
+| `_NET_FRAME_EXTENTS` top | 28↔0 | 28↔0 | **constant 28** |
+| window id / maximize state | stable / MAX_VERT | stable | **stable / MAX_VERT only** |
+| geometry | 848x1052↔848x1080 | toggling | **constant 848x1052** |
+
+- Wine still churns the Motif hint underneath (914 journal re-pins over the
+  ~5.5 min session); KWin now absorbs every drop internally before the probe
+  (300 ms) can ever observe a frameless sample. The correction runs
+  synchronously inside KWin's own event dispatch — no X property is ever
+  written by us, no external process races Wine.
+- Scope verified: journal shows exactly **one** window ever matched
+  (`steam_proton` / "Untitled - Ableton Live 12 Suite"); the authorization
+  Dialog and all other windows untouched. No authorization attempted.
+- Screenshot: decorated titlebar, full UI incl. bottom status bar, no black
+  bar, no fullscreen.
+- Liveness healthy end-state: `main_thread_in_srw_exclusive=no`,
+  `threads_in_sendmessage=` (none), `forward_progress=executing`, app alive
+  after capture. UI thread still ~115% of a core — the unauthorized busy
+  loop continues; only its presentation symptom is neutralized.
+- Cleanup: `bin/ableton-proton-cleanup` → `cleanup_result=clean`; controller
+  unloaded (`--status` → `loaded=false`). Working prefix never touched.
+
+### Install / uninstall (manual, current state)
+
+```bash
+bin/ableton-kwin-decoration-controller --load     # before/while Ableton runs
+bin/ableton-kwin-decoration-controller --status
+bin/ableton-kwin-decoration-controller --unload   # full reversal
+```
+
+Runtime-only: a KWin restart also removes it. No kwinrc/kwinrulesrc edits.
+
+### Verdict and what is intentionally NOT done
+
+**Viable — this is the custom WayDAW solution.** Residual caveat: the probe
+bounds any frameless dwell to <300 ms; the correction is event-driven inside
+the compositor, and none of 242 samples caught a frameless frame, but a
+sub-sample blink cannot be strictly disproven by this probe.
+
+Not done (next approval gate): auto-load/unload integration into the
+Proton-exp runner path (`config/ableton-runner.sh` load-on-launch +
+`bin/ableton-proton-cleanup` unload), making the controller part of the
+opt-in runner session lifecycle. Until then it is manual. Branch stays
+**held**; no merge/push.
