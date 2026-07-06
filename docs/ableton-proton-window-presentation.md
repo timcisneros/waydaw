@@ -295,3 +295,25 @@ authorized). The KWin rule from the prior commit is left in place (harmless;
 now largely redundant since Wine itself requests decorations on the non-
 fullscreen window). Recommend the user visually confirm the presentation is
 acceptable; merge-readiness is a user call pending that confirmation.
+
+## Operational status — HELD (2026-07-06)
+
+`fix/proton-exp-window-presentation @ 31f4ee3` is **structurally useful but
+held — do not merge or push.**
+
+- Fixed: the fullscreen/maximized-both frameless presentation (window now opens
+  maximized-vertical, normal size, titlebar restored ~87% of the time; bottom
+  black-bar artifact gone).
+- Unresolved: unauthorized-state titlebar/frame flicker, classified as **Wine
+  Motif decoration-hint churn** (stable window id/pid, stable maximize state;
+  `_MOTIF_WM_HINTS` 0x7a↔0x0, `_NET_FRAME_EXTENTS` 28↔0; UI thread busy while
+  unauthorized). To be re-tested **only after legitimate authorization**.
+- No further work now: do not launch Ableton, authorize, touch the working
+  prefix, change KWin further, add fixes, or merge/push.
+
+Future action (only when explicitly resumed, user-owned): run
+`WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton`, perform legitimate
+authorization, then rerun `bin/observe-ableton-proton-flicker` to determine
+whether the Motif decoration-hint churn stops after authorization. That result
+decides whether the branch merges clean or needs a copied-prefix/local
+force-decoration override.
