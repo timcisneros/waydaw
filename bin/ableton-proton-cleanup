@@ -45,9 +45,10 @@ kv proton_prefix_procs_before "$(_pids_now | wc -l | tr -d ' ')"
 cmd1="pkill -TERM -f \"$PROTON_PREFIX.*Ableton Live 12 Suite\\.exe\""
 cmd2="env WINEPREFIX=\"$PROTON_PREFIX\" \"$RUNNER_BIN/wineserver\" -k"
 cmd3="pkill -KILL -f \"$PROTON_PREFIX\""
+cmd4="$ROOT_DIR/bin/ableton-kwin-decoration-controller --unload"
 
 if [[ "$dry_run" -eq 1 ]]; then
-  printf '\n[would_run]\n%s\n%s\n%s\n' "$cmd1" "$cmd2" "$cmd3"
+  printf '\n[would_run]\n%s\n%s\n%s\n%s\n' "$cmd1" "$cmd2" "$cmd3" "$cmd4"
   exit 0
 fi
 
@@ -62,6 +63,17 @@ fi
 sleep 2
 pkill -KILL -f "$PROTON_PREFIX" 2>/dev/null && echo "killed stragglers" || echo "no stragglers"
 sleep 1
+
+# Unload the WayDAW KWin decoration controller (scoped: unloads ONLY the
+# waydaw-ableton-decoration script, never other KWin scripts; no-op if not
+# loaded). Runs even if process cleanup left residue — the controller must
+# not outlive the session it was loaded for.
+if "$ROOT_DIR/bin/ableton-kwin-decoration-controller" --unload; then
+  kv kwin_controller_unload ok
+else
+  kv kwin_controller_unload FAILED
+  echo "WARN: KWin decoration controller may still be loaded; check bin/ableton-kwin-decoration-controller --status" >&2
+fi
 
 remaining="$(_pids_now | wc -l | tr -d ' ')"
 kv proton_prefix_procs_after "$remaining"

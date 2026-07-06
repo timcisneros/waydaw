@@ -333,7 +333,7 @@ geometry change, after which `noBorder` reads false and the handler no-ops.
 - Cleanup: `bin/ableton-proton-cleanup` → `cleanup_result=clean`; controller
   unloaded (`--status` → `loaded=false`). Working prefix never touched.
 
-### Install / uninstall (manual, current state)
+### Install / uninstall (manual — still available alongside the lifecycle)
 
 ```bash
 bin/ableton-kwin-decoration-controller --load     # before/while Ableton runs
@@ -343,15 +343,58 @@ bin/ableton-kwin-decoration-controller --unload   # full reversal
 
 Runtime-only: a KWin restart also removes it. No kwinrc/kwinrulesrc edits.
 
-### Verdict and what is intentionally NOT done
+### Verdict
 
 **Viable — this is the custom WayDAW solution.** Residual caveat: the probe
 bounds any frameless dwell to <300 ms; the correction is event-driven inside
 the compositor, and none of 242 samples caught a frameless frame, but a
 sub-sample blink cannot be strictly disproven by this probe.
 
-Not done (next approval gate): auto-load/unload integration into the
-Proton-exp runner path (`config/ableton-runner.sh` load-on-launch +
-`bin/ableton-proton-cleanup` unload), making the controller part of the
-opt-in runner session lifecycle. Until then it is manual. Branch stays
-**held**; no merge/push.
+## 11. Runner lifecycle integration (2026-07-06, approved) — DONE
+
+The controller is now **lifecycle-managed by the opt-in Proton-exp runner**;
+manual `--load/--unload/--status` remains available and unchanged.
+
+How it is wired:
+
+- `config/ableton-runner.sh` (proton-exp branch only) exports
+  `WAYDAW_ABLETON_KWIN_CONTROLLER=1` — a **flag only**; sourcing config/env
+  never loads anything. Opt out per-run with
+  `WAYDAW_ABLETON_KWIN_CONTROLLER=0`.
+- `bin/ableton` loads the controller **only at real launch** (after the
+  dry-run and `--print-launch-config` exits), only when the flag is 1. The
+  default system-Wine path never sets the flag, so `./bin/ableton` is
+  unchanged. Load is idempotent (already-loaded is a no-op). If the load
+  fails, the launch continues but prints a LOUD warning that flicker
+  protection is NOT active — it never silently pretends.
+- `bin/ableton-proton-cleanup` unloads the controller after session cleanup
+  (`kwin_controller_unload=ok|FAILED` in its output; dry-run lists the
+  unload in `[would_run]`). Unload targets ONLY the
+  `waydaw-ableton-decoration` plugin name — no other KWin script is touched.
+- Dry-run reporting: `WAYDAW_ABLETON_DRY_RUN=1` prints
+  `kwin_decoration_controller=would_load` (proton-exp) / `no`
+  (default or opted out) **without loading anything** — verified by test.
+- `bin/verify-proton-runner-mode` grew a controller-lifecycle section
+  (dry-run-does-not-load, load, status, idempotent second load, cleanup
+  unload, status-after, safe double-unload): suite now passes **33/33**.
+
+Scope predicate (unchanged): `resourceClass === "steam_proton"` AND caption
+contains `Ableton Live 12 Suite` AND normal window only. No KWin config
+persistence: the script exists only in the running compositor and disappears
+on cleanup unload or any KWin restart.
+
+Integrated validation (copied prefix, unauthorized, no authorization
+attempted): controller auto-loaded at launch; probe from launch: 99%
+decorated, 4 transitions (two ≤300 ms dips, one during Ableton's startup
+double-init); settled-session probe: 99% decorated, 2 transitions (one
+≤300 ms dip); vs baseline 87% / 28 transitions with multi-second frameless
+dwells. Same mechanism as the §10 prototype (592 pins absorbed this
+session); the occasional single-sample dip is the probe catching a
+correction in flight. Maximize state stable (`MAXIMIZED_VERT` only),
+geometry constant 848x1052, window id stable, liveness healthy (no SRW, no
+`SendMessageW` wedge, executing). Cleanup: `cleanup_result=clean`,
+`kwin_controller_unload=ok`, controller `loaded=false`, zero processes left.
+
+Authorization remains a later, user-owned step and is **not** required for
+presentation stability — the controller neutralizes the unauthorized-state
+churn as long as it runs. Branch stays **held**; merge is a user decision.

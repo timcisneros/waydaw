@@ -25,6 +25,7 @@ err="$(WAYDAW_ABLETON_GRAPHICS=dxvk WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>&1 
 check "default wine is /usr/bin/wine"        "$out" "wine_binary=/usr/bin/wine"
 check "default prefix is working prefix"     "$out" "wineprefix=$WORKING_PREFIX"
 check "default keeps registry mutation"      "$out" "registry_mutation_enabled=yes"
+check "default has no kwin controller"       "$out" "kwin_decoration_controller=no"
 ncheck "default prints no runner line"       "$err" "WAYDAW runner="
 
 printf '== 2. proton-exp runner resolution (copied prefix) ==\n'
@@ -39,6 +40,9 @@ check "proton uses no virtual desktop"       "$out" "virtual_desktop_mutation_en
 check "proton preserves -u WAYLAND_DISPLAY"  "$out" "env -u WAYLAND_DISPLAY"
 check "proton drops WINEDLLOVERRIDES on cmd" "$out" "-u WINEDLLOVERRIDES"
 check "proton logs runner resolution"        "$err" "WAYDAW runner=proton-exp"
+check "proton plans kwin controller load"    "$out" "kwin_decoration_controller=would_load"
+out_optout="$(WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_KWIN_CONTROLLER=0 WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>/dev/null)"
+check "controller opt-out respected"         "$out_optout" "kwin_decoration_controller=no"
 
 printf '== 3. unknown runner rejected ==\n'
 err="$(WAYDAW_ABLETON_RUNNER=bogus WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>&1 >/dev/null)"
@@ -70,6 +74,31 @@ check "cleanup uses the runner wineserver"    "$out" "kron4ek-proton-exp-11.0/bi
 ncheck "cleanup does not kill working prefix"  "$out" "pkill -KILL -f \"$WORKING_PREFIX\""
 outw="$(WAYDAW_ABLETON_RUNNER_PREFIX="$WORKING_PREFIX" ./bin/ableton-proton-cleanup --dry-run 2>&1 || true)"
 check "cleanup refuses working prefix"         "$outw" "refusing to clean the working prefix"
+check "cleanup would unload kwin controller"   "$out" "ableton-kwin-decoration-controller --unload"
+
+printf '== 7. kwin decoration controller lifecycle (runtime scripting; no KWin settings) ==\n'
+CTL=./bin/ableton-kwin-decoration-controller
+if [[ "$("$CTL" --status 2>/dev/null)" == *loaded=* ]]; then
+  "$CTL" --unload >/dev/null 2>&1   # normalize: suite starts from unloaded
+  # Ableton dry-run must not load the controller.
+  WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton >/dev/null 2>&1
+  st="$("$CTL" --status)"
+  check "ableton dry-run does not load controller" "$st" "loaded=false"
+  out="$("$CTL" --load 2>&1)"; st="$("$CTL" --status)"
+  check "explicit load succeeds"                "$out" "loaded: waydaw-ableton-decoration"
+  check "status reports loaded"                 "$st"  "loaded=true"
+  out2="$("$CTL" --load 2>&1)"
+  check "second load is idempotent"             "$out2" "already loaded"
+  # Real cleanup run: safe with no session (kill commands match nothing) and
+  # must unload the controller.
+  outc="$(./bin/ableton-proton-cleanup 2>&1)"; st="$("$CTL" --status)"
+  check "cleanup unloads controller"            "$outc" "kwin_controller_unload=ok"
+  check "status reports unloaded after cleanup" "$st"  "loaded=false"
+  out="$("$CTL" --unload 2>&1)"
+  check "unload when not loaded is safe"        "$out" "nothing to unload"
+else
+  bad "controller --status unavailable (KWin scripting not reachable?)"
+fi
 
 printf '\n== summary ==\npass=%s fail=%s\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -93,8 +93,16 @@ if [[ -n "$_waydaw_runner" && "$_waydaw_runner" != system ]]; then
       fi
       unset _abl _su_pref _tc_pref
 
-      printf 'WAYDAW runner=proton-exp | wine=%s | prefix=%s | graphics=%s | no_registry=%s\n' \
-        "$_rbin/wine" "$WINEPREFIX" "$WAYDAW_ABLETON_GRAPHICS" "$WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY" >&2
+      # KWin decoration controller (titlebar-flicker protection). Only FLAGGED
+      # here — actually loaded by bin/ableton at real launch time (never on
+      # source, never on dry-run), and unloaded by bin/ableton-proton-cleanup.
+      # Set WAYDAW_ABLETON_KWIN_CONTROLLER=0 to opt out. See
+      # docs/ableton-proton-custom-presentation-controller.md.
+      export WAYDAW_ABLETON_KWIN_CONTROLLER="${WAYDAW_ABLETON_KWIN_CONTROLLER:-1}"
+
+      printf 'WAYDAW runner=proton-exp | wine=%s | prefix=%s | graphics=%s | no_registry=%s | kwin_controller=%s\n' \
+        "$_rbin/wine" "$WINEPREFIX" "$WAYDAW_ABLETON_GRAPHICS" "$WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY" \
+        "$WAYDAW_ABLETON_KWIN_CONTROLLER" >&2
       ;;
     *)
       printf 'WAYDAW runner ERROR: unknown WAYDAW_ABLETON_RUNNER=%s (expected: system, proton-exp)\n' "$_waydaw_runner" >&2

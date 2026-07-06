@@ -11,6 +11,9 @@ mkdir -p "$LOG_DIR"
 
 diagnostic_no_registry="${WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY:-0}"
 dry_run="${WAYDAW_ABLETON_DRY_RUN:-0}"
+# Set to 1 only by the proton-exp runner (config/ableton-runner.sh); the
+# default system-Wine path never sets it, so this stays a no-op by default.
+kwin_controller_enabled="${WAYDAW_ABLETON_KWIN_CONTROLLER:-0}"
 registry_mutation_enabled=yes
 virtual_desktop_mutation_enabled=yes
 
@@ -197,6 +200,7 @@ print_dry_run() {
   printf 'registry_mutation_enabled=%s\n' "$registry_mutation_enabled"
   printf 'virtual_desktop_mutation_enabled=%s\n' "$virtual_desktop_mutation_enabled"
   printf 'dxvk_expected_active=%s\n' "$([[ "$ableton_graphics" == dxvk ]] && echo yes || echo no)"
+  printf 'kwin_decoration_controller=%s\n' "$([[ "$kwin_controller_enabled" == 1 ]] && echo would_load || echo no)"
   printf 'would_launch_command=%s\n' "$launch_command"
 }
 
@@ -250,6 +254,19 @@ print_launch_config "$@" | tee -a "$LOG_FILE"
 
 if [[ "$print_only" -eq 1 ]]; then
   exit 0
+fi
+
+# KWin decoration controller: real-launch only (dry-run and
+# --print-launch-config exit above). Idempotent — the controller no-ops if
+# already loaded. On failure we launch anyway but say so LOUDLY: the session
+# would run without titlebar-flicker protection.
+if [[ "$kwin_controller_enabled" == 1 ]]; then
+  if "$ROOT_DIR/bin/ableton-kwin-decoration-controller" --load 2>&1 | tee -a "$LOG_FILE"; then
+    printf 'WAYDAW: KWin decoration controller active (unloaded by bin/ableton-proton-cleanup)\n' | tee -a "$LOG_FILE"
+  else
+    printf 'WAYDAW WARNING: KWin decoration controller FAILED to load — titlebar flicker protection is NOT active this session.\n' | tee -a "$LOG_FILE" >&2
+    printf 'WAYDAW WARNING: load manually with bin/ableton-kwin-decoration-controller --load, or check org.kde.KWin scripting.\n' | tee -a "$LOG_FILE" >&2
+  fi
 fi
 
 set +e

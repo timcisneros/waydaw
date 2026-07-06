@@ -37,7 +37,15 @@ What it does (see `config/ableton-runner.sh`, sourced from `config/env`):
   issue `wine reg` writes. Those trigger a Proton prefix-update that overwrites
   the prefix's DXVK `d3d11.dll`/`dxgi.dll` with Wine builtins; skipping them
   keeps DXVK intact through launch (matches the validated progress runs).
-- Does **not** use a Wine virtual desktop and does **not** change KWin.
+- Does **not** use a Wine virtual desktop and does **not** change KWin
+  settings.
+- Auto-loads the **KWin decoration controller**
+  (`bin/ableton-kwin-decoration-controller`) at real launch — a runtime-only
+  KWin script scoped to the Proton Ableton main window that neutralizes the
+  unauthorized-state titlebar flicker. Unloaded by
+  `bin/ableton-proton-cleanup`; never persisted in KWin config; opt out with
+  `WAYDAW_ABLETON_KWIN_CONTROLLER=0`. See
+  `docs/ableton-proton-custom-presentation-controller.md`.
 
 ### Copied test prefix only
 
