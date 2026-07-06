@@ -317,3 +317,44 @@ authorization, then rerun `bin/observe-ableton-proton-flicker` to determine
 whether the Motif decoration-hint churn stops after authorization. That result
 decides whether the branch merges clean or needs a copied-prefix/local
 force-decoration override.
+
+## Flicker neutralization attempts WITHOUT authorization (2026-07-06)
+
+Constraint update: authorization happens only after WayDAW is fully complete,
+so it cannot be a validation/resolution step. Attempts to neutralize the
+unauthorized-state flicker with lighter, copied-prefix/local means:
+
+1. **KWin rule policy — `noborderrule=2` (Force) — INSUFFICIENT.** Switched the
+   Ableton Proton rule from Apply (3) to Force (2) and re-measured with the
+   flicker probe: **75% decorated, 32 transitions in 100 s** — no better than
+   Apply's 87% / 28. KWin honors Wine's real-time `_MOTIF_WM_HINTS` changes
+   regardless of the `noborder` rule policy; the rule cannot pin decoration
+   against a client that re-requests borderless. Rule reverted to the committed
+   value (3).
+2. **Local decoration guard (path #4) — MADE IT WORSE, REMOVED.** A scoped
+   observer that removed `_MOTIF_WM_HINTS` when the frame dropped (so KWin
+   re-decorates and Wine re-asserts its resting `0x7a`). Running it with the
+   probe: **59% decorated, 71 transitions** — the guard races Wine's toggling
+   and roughly doubles the churn. The script was removed; do not reintroduce it.
+3. **Ableton prefs / Wine registry (non-virtual-desktop) — no viable lever.**
+   The churn is driven by Ableton's unauthorized busy window re-management
+   (~115% CPU, constant `DEMANDS_ATTENTION`); there is no copied-prefix pref or
+   Wine setting that stops Wine from re-deriving the Motif hint short of a Wine
+   virtual desktop.
+
+Conclusion: no lighter option neutralizes the flicker. The remaining clean
+technical fix is a **copied-prefix Wine virtual desktop** (Ableton renders
+inside one managed desktop window, so the per-window Motif churn is invisible
+and the outer frame is stable) — which the project constraints gate behind
+explicit approval. Absent that approval, the branch stands with the structural
+fix (no fullscreen/black-bar; decorated ~75-87% of the time) and the residual
+unauthorized-state titlebar flicker documented as a known limitation. Liveness
+stayed healthy across all attempts; working prefix untouched.
+
+### Authorization is not a completion dependency (rule update)
+
+Post-authorization flicker validation is **no longer** the next dependency:
+authorization is deferred until the whole WayDAW project is complete, so it
+cannot be used to close this phase. The flicker must be either accepted as a
+known unauthorized-state limitation or fixed via the approval-gated virtual
+desktop.
