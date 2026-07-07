@@ -417,6 +417,65 @@ only open item is the cosmetic ~18px top strip, classified and safe to defer.
 This branch is **merge-ready for the interactability fix**, with the top strip
 tracked as a separate secondary follow-up.
 
+## Final acceptance validation (2026-07-07) — PASS
+
+Run end-to-end from the stock bad seed, on this branch @ `89fb623`, as the
+gating acceptance for merge. A previous session had performed most of this
+validation but its transcript ended before the final state was captured or
+committed; that session's Ableton instance was in fact **still running** at
+rehydration (23 min old, dialog already dismissed, window 832×966, UI thread
+calm at ~6% — consistent with a healthy post-acceptance state). It was cleaned
+(`cleanup_result=clean`) and the whole validation was **rerun from scratch**
+so every step is captured in one contiguous, verified run.
+
+**Baseline (before launch):** `bin/verify-proton-runner-mode` 33/33 PASS;
+zero session processes; controller `loaded=false`; working-prefix
+`d3d11.dll 557c1f50…` / `dxgi.dll f31cd64b…`, `kwinrc 7f3fe330…`,
+`kwinrulesrc 116b2b8c…` recorded.
+
+**Procedure and results (one launch):**
+
+| step | result |
+|---|---|
+| restore stock bad seed | `steamuser` `Preferences.cfg` restored from `.bak-normalize`; height `1096` @offset 18254 verified |
+| dry-run | prints `[dry-run] would clamp … <= 1000 … (no mutation)`; cfg hash unchanged, height still 1096; controller not loaded — **non-mutating confirmed** |
+| real launch | runner logs `clamped placement height 1096 -> 1000 @offset 18254`; controller `loaded=true` |
+| startup | window `832×966 @ 169,58`, `_NET_WM_STATE` **empty**, frame extents `0,0,28,0`, geometry stable, main thread **15 ticks/3s (~5%)** — no storm |
+| external move (pump alive) | `169,58 → 400,114` honored, stays calm (16 ticks/3s) |
+| vertical maximize | guard intercepted (journal `undo vertical-maximize/fullscreen (#1 …) maximizeMode=1 fg.h=1080`); window **stayed 832×966**, CPU calm — **storm re-entry prevented** |
+| "Authorize later" | cursor position verified over the button (dialog `512×479 @ 329,302`, button center abs `723,747`, crop-verified); clicked **exactly once** with user approval — dialog window destroyed within 5 s |
+| demo mode | full Live editor rendered, "Saving and exporting are disabled" demo banner present |
+| interactability | **File menu opened** on click (real dropdown popup `254×340`, all items rendered); **Escape closed it** (popup destroyed) |
+| final liveness | main/UI thread **36 ticks/6s (~6%)**, geometry `832×966 @ 400,114` stable, zero further guard events |
+| cleanup | `cleanup_result=clean`, controller `loaded=false`, **zero** Ableton/Wine/Proton/WebView2 processes |
+| hash verification | working-prefix DXVK, `kwinrc`, `kwinrulesrc` **byte-identical** before/after |
+
+**No authorization was attempted; no credentials entered.** The only auth-
+dialog interaction was the single approved "Authorize later" dismissal;
+"Authorize with ableton.com" and "No Internet on this computer" were never
+touched.
+
+**Observed residuals (non-blocking, recorded for honesty):**
+
+- `_NET_WM_STATE_MAXIMIZED_VERT` lingers on the atom after the guard clears a
+  maximize (Wine re-asserts the atom; KWin's `maximizeMode` is cleared and the
+  geometry never leaves 832×966). Cosmetic only — CPU calm, geometry stable,
+  and a `wmctrl -b remove` does not stick either. Same residual was present on
+  the previous session's leftover window.
+- Process-wide CPU in demo mode sits ~60% of a core, but it is **distributed**
+  across the audio engine (`AudioCalc`, `wine_dsound_mix`) and worker threads —
+  the UI thread stays ~6% and no single thread spins. This is a live audio
+  engine, not the storm (which was one UI thread at ~117%).
+- Live's "Report a Crash" help panel appeared, referencing a crash report from
+  the **previous** leftover instance that cleanup SIGKILLed — an expected side
+  effect of hard cleanup, not from the validated run.
+
+**Verdict: all pass criteria met.** Startup fix works from the stock bad seed;
+runtime vertical-maximize re-entry is prevented; the pump stays alive; the
+dialog dismisses; demo mode loads; the editor is interactable; working prefix
+and KWin settings untouched; cleanup clean. **Branch is ready for closeout
+audit and merge.**
+
 ## Hygiene
 
 **Session 1 (WINEDEBUG capture):** two launches, copied Proton-exp prefix,
@@ -446,6 +505,16 @@ credentials.** Working prefix never touched; KWin config and working-prefix
 DXVK hashes unchanged. All maximize/resize perturbations were X-level
 (wmctrl/xdotool) on the copied-prefix window only; raw pixmaps and winedbg
 samples live in session scratchpad.
+
+**Session 4 (final acceptance):** one leftover instance from the prior
+session found running and cleaned; **one** fresh copied-prefix launch from the
+restored stock 1096 seed. Exactly **one** auth-dialog button click
+("Authorize later", user-approved, position-verified before clicking); no
+authorization attempted; no credentials. File-menu open/Escape-close were the
+only editor interactions. Cleaned (`cleanup_result=clean`, controller
+`loaded=false`, zero processes). Working prefix never touched;
+`kwinrc`/`kwinrulesrc` and working-prefix DXVK hashes verified unchanged
+before/after. Screenshots and hash records live in session scratchpad only.
 
 The `steamuser` `Preferences.cfg` edit lives only in the copied prefix (not
 tracked); the mergeable artifacts are
