@@ -81,8 +81,9 @@ path to the app's message pump.
 Classification (non-interactability): **stale/unresponsive UI despite
 liveness — the app does not service its message queue while in the
 unauthorized busy-loop.** Not a modal-block-only situation (WM_DELETE to the
-top-level is also dropped), not a WM/focus/pointer problem, not a controller
-regression, not the old SRW deadlock.
+top-level is also dropped, AND the auth dialog's own "Authorize later"
+button does not register — see decisive follow-up below), not a WM/focus/
+pointer problem, not a controller regression, not the old SRW deadlock.
 
 Caveat / missing data: whether the auth **dialog** itself ever accepts a
 real click was NOT tested (no auth/license clicks allowed). The 2026-07-04
@@ -90,6 +91,34 @@ note claimed the dialog accepted clicks; that may have been during an early
 pump window before the tight loop, or optimistic. Given the same thread
 owns the dialog and is not pumping, the dialog's own responsiveness is in
 doubt and must be verified (see next steps).
+
+### Decisive follow-up (2026-07-07, user-approved) — the auth dialog is ALSO dead
+
+The user explicitly approved clicking **"Authorize later"** (a non-
+authorizing dismissal into demo mode) to resolve the fork above. Result:
+
+- Cursor positioned and **verified over the dialog window** `0x08c00091`
+  (xdotool reported the pointer's window = the dialog) on the "Authorize
+  later" button (dialog-local ~393,445; confirmed by a button crop).
+- A deliberate press/release click was delivered. The dialog **did not
+  dismiss** — still present after **12+ s** (and a first single click before
+  it, ~3 s). The app remained alive and busy-looping throughout
+  (`pid` alive, ~118% CPU, `message_wait=no`, executing).
+
+So the **auth dialog's own button does not register a click** in the
+unauthorized busy-loop state. This resolves the fork decisively: it is
+**not** app-modal-block (a modal dialog with a live pump would accept its
+own buttons). The **entire UI thread is not pumping messages**, so *no*
+surface — main window or auth dialog — accepts input. The "auth dialog is
+the interactable surface" conclusion from the prior round is **wrong** in
+this state.
+
+Convergent validation: this synthetic-input (XTEST) result matches the
+user's independent **hardware-input** experience ("cannot interact with or
+close the window"), so it is not an injection artifact. Because the auth
+dialog buttons are themselves unresponsive, **even legitimate authorization
+may be impossible under Proton-exp while the app is in this loop** — a
+blocker beyond presentation.
 
 ## Finding 3 — White bars / content not filling frame: REAL BUG, controller-independent
 
@@ -154,19 +183,18 @@ focus + flicker alone.
 No fix implemented. Proposed next diagnostics, in priority order (user
 prioritized interactability):
 
-1. **Interactability (priority).** Establish *what* the UI thread spins on:
-   a full winedbg backtrace of the busy TID (not just top 4 frames) across
-   several samples, and correlate with WebView2 activity (the auth dialog is
-   the WebView2 "Authorize with ableton.com" surface — a spinning/ retrying
-   WebView2 is a prime suspect for pegging the UI thread and starving the
-   pump). Then a **user-assisted, non-authorizing** responsiveness test:
-   with the harness recording, the user attempts one benign dialog
-   interaction (e.g. hover/drag within the dialog, or press Esc) to
-   determine whether the dialog's own message loop is alive while the main
-   window's is starved. Decision fork: if even the dialog is dead → the
-   unauthorized loop must be tamed (investigate the WebView2/auth spin); if
-   only the main window is blocked (dialog live) → it is app-modal and the
-   real ask is reliable dialog discoverability, not a code fix.
+1. **Interactability (priority).** The fork is already resolved: even the
+   auth dialog is dead, so the unauthorized busy-loop that starves the
+   message pump must be **tamed** — a live pump is required before any
+   surface (dialog or editor) is usable, and possibly before authorization
+   itself is achievable. Establish *what* the UI thread spins on: a full
+   winedbg backtrace of the busy TID (not just top 4 frames) across several
+   samples, and correlate with WebView2 activity (the dialog embeds the
+   WebView2 "Authorize with ableton.com" surface — a spinning/retrying
+   WebView2 under Wine is the prime suspect for pegging the UI thread). Then
+   test whether disabling/replacing the WebView2 auth component, or
+   otherwise breaking the spin, restores a pumping message loop. Copied-
+   prefix or runner-scoped only.
 
 2. **White bars.** Determine why the DXVK swapchain is pinned at 848×1096
    and does not recreate on window resize (VK_PRESENT_MODE_IMMEDIATE +
@@ -182,14 +210,17 @@ explicit approval, per the reopen constraints.
 
 ## Hygiene
 
-Ableton was launched/observed (one pre-existing live session + one B run),
-copied prefix only. No authorization attempted; no Authorize/"Authorize
-later"/license buttons clicked; no credentials entered. Real pointer input
-limited to: titlebar drags of the main window and auth dialog (both moved
-back to no lasting effect via cleanup), and WM_DELETE_WINDOW close requests
-(ignored by the app). Both sessions cleaned (`cleanup_result=clean`,
-controller `loaded=false`, zero processes). Working prefix untouched;
+Ableton was launched/observed (one pre-existing live session, one B run,
+one C run for the approved click test), copied prefix only. **No
+authorization attempted; no credentials entered; the "Authorize with
+ableton.com" and "No Internet on this computer" buttons were never clicked.**
+The only content click was **"Authorize later"** — explicitly user-approved
+in-session, a non-authorizing dismissal into demo mode — which the app did
+not register (dialog stayed up). Other real pointer input: titlebar drags of
+the main window and auth dialog, and WM_DELETE_WINDOW close requests (ignored
+by the app). All sessions cleaned (`cleanup_result=clean`, controller
+`loaded=false`, zero processes). Working prefix untouched;
 `kwinrc`/`kwinrulesrc`/working-prefix DXVK hashes verified unchanged.
-Stale working-prefix Wine skeleton from an unrelated earlier default-
+A stale working-prefix Wine skeleton from an unrelated earlier default-
 launcher run was terminated with user authorization (no Ableton.exe was in
 it).
