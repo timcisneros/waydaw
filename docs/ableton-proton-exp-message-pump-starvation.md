@@ -341,6 +341,82 @@ not re-measured. Tracked as the remaining secondary defect.
 divergence → pump-starving resize storm; removing the over-height seed removes
 every downstream symptom of the interactability blocker.
 
+## Hardening pass (2026-07-07, same branch)
+
+The startup fix leaves one residual: a *runtime* vertical-maximize can still
+push the window to full height and re-enter the storm. One hardening pass
+addressed it.
+
+**Preferences bool fields — decoded, no change needed.** The
+`MainWindowPlacement` value record is consecutive int32s `Type, Pos.x, Pos.y,
+Size.w, Size.h` followed by three 1-byte bools `IsMaximized, IsFullscreen,
+HasSystemCloseButton`. Stock decode: `Type=3, Pos=(165,28), Size=(840,1096)`,
+then `IsMaximized=0, IsFullscreen=0, HasSystemCloseButton=1`. So the stock seed
+is **already non-maximized/non-fullscreen** — the vert-maximize was purely
+height-over-screen, not a maximize bit. Clearing those bits would be a no-op at
+startup and cannot affect a *runtime* maximize, so the normalizer was left
+height-only (decode-first, change-nothing-unneeded).
+
+**KWin API probe (kwin_x11 6.7.1).** `maxSize` and `maximizable` are both
+**read-only** in scripting — KWin cannot cap the height or disable maximize.
+`setMaximize(v,h)` is callable; `frameGeometry` is writable; `maximizeMode` is
+a number (vertical bit = 1). `clientArea(2,w)` = the 0,0 2560×1080 maximize
+area.
+
+**Two guard designs tried.**
+- *Restore-geometry-after-maximize* (first attempt) — **fails, harmful.** Once
+  full height is reached the storm is self-sustaining app-side; writing
+  `frameGeometry` back each time just fought Ableton's ~3/s re-assert (135
+  restore events in ~40 s, still ~80 % CPU). Discarded.
+- *Intercept-and-clear-maximize* (shipped) — **works.** On the
+  `frameGeometryChanged` signal, if `maximizeMode` shows vertical (or the window
+  is fullscreen), call `setMaximize(false,false)` once (rate-limited 400 ms).
+  This runs **synchronously as KWin applies the maximize**, before Ableton
+  latches the full-height configure, so the window never actually reaches full
+  height and the storm never forms. KWin keeps the pre-maximize geometry (no
+  geometry war). It **prevents**, it does not **recover**: loading the guard
+  onto an already-storming window cleared the maximize atom but the app-side
+  storm continued — so the guard must be present *before* the maximize, which
+  it always is (the runner loads it at launch).
+
+**Guard validation (end-to-end from the stock 1096 seed; runner auto-clamped
+1096→1000; controller with guard loaded):**
+
+| test | result |
+|---|---|
+| startup | 832×966, `_NET_WM_STATE` empty, ~5 % CPU — unchanged, calm |
+| `add,maximized_vert` ×3 + `vert,horz` ×1 | window **stays 832×966**, ~6 % CPU, exactly 4 guard events (one per request, no spin) — **storm prevented** |
+| same maximize with guard **unloaded** | grows to 840×1052, **~80 % CPU — storm forms** (proves the guard is doing the work) |
+| direct `windowsize … 1052` (no `maximizeMode`) | window goes 1052 but **stays calm** (~5 % CPU, main thread in ntdll wait) — this path did not storm once the placement is clamped |
+| external move (pump-alive check) | honored (169,58 → 400,114), stays calm |
+| flicker / controller | still pinned, `loaded=true` |
+
+So: **vertical-maximize / full-height no longer re-enters the storm** — the
+maximize path is intercepted-and-cleared before it forms, and the plain-resize
+path does not storm at all with the placement clamped. Interactive startup,
+live pump, and honored moves are all preserved.
+
+**Top white strip — classified, not fixed (secondary).** A constant ~18px
+full-width band at the very top of the client area (`y=0..17` pure white
+`255`, content `129` from `y=18`); left/right/bottom edges are content (no
+white); white is ~1.7 % of the frame. It is **inside the rendered client
+area**, not the 28px WM titlebar (which is separate, `_NET_FRAME_EXTENTS
+0,0,28,0`). It does not grow with window size in observation, which argues
+against a proportional swapchain-vs-client scaling error and toward a fixed
+top offset — most likely Ableton's own top control-bar row unpainted in the
+unauthorized bare-shell state, or a small fixed swapchain top inset. DXVK
+`Presenter` swapchain lines are not emitted at the runner's default verbosity,
+so an exact swapchain delta was not captured; pinning it down needs a
+runner-scoped `DXVK_LOG_LEVEL=info` run. Left as secondary per the brief —
+chasing it risks the pump fix for a ~1.7 % cosmetic strip.
+
+**Merge-readiness:** the interactability blocker is fixed at startup (placement
+clamp) and hardened against runtime vertical-maximize (KWin intercept-clear
+guard); flicker pin intact; working prefix and KWin settings untouched. The
+only open item is the cosmetic ~18px top strip, classified and safe to defer.
+This branch is **merge-ready for the interactability fix**, with the top strip
+tracked as a separate secondary follow-up.
+
 ## Hygiene
 
 **Session 1 (WINEDEBUG capture):** two launches, copied Proton-exp prefix,
@@ -358,7 +434,21 @@ controller `loaded=false`, zero processes). **No authorization attempted; no
 auth button clicked** (the auth dialog was left untouched); no credentials.
 Working prefix **never touched** (the normalizer refuses it by path guard);
 `kwinrc`/`kwinrulesrc` and working-prefix DXVK hashes verified **unchanged**
-before/after. The `steamuser` `Preferences.cfg` edit lives only in the copied
-prefix (not tracked); the mergeable artifacts are
-`bin/ableton-proton-normalize-placement` and the `config/ableton-runner.sh`
-hunk.
+before/after.
+
+**Session 3 (hardening):** two copied-prefix launches (one guard-design
+iteration, one clean end-to-end from the stock 1096 seed). API probes and the
+first (discarded) guard were loaded via runtime `org.kde.kwin.Scripting`
+D-Bus only — nothing written to `kwinrc`/`kwinrulesrc` (verified unchanged).
+Both sessions cleaned (`cleanup_result=clean`, controller `loaded=false`, zero
+processes). **No authorization attempted; no auth button clicked; no
+credentials.** Working prefix never touched; KWin config and working-prefix
+DXVK hashes unchanged. All maximize/resize perturbations were X-level
+(wmctrl/xdotool) on the copied-prefix window only; raw pixmaps and winedbg
+samples live in session scratchpad.
+
+The `steamuser` `Preferences.cfg` edit lives only in the copied prefix (not
+tracked); the mergeable artifacts are
+`bin/ableton-proton-normalize-placement`, the `config/ableton-runner.sh` hunk,
+and the vertical-maximize guard added to
+`config/kwin/waydaw-ableton-decoration.js`.
