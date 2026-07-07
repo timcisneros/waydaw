@@ -91,6 +91,23 @@ if [[ -n "$_waydaw_runner" && "$_waydaw_runner" != system ]]; then
         cp -f "$_tc_pref/Preferences.cfg" "$_su_pref/Preferences.cfg" \
           && printf 'WAYDAW runner: seeded steamuser Ableton Preferences.cfg (decorated window placement)\n' >&2
       fi
+      # Clamp the seeded/saved MainWindow placement to strictly SHORTER than the
+      # screen. The stock seed height (1096) exceeds the 1080px screen, so the
+      # window is coerced to vertical-maximize; Wine then loops forever
+      # reconciling its 1096 client belief against the WM's 1052 grant, starving
+      # the UI-thread message pump (no input, no close) while unauthorized. A
+      # height that fits under the screen is granted verbatim -> no maximize ->
+      # no storm. Runs every launch (idempotent) so Ableton-saved drift is
+      # corrected too. See docs/ableton-proton-exp-message-pump-starvation.md.
+      if [[ -n "$_su_pref" && -f "$_su_pref/Preferences.cfg" ]]; then
+        if [[ "${WAYDAW_ABLETON_DRY_RUN:-0}" == 1 ]]; then
+          printf 'WAYDAW runner: [dry-run] would clamp MainWindow placement height to <= %s in %s (no mutation)\n' \
+            "${WAYDAW_ABLETON_MAX_WINDOW_HEIGHT:-1000}" "$_su_pref/Preferences.cfg" >&2
+        else
+          "$_waydaw_root/bin/ableton-proton-normalize-placement" \
+            "$_su_pref/Preferences.cfg" "${WAYDAW_ABLETON_MAX_WINDOW_HEIGHT:-1000}" >&2 || true
+        fi
+      fi
       unset _abl _su_pref _tc_pref
 
       # KWin decoration controller (titlebar-flicker protection). Only FLAGGED

@@ -264,14 +264,101 @@ sessions do not show the storm, but that path differs in more than one way).
    fails; more invasive, needs its own design review.
    No Ableton binary patching; no auth/licensing involvement in any path.
 
+## Fix validated (2026-07-07, branch `fix/proton-exp-grantable-placement`)
+
+Direction 1 above was implemented and validated. **The causal model is
+confirmed and this is the proposed fix.**
+
+**Root-cause refinement (why height is decisive).** The stock `steamuser`
+placement seed has `MainWindowPlacement` `Size.height = 1096`, which is
+**greater than the 1080px screen height**. A window born taller than the
+screen is coerced to vertical-maximize by the WM (`_NET_WM_STATE_MAXIMIZED_
+VERT`); Wine then keeps the 1096 client belief against KWin's 1052 grant and
+the storm runs. Seeding a height that **fits under the screen** is granted
+verbatim → no maximize → client matches → no divergence → no storm.
+
+**Preferences keys inspected.** `Preferences.cfg` is Ableton's binary
+serialized property tree. The `MainWindowPlacement` value is a `WindowPlacement`
+struct of consecutive int32s: `Type, Pos.x, Pos.y, Size.w, Size.h`, then bool
+flags `IsMaximized, IsFullscreen, HasSystemCloseButton`. The stock seed
+(identical in the prefix's `timcis` and `steamuser` profiles) decodes to
+`Type=3, Pos=(165,28), Size=(840,1096)`. `Size.h` (offset 18254 in this build)
+is the only field changed.
+
+**Exact seed change.** New helper `bin/ableton-proton-normalize-placement`
+clamps any placement whose height exceeds a cap (default 1000, override
+`WAYDAW_ABLETON_MAX_WINDOW_HEIGHT`) — only the MainWindow is ever born taller
+than the screen, so it is uniquely targeted; a 2-byte edit, idempotent, backs
+up once to `*.bak-normalize`, refuses the working prefix. `config/ableton-
+runner.sh` calls it every proton-exp launch right after the existing
+`steamuser` seed step, so both a fresh seed and any Ableton-saved drift are
+corrected. Under dry-run it only prints the intended clamp (no mutation,
+verified: seed hash unchanged, height stayed 1096).
+
+**Before → after (end-to-end from the stock 1096 seed; runner auto-clamped
+1096→1000):**
+
+| dimension | before (storm) | after (fix) |
+|---|---|---|
+| `_NET_WM_STATE` | `_MAXIMIZED_VERT` | *(empty — not maximized)* |
+| X window client | 848×1052 (or 1153×…) | **832×966**, stable |
+| main-thread CPU | ~350 ticks/3s (~117%) | **~15 ticks/3s (~5%)** |
+| main-thread stack | 167–201-frame WM_WINDOWPOSCHANGED recursion | **48 frames, varied, lands in win32u message-peek** |
+| ConfigureNotify / 5s | (storm internal) | **0** (stable) |
+| external move posted | reverted within seconds | **honored** (169,58 → 500,114), stays calm |
+| white bars | top + right + ~44px height | **right & bottom gone; ~18px top strip remains** (white 1.7% of frame) |
+| flicker / controller | controlled, `loaded=true` | controlled, `loaded=true` |
+| WM_DELETE on main | ignored (dead pump) | still deferred — but now **healthy modal block** (auth dialog owns the modal loop; pump proven alive by the honored move) |
+
+**Interactability verdict.** The storm is eliminated and the UI thread's
+message pump is **alive**: it idles at ~5% in a message-peek and **processes
+posted messages** (an external window move is now honored instead of reverted —
+the single sharpest before/after signal, since the dead-pump storm actively
+reverted geometry). WM_DELETE to the *main* window is still deferred, but that
+is now the expected app-modal-block: a live modal auth dialog legitimately owns
+the loop and holds the parent's close. The auth dialog is therefore
+**plausibly interactable**, but its buttons were **not** click-tested — the
+only definitive confirmation ("Authorize later" dismissal) is gated on explicit
+user approval and was not exercised.
+
+**Confirmed corollary:** forcing the window back to full workarea height (1052)
+during the fixed session **re-triggered the storm** (CPU → ~80%, window snapped
+to 1052) and it became self-sustaining — direct proof the trigger is
+"window at/over full screen height", exactly as the model predicts. So the fix
+prevents the storm at startup; a documented residual is that vertical-maximize
+(or a manual full-height resize) can still reach the divergent state. A
+follow-up hardening (KWin rule denying vert-maximize for this window, or
+clearing the placement `IsMaximized`/`HasSystemCloseButton` bits too) is a
+candidate but was **not** implemented.
+
+**White bars (secondary):** substantially improved, not eliminated — the right
+and bottom bands are gone; a ~18px full-width unpainted strip remains at the
+top. DXVK `Presenter` swapchain lines did not log at the runner's default
+verbosity this session, so the exact residual swapchain-vs-client delta was
+not re-measured. Tracked as the remaining secondary defect.
+
+**Causal model: CONFIRMED.** Height-over-screen → vert-maximize → client/grant
+divergence → pump-starving resize storm; removing the over-height seed removes
+every downstream symptom of the interactability blocker.
+
 ## Hygiene
 
-Two launches this session, both copied Proton-exp prefix, both cleaned with
-`bin/ableton-proton-cleanup` (`cleanup_result=clean`, controller
-`loaded=false`, zero prefix/WebView2 processes after each). No authorization
-attempted; no auth-surface buttons clicked; no credentials. Perturbations were
-X-level (wmctrl/xdotool geometry+state, reverted/moot after session end) and
-env-only (WebView2 fixed-version folder, cleared with the session). Working
-prefix and KWin config hashes identical before/after. Raw captures (winedbg
-bt-all samples, thread/process monitors, xev logs) live in the session
-scratchpad only; nothing was committed except this doc.
+**Session 1 (WINEDEBUG capture):** two launches, copied Proton-exp prefix,
+both cleaned with `bin/ableton-proton-cleanup` (`cleanup_result=clean`,
+controller `loaded=false`, zero prefix/WebView2 processes after each). No
+authorization attempted; no auth-surface buttons clicked; no credentials.
+Perturbations were X-level (wmctrl/xdotool geometry+state) and env-only
+(WebView2 fixed-version folder). Working prefix and KWin config hashes
+identical before/after. Raw captures live in session scratchpad only.
+
+**Session 2 (placement fix):** three copied-prefix launches (one manual-seed
+validation, one accidental double-start immediately cleaned, one clean
+end-to-end from the stock seed); all cleaned (`cleanup_result=clean`,
+controller `loaded=false`, zero processes). **No authorization attempted; no
+auth button clicked** (the auth dialog was left untouched); no credentials.
+Working prefix **never touched** (the normalizer refuses it by path guard);
+`kwinrc`/`kwinrulesrc` and working-prefix DXVK hashes verified **unchanged**
+before/after. The `steamuser` `Preferences.cfg` edit lives only in the copied
+prefix (not tracked); the mergeable artifacts are
+`bin/ableton-proton-normalize-placement` and the `config/ableton-runner.sh`
+hunk.

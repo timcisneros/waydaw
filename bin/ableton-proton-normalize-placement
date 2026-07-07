@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Clamp Ableton's saved MainWindow placement so the window is born strictly
+# SHORTER than the screen, avoiding the vertical-maximize coercion that drives
+# the Proton-exp unauthorized-state WM_WINDOWPOSCHANGED resize storm.
+#
+# Why: Ableton's default steamuser placement seed has Size.height = 1096, which
+# exceeds the 1080px screen. A taller-than-screen window is coerced to
+# vertical-maximize by the WM; Wine then keeps a 1096 client belief against the
+# WM's 1052 grant, and Ableton's WM_WINDOWPOSCHANGED handler loops forever
+# trying (and failing) to reconcile them, starving the UI thread's message pump
+# (no input, no close). Diagnosed in
+# docs/ableton-proton-exp-message-pump-starvation.md. A placement height that
+# FITS under the screen is granted verbatim -> no maximize -> no divergence ->
+# no storm (validated: 1000 -> calm, pumping, interactive).
+#
+# Scope: copied Proton-exp test prefix ONLY. Refuses the working prefix. Binary
+# edit is in-place, idempotent, and backs up once per run. Reversible.
+#
+# Usage: ableton-proton-normalize-placement <Preferences.cfg> [max_height]
+set -uo pipefail
+
+CFG="${1:-}"
+MAX_H="${2:-1000}"
+if [[ -z "$CFG" ]]; then
+  echo "usage: $(basename "$0") <Preferences.cfg> [max_height]" >&2; exit 2
+fi
+if [[ ! -f "$CFG" ]]; then
+  echo "normalize-placement: no file (skip): $CFG" >&2; exit 0
+fi
+# Guard: never touch anything under the working prefix.
+case "$CFG" in
+  "$HOME/WinePrefixes/ableton12/"*)
+    echo "normalize-placement ERROR: refusing to edit working prefix: $CFG" >&2; exit 1 ;;
+esac
+
+python3 - "$CFG" "$MAX_H" <<'PY'
+import struct, sys
+path, max_h = sys.argv[1], int(sys.argv[2])
+d = bytearray(open(path, 'rb').read())
+
+def i32(o): return struct.unpack_from('<i', d, o)[0]
+
+# A WindowPlacement value is serialized as consecutive int32s:
+#   Type, Pos.x, Pos.y, Size.w, Size.h, <bool flags...>
+# Scan for a plausible placement record whose height exceeds the screen-fit
+# cap and clamp only the height. Only the MainWindow placement is ever born
+# taller than the screen, so this uniquely targets it; other placements
+# (PictureInPicture / SecondWindow) have small/zero heights and are untouched.
+changed = []
+o = 0
+end = len(d) - 24
+while o <= end:
+    t = i32(o)
+    if t in (1, 2, 3):
+        x, y, w, h = i32(o+4), i32(o+8), i32(o+12), i32(o+16)
+        if (0 <= x <= 8000 and 0 <= y <= 8000 and
+                200 <= w <= 8000 and max_h < h <= 8000):
+            struct.pack_into('<i', d, o+16, max_h)
+            changed.append((o+16, h, max_h))
+            o += 20
+            continue
+    o += 1
+
+if changed:
+    bak = path + '.bak-normalize'
+    import os
+    if not os.path.exists(bak):
+        open(bak, 'wb').write(open(path, 'rb').read())
+    open(path, 'wb').write(d)
+    for off, old, new in changed:
+        print(f"normalize-placement: clamped placement height {old} -> {new} @offset {off}")
+else:
+    print(f"normalize-placement: no placement height > {max_h}; nothing to do (idempotent)")
+PY
