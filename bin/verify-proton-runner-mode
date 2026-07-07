@@ -100,5 +100,32 @@ else
   bad "controller --status unavailable (KWin scripting not reachable?)"
 fi
 
+printf '== 8. bin/ableton-proton explicit launcher (dry-run only) ==\n'
+SU_CFG="$(ls "$PROTON_PREFIX"/drive_c/users/steamuser/AppData/Roaming/Ableton/Live\ */Preferences/Preferences.cfg 2>/dev/null | head -1)"
+cfg_before=""; [[ -n "$SU_CFG" ]] && cfg_before="$(sha256sum "$SU_CFG" | awk '{print $1}')"
+out="$(WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-proton 2>/dev/null)"
+err="$(WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-proton 2>&1 >/dev/null)"
+check "launcher resolves to proton-exp runner"   "$err" "WAYDAW runner=proton-exp"
+check "launcher uses the runner wine binary"     "$out" "wine_binary=$RUNNER_WINE"
+check "launcher uses the copied prefix"          "$out" "wineprefix=$PROTON_PREFIX"
+check "launcher disables registry mutation"      "$out" "registry_mutation_enabled=no"
+check "launcher uses no virtual desktop"         "$out" "virtual_desktop_mutation_enabled=no"
+check "launcher plans kwin controller load"      "$out" "kwin_decoration_controller=would_load"
+check "launcher dry-run reports clamp intent"    "$err" "would clamp MainWindow placement height"
+out_optout="$(WAYDAW_ABLETON_KWIN_CONTROLLER=0 WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-proton 2>/dev/null)"
+check "launcher controller opt-out respected"    "$out_optout" "kwin_decoration_controller=no"
+if [[ -n "$SU_CFG" ]]; then
+  cfg_after="$(sha256sum "$SU_CFG" | awk '{print $1}')"
+  [[ "$cfg_after" == "$cfg_before" ]] && ok "launcher dry-run does not mutate steamuser Preferences.cfg" \
+    || bad "launcher dry-run MUTATED steamuser Preferences.cfg"
+else
+  ok "no steamuser Preferences.cfg present (mutation check vacuous)"
+fi
+st="$(./bin/ableton-kwin-decoration-controller --status)"
+check "launcher dry-run does not load controller" "$st" "loaded=false"
+out="$(WAYDAW_ABLETON_GRAPHICS=dxvk WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>/dev/null)"
+check "plain bin/ableton still defaults to system wine" "$out" "wine_binary=/usr/bin/wine"
+check "plain bin/ableton still uses working prefix"     "$out" "wineprefix=$WORKING_PREFIX"
+
 printf '\n== summary ==\npass=%s fail=%s\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

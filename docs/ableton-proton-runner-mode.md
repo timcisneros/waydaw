@@ -24,7 +24,19 @@ is the only supported path for real use today.
 
 ```bash
 WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton
+# or, equivalently, the explicit launcher:
+./bin/ableton-proton
 ```
+
+`bin/ableton-proton` is a thin wrapper that sets
+`WAYDAW_ABLETON_RUNNER=proton-exp` and execs `bin/ableton "$@"` — nothing
+more. It exists so the validated Proton-exp path (placement clamp, KWin
+decoration controller + vertical-maximize guard, copied prefix only; see
+`docs/ableton-proton-exp-message-pump-starvation.md`) is launchable without
+remembering the env var. It does **not** change the default: plain
+`./bin/ableton` still uses system Wine and the working prefix. Dry-run works
+the same way (`WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-proton`), and sessions
+are still cleaned with `bin/ableton-proton-cleanup`.
 
 What it does (see `config/ableton-runner.sh`, sourced from `config/env`):
 

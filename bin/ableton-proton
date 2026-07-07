@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Explicit launcher for the validated Proton-exp Ableton path.
+#
+# Exactly equivalent to:  WAYDAW_ABLETON_RUNNER=proton-exp ./bin/ableton
+# and inherits everything the runner mode provides (copied test prefix only,
+# placement clamp, KWin decoration controller + vertical-maximize guard,
+# no registry writes, no virtual desktop, working prefix untouched; cleaned
+# up by bin/ableton-proton-cleanup). See docs/ableton-proton-runner-mode.md
+# and docs/ableton-proton-exp-message-pump-starvation.md.
+#
+# This does NOT change the default: plain ./bin/ableton still uses system
+# Wine and the working prefix. Dry-run works the same as bin/ableton:
+#   WAYDAW_ABLETON_DRY_RUN=1 bin/ableton-proton
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+export WAYDAW_ABLETON_RUNNER=proton-exp
+exec "$ROOT_DIR/bin/ableton" "$@"
