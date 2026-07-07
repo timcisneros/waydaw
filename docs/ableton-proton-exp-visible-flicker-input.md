@@ -180,6 +180,10 @@ focus + flicker alone.
 
 ## A fix is needed — proposed next steps (diagnosis only; NOT implemented)
 
+> **Update 2026-07-07 (later session):** step 1 below was executed. The spin
+> source is identified and WebView2 is **exonerated** — see
+> `docs/ableton-proton-exp-message-pump-starvation.md`.
+
 No fix implemented. Proposed next diagnostics, in priority order (user
 prioritized interactability):
 
