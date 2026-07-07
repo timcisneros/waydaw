@@ -150,20 +150,118 @@ never resumes. Interactivity did not improve under any perturbation.
   logging confirmed on (e.g. `DXVK_LOG_LEVEL=info` runner-scoped) and capture
   swapchain properties across a WM-side resize.
 
-## Proposed next step (NOT implemented — needs approval)
+## WINEDEBUG capture (2026-07-07, follow-up session): exact cycle recorded
 
-Capture the storm's parameters, then decide the fix:
+The proposed `WINEDEBUG=+message,+win` capture was approved and executed.
 
-1. Short runner-scoped run with `WINEDEBUG=+message,+win` (log to file,
-   seconds-long capture) to record the exact SetWindowPos flags/rect/style
-   cycle: confirms whether the loop is `SWP_FRAMECHANGED` style churn (the
-   Motif-hints/decoration toggling already seen as the flicker driver) or a
-   rect oscillation, and which Ableton belief (1096?) never converges.
-2. Fix directions depending on (1): stop the feedback Wine-side (the X11
-   driver answering frame-changed SetWindowPos with another synchronous
-   WM_WINDOWPOSCHANGED even when nothing changed), or satisfy Ableton's
-   demand (window rules/size environment so its desired frame is achievable),
-   or upstream Wine/Proton issue triage with this backtrace signature.
+**Capture setup.** One launch, copied Proton-exp prefix, WebView2 kept absent
+via the proven `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=<empty dir>` fail-clean
+override (keeps Chromium message traffic out of the trace; the storm is
+identical without WebView2 per the exoneration run). To keep the debug flood
+out of the repo's `logs/ableton.log`, the launch replicated the runner's
+exact no-registry command directly (source `config/env` with
+`WAYDAW_ABLETON_RUNNER=proton-exp`, then
+`env -u WAYLAND_DISPLAY -u WINEDLLOVERRIDES WINEDEBUG=+message,+win
+WINEPREFIX=<test prefix> wine "<Ableton exe>" 2><scratch log>`), with a
+1.5 GB size guard. Duration 104 s (08:06:50–08:08:34, dialog up by ~26 s);
+final log 232 MB in session scratch (not committed). Session state matched
+all prior runs: main `0x08c00003` 848×1052@165,28, dialog `0x08c00091`,
+`_NET_WM_STATE_MAXIMIZED_VERT`, Motif `0x3,0x6,0x7a`, frame extents
+`0,0,28,0`, UI process ~126–130% CPU. WM_DELETE sent at 08:08:08 —
+**still ignored** (both windows mapped 8+ s later; and see the trace-level
+proof below). Cleaned up clean; hashes unchanged.
+
+**The exact cycle** (main window Wine HWND `0x100b6` this run, thread `0024`;
+21,755 `NtUserSetWindowPos` calls on the main window in 104 s ≈ 209/s):
+
+```
+[worker tid 017c] WM_USER+1 (0x401) → helper window 0x200ac on UI thread
+                                       (1267 deliveries; ~3.2 cycles/s)
+  → UI thread: NtUserSetWindowPos hwnd 0x100b6, 165,0 (848x1080), flags 0x16
+       (SWP_NOZORDER|SWP_NOACTIVATE — Ableton's TRUE desired geometry:
+        848 wide, FULL 1080 screen height, at x=165, y=0)
+  then, recursively, ~63 times, +4 px taller each iteration:
+    WM_WINDOWPOSCHANGED "sent from self", WINDOWPOS h=N,
+        flags 0x1216 (= 0x216 | SWP_NOCLIENTSIZE)      <-- client DID NOT change
+      → handler calls NtUserSetWindowPos 0,0 (848 x N+4),
+            flags 0x216 (NOMOVE|NOZORDER|NOACTIVATE|NOOWNERZORDER)
+        → WM_WINDOWPOSCHANGING → WM_NCCALCSIZE (wp=1)
+            rects e.g. new (165,0)-(1013,1300), old (165,0)-(1013,1296)
+            result flags 0x1a16 (NOCLIENTSIZE|NOCLIENTMOVE)
+        → WM_WINDOWPOSCHANGED (h=N+4) → recurse
+  window-rect height climbs 1056 → ~1405 (21,076 × +4 steps), recursion
+  unwinds (~63 deep ≈ the 167–201-frame backtrace oscillation), resets
+  (paired −12/−236 steps, ~333 cycles), next WM_USER+1 restarts it. Forever.
+```
+
+Constant throughout: `WM_SIZE` always reports client `848×1096`
+(`lp=04480350`) — **the client rect is pinned**; every storm
+`WM_WINDOWPOSCHANGED` carries `SWP_NOCLIENTSIZE`. Note the impossible
+geometry Wine maintains: **client height 1096 > requested window height 1080
+> X reality 1052**, where 1096 = 1080 + 2×8 (Wine's maximized-window border
+extension: a Windows-style vert-maximized window rect legitimately overhangs
+the screen by the resize border; KWin's actual grant is 1052 = 1080 − 28
+titlebar). The X server sees none of this — zero ConfigureNotify in steady
+state; `set_window_pos` returns `status flags = 1006` each round with no
+server-side change. Only 8 style messages total in 104 s and no
+`SWP_FRAMECHANGED` in the storm: this is **not** style/frame churn.
+
+**Trace-level starvation proof:** zero `WM_CLOSE` and zero `WM_SYSCOMMAND`
+dispatches on the main window in the entire 104 s log, despite the WM_DELETE
+close request mid-capture — posted messages are never retrieved.
+
+**Classification (from the decision list): rect/size feedback divergence —
+maximize/workarea mismatch (2+3+5), not a no-op re-delivery bug (4), not
+style churn (1).** Precisely: a worker thread perpetually re-asserts
+Ableton's desired full-screen-height rect (848×1080@165,0, unsatisfiable
+under KWin's vert-maximize clamp); Wine pins the client rect at an
+inconsistent 848×1096 (`SWP_NOCLIENTSIZE` every iteration), so Ableton's
+`WM_WINDOWPOSCHANGED` handler — apparently reconciling window vs client
+height and never observing convergence — grows the window +4 px per
+synchronous re-entry until a recursion bound, then the worker restarts the
+cycle. The UI thread spends ~100% of its time inside this loop, so posted
+input/close messages starve.
+
+This also closes the white-bars question: the pinned client (and hence the
+DXVK swapchain) is 848×1096 while the X window shows 848×1052 — the same
+1096-vs-1052 (44 px) inconsistency, one root cause for both defects.
+
+**Why WebView2 stays exonerated:** this capture ran with zero
+`msedgewebview2.exe` processes and reproduced the full storm; the cycle's
+participants are an Ableton worker thread, Ableton's winproc, and
+win32u/user32 — no browser, COM, or network component appears anywhere in
+the loop. **Why KWin/controller stay exonerated:** the controller was not
+loaded during capture; the storm generates no X traffic at all in steady
+state, so no compositor policy is being exercised per-iteration — KWin's
+only role is the initial (legitimate) vert-maximize clamp that Ableton's
+geometry demand can never satisfy.
+
+**Still unknown:** the exact arithmetic behind the +4 increment (which pair
+of Ableton's height beliefs differs by 4 — likely a border term, but the
+handler's internals are opaque without symbols); whether Wine's pinned
+1096 client rect is Proton-specific maximize-border arithmetic or also
+present in vanilla Wine 11; and whether Ableton stops the WM_USER+1
+re-management heartbeat once authorized (prior working-prefix system-Wine
+sessions do not show the storm, but that path differs in more than one way).
+
+## Proposed next fix direction (NOT implemented — needs approval)
+
+1. **Satisfy the geometry demand (recommended first — runner-scoped, low
+   risk, also confirms the model).** The divergence needs "desired rect ≠
+   grantable rect". The proton-exp runner already seeds `steamuser`'s
+   `Preferences.cfg`; seed a placement that KWin can grant exactly (modest
+   non-maximized rect inside the workarea, e.g. 848×1000 at y=28, no
+   vert-maximize) and observe: if the storm never starts, interactability
+   and the swapchain mismatch should both resolve in one move. Copied
+   prefix only; no auth involvement; reversible by reverting the seed.
+2. **Upstream Wine/Proton report** with this trace: under
+   `_NET_WM_STATE_MAXIMIZED_VERT`, Wine reports a client rect (1096) larger
+   than both the requested window rect (1080) and the actual X client
+   (1052), and delivers unbounded synchronous `WM_WINDOWPOSCHANGED`
+   recursion to an app that resizes from within its handler. Rebuilding the
+   runner with a local Wine patch is out of scope (no package installs).
+3. **App-scoped shim** (message filter/recursion breaker) — only if (1)
+   fails; more invasive, needs its own design review.
    No Ableton binary patching; no auth/licensing involvement in any path.
 
 ## Hygiene
