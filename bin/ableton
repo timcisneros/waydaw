@@ -150,8 +150,14 @@ compose_launch_overrides() {
     else
       launch_winedlloverrides="version=n,b"
     fi
-    # Same cap the placement clamp uses; read by the DLL via getenv().
-    export WAYDAW_SIZING_SHIM_MAX_H="${WAYDAW_ABLETON_MAX_WINDOW_HEIGHT:-1000}"
+    # Shim height cap (Win32 window units), read by the DLL via getenv().
+    # Decoupled from the conservative startup placement clamp
+    # (WAYDAW_ABLETON_MAX_WINDOW_HEIGHT, default 1000): the window is BORN
+    # calm and short, then the user may resize UP to this cap. 1040 sits well
+    # above Ableton's ~966 content-minimum (giving real vertical range) and
+    # ~40px below the full-workarea height where the resize storm forms. See
+    # docs/ableton-proton-full-height-preapply-options.md.
+    export WAYDAW_SIZING_SHIM_MAX_H="${WAYDAW_ABLETON_SIZING_CAP_H:-1040}"
   fi
 }
 
@@ -190,7 +196,7 @@ print_launch_config() {
   printf 'WAYDAW_ABLETON_GRAPHICS=%s\n' "$ableton_graphics"
   printf 'WINEDLLOVERRIDES=%s\n' "${launch_winedlloverrides:-}"
   printf 'Ableton DXVK=%s\n' "$ableton_dxvk_state"
-  printf 'Sizing shim=%s\n' "$([[ "$sizing_shim_enabled" == 1 ]] && echo "enabled (target=$(sizing_shim_target), cap_h=${WAYDAW_SIZING_SHIM_MAX_H:-1000})" || echo no)"
+  printf 'Sizing shim=%s\n' "$([[ "$sizing_shim_enabled" == 1 ]] && echo "enabled (target=$(sizing_shim_target), cap_h=${WAYDAW_SIZING_SHIM_MAX_H:-1040})" || echo no)"
   printf 'GDK_BACKEND=%s\n' "${GDK_BACKEND:-}"
   printf 'QT_QPA_PLATFORM=%s\n' "${QT_QPA_PLATFORM:-}"
   printf 'SDL_VIDEODRIVER=%s\n' "${SDL_VIDEODRIVER:-}"
@@ -256,7 +262,7 @@ print_dry_run() {
     printf 'sizing_shim=would_enable\n'
     printf 'sizing_shim_dll=%s\n' "$sizing_shim_dll"
     printf 'sizing_shim_target=%s\n' "$(sizing_shim_target)"
-    printf 'sizing_shim_cap_h=%s\n' "${WAYDAW_SIZING_SHIM_MAX_H:-1000}"
+    printf 'sizing_shim_cap_h=%s\n' "${WAYDAW_SIZING_SHIM_MAX_H:-1040}"
     printf 'sizing_shim_dry_run_mutation=none (installed only at real launch)\n'
   else
     printf 'sizing_shim=no\n'

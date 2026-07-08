@@ -206,3 +206,130 @@ no registry mutation, Proton-exp stays opt-in, KWin persistent settings
 unchanged, no geometry-fighting loop, real-manual-resize validation required.
 Option 1 violates exactly one: KWin persistent settings — and is therefore
 gated on the user relaxing it, not on engineering.
+
+---
+
+# Implementation + validation: option 3 sizing shim (fix/proton-sizing-shim, 2026-07-07)
+
+Option 3 was implemented and validated with a real user hand-resize.
+
+**Verdict: the sizing shim mechanically SOLVES the message-pump resize storm.**
+Startup stayed calm, the stock 1096 seed was still corrected, a real manual
+edge-drag toward full height did NOT storm, and — the exact path that broke the
+KWin post-apply cap — a normal width resize AFTER a height change did not
+re-trigger the full-height fight. The main UI thread stayed calm (~5–15 % of a
+core) throughout; no 80 % runaway ever appeared. **But the branch is NOT
+merge-ready:** resizing the window shorter exposes a separate decoration /
+menu-bar occlusion bug (below) that can make the UI awkward or unusable. That
+bug is pre-existing (decoration churn), not caused by the shim, and out of
+scope for the sizing-shim acceptance — tracked separately.
+
+## What was implemented
+
+- `compat/ableton-sizing-shim/version-shim.c` (+ `version.def`, `build.sh`):
+  a proxy `version.dll` (six forwarded version.dll exports; the real DLL is
+  loaded by explicit `System32\version.dll` path to avoid self-recursion). On
+  `DLL_PROCESS_ATTACH` it installs a **thread-local** `WH_CBT` hook on the main
+  thread; on `HCBT_CREATEWND` for top-level `WS_THICKFRAME` (non-`WS_CHILD`)
+  windows it subclasses the wndproc and clamps, in the same synchronous
+  message handling:
+  - `WM_GETMINMAXINFO`: `ptMaxTrackSize.y` and `ptMaxSize.y` → cap.
+  - `WM_WINDOWPOSCHANGING`: `wp->cy` → cap (belt-and-braces).
+  Built with the already-installed `x86_64-w64-mingw32-gcc`; artifact lives in
+  untracked `.local-tools/ableton-sizing-shim/version.dll`.
+- Runner wiring (`config/ableton-runner.sh`, `bin/ableton`): the proton-exp
+  runner flags the shim (`WAYDAW_ABLETON_SIZING_SHIM=1`, opt-out `=0`);
+  `bin/ableton` installs the DLL beside the Ableton exe **in the copied prefix
+  only** (hard refusal for the working prefix) at real launch, and gates
+  loading with `WINEDLLOVERRIDES=version=n,b`. Dry-run discloses
+  source/target/cap and mutates nothing. Default `bin/ableton` (system Wine,
+  working prefix) is entirely unchanged.
+- `bin/verify-proton-runner-mode` extended to 58 checks (shim disclosure,
+  no-dry-run-mutation, opt-out, cap override, default-path-clean,
+  working-prefix-has-no-shim).
+
+## Cap tuning: 1000 was too cramped; 1040 made height usable
+
+The cap is the Win32 window-height ceiling the shim enforces
+(`WAYDAW_SIZING_SHIM_MAX_H`, decoupled from the conservative startup placement
+clamp `WAYDAW_ABLETON_MAX_WINDOW_HEIGHT=1000`; override via
+`WAYDAW_ABLETON_SIZING_CAP_H`).
+
+- **Cap 1000 (first try): storm solved, but height unusable.** The window's
+  legal height band was only ~966 (Ableton's content-minimum) … 1000 — about
+  34 px — so height "wouldn't resize" and snapped back, while width was free
+  (it stuck at ~90 distinct values from 498 to 2560). Measured: during a
+  synthetic shrink to 800 the window snapped to 966 with **zero** shim
+  `WM_WINDOWPOSCHANGING` clamps — i.e. the snap-back is the window bouncing
+  inside the narrow band, not the shim rewriting the drag. Maximize was capped
+  at 1000 (`ptMaxSize.y`) so it "didn't fill the screen" and took several
+  clicks. Main thread calm (~5 %) throughout; storm absent.
+- **Cap 1040 (chosen): height resizing became usable.** The KWin guard-3
+  margin was loosened to 20 (backstop clamp ~1060) so it no longer fights the
+  shim's band. Re-launched from the stock 1096 seed (clamped 1096→1000);
+  startup 832×966, calm (~4 %). Real hand-resize: the window now settled
+  freely at many heights (566, 675, 849, 937, 977, up to ~1006 client at the
+  1040 cap) instead of snapping to 966 — height axis unstuck. Width resize
+  after a height change: **no full-height re-assert**, main thread stayed
+  ~14 % during active drags and calm at idle; the KWin sentinel stayed
+  near-silent (only a lone guard-2 maximize-undo on a maximize attempt). Storm
+  did not return.
+
+Maximize remains intentionally odd: `ptMaxSize.y` caps the maximized height
+and guard 2 undoes vertical-maximize, so maximize does not fill the screen and
+can take multiple clicks. Accepted tradeoff of capping height to avoid the
+storm — not a regression to fix here.
+
+## New blocker: decoration / menu-bar occlusion when resizing smaller
+
+Resizing the window **shorter** makes Ableton's top **File/Edit menu bar
+disappear** behind the KWin titlebar, with a flicker during the drag. Captured
+failure state (window hand-resized to 1709×331):
+
+| datum | value |
+|---|---|
+| geometry | 1709×331 @19,213 |
+| `_MOTIF_WM_HINTS` | `0x3,0x3e,0x0,0x0,0x0` — **decorations 0x0 (borderless)**; startup was `0x7a` |
+| `_NET_FRAME_EXTENTS` | `0,0,28,0` — KWin **still drawing a 28 px titlebar** (decoration-pin holding) |
+| `_NET_WM_STATE` | `_MAXIMIZED_VERT,_MAXIMIZED_HORZ` — **stale** (window is 331 px tall, not maximized) |
+| main UI thread | ~14 % of a core — **calm, NOT storming** |
+| guard events (90 s) | undo-vmax 0, cap-height 0, re-pin 0 — guards quiet |
+| menu bar | client top row (y=0) renders the grey control bar (129); the File/Edit row is **not in the client render** — occluded/absent |
+
+**Mechanism:** on resize, Ableton/Wine re-derives its Motif window hints and
+drops the decoration hint to `0x0` (borderless), but the KWin decoration-pin
+keeps a 28 px titlebar (`_NET_FRAME_EXTENTS=28`). Ableton then lays out its top
+menu row assuming no titlebar, and KWin's titlebar draws over it. This is the
+**known decoration-churn / white-top-strip family** the decoration-pin guard
+was written to fight (see
+`docs/ableton-proton-custom-presentation-controller.md`), now visible only
+because height resizing finally works (at cap 1000 the height was frozen at
+966, so the churn was never entered). A stale `MAXIMIZED_VERT/HORZ` atom pair
+(set app-side without a KWin maximize, so guard 2 stays blind) is part of the
+same decoration-state confusion. **The sizing shim does not touch decorations
+and neither causes nor fixes this.**
+
+## Classification
+
+- **Storm fix: promising / mechanically successful.** The shim clamps the
+  sizing pipeline pre-apply; the full-height latch never forms; the
+  width-after-height failure path is fixed; the app stays responsive with a
+  calm UI thread across height and width resizing.
+- **Product readiness: NOT merge-ready.** Resizing shorter can occlude the top
+  menu bar behind the titlebar (decoration bug), making the UI awkward or
+  unusable at some sizes. This must be resolved (separate decoration
+  investigation) before the Proton-exp resize experience is acceptable.
+
+## Session hygiene
+
+Ableton was launched twice via `./bin/ableton-proton` (cap 1000 then 1040),
+each from the stock 1096 seed restored from `.bak-normalize`. No authorization
+attempted; no credentials; the only clicks were demo-mode File-menu
+interactability probes (a "Welcome to Ableton" panel appeared, confirming
+posted input is processed — the storm's dead-input signature is gone). The
+auth dialog (`_NET_WM_WINDOW_TYPE_DIALOG`, excluded by `normalWindow` and by
+the shim's `WS_THICKFRAME`/`!WS_CHILD` gate) was never touched. Cleanup after
+each session: `cleanup_result=clean`, controller `loaded=false`, zero
+Proton/Wine/WebView2 processes, working-prefix DXVK hashes verified unchanged
+(sha256 -c OK ×8), `kwinrc`/`kwinrulesrc` byte-identical. The shim DLL lives
+only in the disposable copied prefix.

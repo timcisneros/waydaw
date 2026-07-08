@@ -54,12 +54,15 @@ const managed = new Set();
 const lastUnmax = new Map();
 
 // Manual-resize cap: frame height must stay at least this many px below the
-// workarea height. On the 2560x1080 workarea this puts the cap at frame 1000
-// — just above the calm startup frame (994 = 966 client + 28 titlebar) and
-// well below the full-workarea frame (1080) where the storm formed. Tradeoff:
-// a drag past the cap rubber-bands at the cap height instead of following the
-// pointer; heights up to (workarea − 80) resize normally.
-const MANUAL_CAP_MARGIN = 80;
+// workarea height. This is now a BACKSTOP only — the Windows-side sizing shim
+// (proxy version.dll, WM_GETMINMAXINFO clamp) is the primary lever and holds
+// the window at its cap (~1040) pre-apply. This guard must therefore sit
+// ABOVE the shim's band so it never fights a legitimate shim-allowed height;
+// margin 20 → clamp at workarea−20 (frame ~1060), catching only a true
+// near-full-workarea escape the shim somehow missed. If the shim is loaded
+// (always, in the runner path) this should stay a zero/near-zero-fire
+// sentinel. See docs/ableton-proton-full-height-preapply-options.md.
+const MANUAL_CAP_MARGIN = 20;
 let capCount = 0;
 let capLogMs = 0;   // rate-limit LOGS only; the clamp itself must always run
 
