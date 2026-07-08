@@ -14,6 +14,13 @@ dry_run="${WAYDAW_ABLETON_DRY_RUN:-0}"
 # Set to 1 only by the proton-exp runner (config/ableton-runner.sh); the
 # default system-Wine path never sets it, so this stays a no-op by default.
 kwin_controller_enabled="${WAYDAW_ABLETON_KWIN_CONTROLLER:-0}"
+# Windows-side sizing shim (proxy version.dll clamping WM_GETMINMAXINFO /
+# WM_WINDOWPOSCHANGING). Set to 1 only by the proton-exp runner; the default
+# system-Wine path never sets it. Installed into the COPIED prefix at real
+# launch only; loading is gated by WINEDLLOVERRIDES=version=n,b. See
+# docs/ableton-proton-full-height-preapply-options.md.
+sizing_shim_enabled="${WAYDAW_ABLETON_SIZING_SHIM:-0}"
+sizing_shim_dll="${WAYDAW_ABLETON_SIZING_SHIM_DLL:-}"
 registry_mutation_enabled=yes
 virtual_desktop_mutation_enabled=yes
 
@@ -105,6 +112,49 @@ configure_ableton_windowing() {
   env -u WAYLAND_DISPLAY wine reg delete 'HKCU\Software\Wine\Explorer\Desktops' /v Default /f >/dev/null 2>&1 || true
 }
 
+sizing_shim_target() {
+  printf '%s/version.dll\n' "$(dirname "$ableton_exe")"
+}
+
+install_sizing_shim() {
+  # Copies the proxy version.dll beside the Ableton exe. COPIED prefix only —
+  # hard refusal for the working prefix (the shim must never enter it).
+  local target
+  target="$(sizing_shim_target)"
+  case "$target" in
+    "$HOME/WinePrefixes/ableton12/"*)
+      printf 'ERROR: sizing shim refuses to install into the working prefix: %s\n' "$target" >&2
+      return 1 ;;
+  esac
+  if [[ ! -f "$sizing_shim_dll" ]]; then
+    printf 'ERROR: sizing shim DLL not built: %s\n' "$sizing_shim_dll" >&2
+    printf 'Build it with compat/ableton-sizing-shim/build.sh\n' >&2
+    return 1
+  fi
+  if cmp -s "$sizing_shim_dll" "$target" 2>/dev/null; then
+    printf 'WAYDAW: sizing shim already installed: %s\n' "$target"
+  else
+    cp -f "$sizing_shim_dll" "$target" || return 1
+    printf 'WAYDAW: sizing shim installed: %s\n' "$target"
+  fi
+}
+
+# Effective WINEDLLOVERRIDES for launch: graphics overrides plus (when the
+# sizing shim is enabled) "version=n,b" so Wine loads the proxy from the app
+# dir. Computed once; used by dry-run, launch-config print, and the launch.
+compose_launch_overrides() {
+  launch_winedlloverrides="${ableton_winedlloverrides:-}"
+  if [[ "$sizing_shim_enabled" == 1 ]]; then
+    if [[ -n "$launch_winedlloverrides" ]]; then
+      launch_winedlloverrides="$launch_winedlloverrides;version=n,b"
+    else
+      launch_winedlloverrides="version=n,b"
+    fi
+    # Same cap the placement clamp uses; read by the DLL via getenv().
+    export WAYDAW_SIZING_SHIM_MAX_H="${WAYDAW_ABLETON_MAX_WINDOW_HEIGHT:-1000}"
+  fi
+}
+
 configure_ableton_graphics() {
   ableton_graphics="${WAYDAW_ABLETON_GRAPHICS:-wined3d}"
 
@@ -138,8 +188,9 @@ print_launch_config() {
   printf '[%s] effective environment before Ableton launch\n' "$(date '+%Y-%m-%d %H:%M:%S')"
   printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
   printf 'WAYDAW_ABLETON_GRAPHICS=%s\n' "$ableton_graphics"
-  printf 'WINEDLLOVERRIDES=%s\n' "${ableton_winedlloverrides:-}"
+  printf 'WINEDLLOVERRIDES=%s\n' "${launch_winedlloverrides:-}"
   printf 'Ableton DXVK=%s\n' "$ableton_dxvk_state"
+  printf 'Sizing shim=%s\n' "$([[ "$sizing_shim_enabled" == 1 ]] && echo "enabled (target=$(sizing_shim_target), cap_h=${WAYDAW_SIZING_SHIM_MAX_H:-1000})" || echo no)"
   printf 'GDK_BACKEND=%s\n' "${GDK_BACKEND:-}"
   printf 'QT_QPA_PLATFORM=%s\n' "${QT_QPA_PLATFORM:-}"
   printf 'SDL_VIDEODRIVER=%s\n' "${SDL_VIDEODRIVER:-}"
@@ -157,8 +208,8 @@ print_launch_config() {
   fi
   printf 'Ableton executable=%s\n' "$ableton_exe"
   printf 'Launch command=env -u WAYLAND_DISPLAY WINEPREFIX=%q' "$WINEPREFIX"
-  if [[ -n "${ableton_winedlloverrides:-}" ]]; then
-    printf ' WINEDLLOVERRIDES=%q' "$ableton_winedlloverrides"
+  if [[ -n "${launch_winedlloverrides:-}" ]]; then
+    printf ' WINEDLLOVERRIDES=%q' "$launch_winedlloverrides"
   fi
   printf ' wine %q' "$ableton_exe"
   if [[ "$#" -gt 0 ]]; then
@@ -176,12 +227,12 @@ print_launch_config() {
 print_dry_run() {
   local wine_binary launch_command
   wine_binary="$(command -v wine)"
-  if [[ "$diagnostic_no_registry" == 1 ]]; then
+  if [[ -n "${launch_winedlloverrides:-}" ]]; then
+    printf -v launch_command 'env -u WAYLAND_DISPLAY WINEPREFIX=%q WINEDLLOVERRIDES=%q wine %q' \
+      "$WINEPREFIX" "$launch_winedlloverrides" "$ableton_exe"
+  elif [[ "$diagnostic_no_registry" == 1 ]]; then
     printf -v launch_command 'env -u WAYLAND_DISPLAY -u WINEDLLOVERRIDES WINEPREFIX=%q wine %q' \
       "$WINEPREFIX" "$ableton_exe"
-  elif [[ -n "${ableton_winedlloverrides:-}" ]]; then
-    printf -v launch_command 'env -u WAYLAND_DISPLAY WINEPREFIX=%q WINEDLLOVERRIDES=%q wine %q' \
-      "$WINEPREFIX" "$ableton_winedlloverrides" "$ableton_exe"
   else
     printf -v launch_command 'env -u WAYLAND_DISPLAY WINEPREFIX=%q wine %q' \
       "$WINEPREFIX" "$ableton_exe"
@@ -196,11 +247,20 @@ print_dry_run() {
   printf 'wine_binary=%s\n' "$wine_binary"
   printf 'wineprefix=%s\n' "$WINEPREFIX"
   printf 'graphics_mode=%s\n' "$ableton_graphics"
-  printf 'winedlloverrides=%s\n' "${ableton_winedlloverrides:-}"
+  printf 'winedlloverrides=%s\n' "${launch_winedlloverrides:-}"
   printf 'registry_mutation_enabled=%s\n' "$registry_mutation_enabled"
   printf 'virtual_desktop_mutation_enabled=%s\n' "$virtual_desktop_mutation_enabled"
   printf 'dxvk_expected_active=%s\n' "$([[ "$ableton_graphics" == dxvk ]] && echo yes || echo no)"
   printf 'kwin_decoration_controller=%s\n' "$([[ "$kwin_controller_enabled" == 1 ]] && echo would_load || echo no)"
+  if [[ "$sizing_shim_enabled" == 1 ]]; then
+    printf 'sizing_shim=would_enable\n'
+    printf 'sizing_shim_dll=%s\n' "$sizing_shim_dll"
+    printf 'sizing_shim_target=%s\n' "$(sizing_shim_target)"
+    printf 'sizing_shim_cap_h=%s\n' "${WAYDAW_SIZING_SHIM_MAX_H:-1000}"
+    printf 'sizing_shim_dry_run_mutation=none (installed only at real launch)\n'
+  else
+    printf 'sizing_shim=no\n'
+  fi
   printf 'would_launch_command=%s\n' "$launch_command"
 }
 
@@ -231,6 +291,7 @@ warn_if_ableton_updates_present | tee -a "$LOG_FILE"
 if ! configure_ableton_graphics; then
   exit 1
 fi
+compose_launch_overrides
 if [[ "$diagnostic_no_registry" == 1 ]]; then
   registry_mutation_enabled=no
   virtual_desktop_mutation_enabled=no
@@ -245,6 +306,15 @@ if [[ "$diagnostic_no_registry" != 1 ]]; then
   if ! configure_ableton_windowing; then
     printf 'ERROR: failed to configure Ableton Wine windowing in WINEPREFIX=%s\n' "$WINEPREFIX" | tee -a "$LOG_FILE" >&2
     printf 'ERROR: unable to set Managed=Y, Decorated=Y, and disable Wine virtual desktop before launch.\n' | tee -a "$LOG_FILE" >&2
+    exit 1
+  fi
+fi
+
+# Sizing shim install: real launch only (dry-run exits above). Hard failure —
+# an unshimmed session would re-expose the full-height resize storm.
+if [[ "$sizing_shim_enabled" == 1 ]]; then
+  if ! install_sizing_shim 2>&1 | tee -a "$LOG_FILE"; then
+    printf 'ERROR: sizing shim install failed; aborting launch.\n' | tee -a "$LOG_FILE" >&2
     exit 1
   fi
 fi
@@ -270,11 +340,13 @@ if [[ "$kwin_controller_enabled" == 1 ]]; then
 fi
 
 set +e
-if [[ "$diagnostic_no_registry" == 1 ]]; then
-  env -u WAYLAND_DISPLAY -u WINEDLLOVERRIDES WINEPREFIX="$WINEPREFIX" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
+if [[ -n "${launch_winedlloverrides:-}" ]]; then
+  # Explicit overrides (graphics and/or sizing shim). Setting the variable
+  # outright gives the same host-value isolation the no-registry unset did.
+  env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" WINEDLLOVERRIDES="$launch_winedlloverrides" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
   wine_status="${PIPESTATUS[0]}"
-elif [[ -n "${ableton_winedlloverrides:-}" ]]; then
-  env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" WINEDLLOVERRIDES="$ableton_winedlloverrides" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
+elif [[ "$diagnostic_no_registry" == 1 ]]; then
+  env -u WAYLAND_DISPLAY -u WINEDLLOVERRIDES WINEPREFIX="$WINEPREFIX" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
   wine_status="${PIPESTATUS[0]}"
 else
   env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"

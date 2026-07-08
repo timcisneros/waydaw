@@ -117,9 +117,18 @@ if [[ -n "$_waydaw_runner" && "$_waydaw_runner" != system ]]; then
       # docs/ableton-proton-custom-presentation-controller.md.
       export WAYDAW_ABLETON_KWIN_CONTROLLER="${WAYDAW_ABLETON_KWIN_CONTROLLER:-1}"
 
-      printf 'WAYDAW runner=proton-exp | wine=%s | prefix=%s | graphics=%s | no_registry=%s | kwin_controller=%s\n' \
+      # Windows-side sizing shim (full-height latch prevention). Only FLAGGED
+      # here — bin/ableton installs the proxy version.dll into the COPIED
+      # prefix and gates loading via WINEDLLOVERRIDES=version=n,b at real
+      # launch only (never on source, never on dry-run). Set
+      # WAYDAW_ABLETON_SIZING_SHIM=0 to opt out. See
+      # docs/ableton-proton-full-height-preapply-options.md.
+      export WAYDAW_ABLETON_SIZING_SHIM="${WAYDAW_ABLETON_SIZING_SHIM:-1}"
+      export WAYDAW_ABLETON_SIZING_SHIM_DLL="${WAYDAW_ABLETON_SIZING_SHIM_DLL:-$_waydaw_root/.local-tools/ableton-sizing-shim/version.dll}"
+
+      printf 'WAYDAW runner=proton-exp | wine=%s | prefix=%s | graphics=%s | no_registry=%s | kwin_controller=%s | sizing_shim=%s\n' \
         "$_rbin/wine" "$WINEPREFIX" "$WAYDAW_ABLETON_GRAPHICS" "$WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY" \
-        "$WAYDAW_ABLETON_KWIN_CONTROLLER" >&2
+        "$WAYDAW_ABLETON_KWIN_CONTROLLER" "$WAYDAW_ABLETON_SIZING_SHIM" >&2
       ;;
     *)
       printf 'WAYDAW runner ERROR: unknown WAYDAW_ABLETON_RUNNER=%s (expected: system, proton-exp)\n' "$_waydaw_runner" >&2

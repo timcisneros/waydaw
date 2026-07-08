@@ -34,11 +34,13 @@ err="$(WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2
 check "proton wine is the runner binary"     "$out" "wine_binary=$RUNNER_WINE"
 check "proton prefix is the copied prefix"   "$out" "wineprefix=$PROTON_PREFIX"
 check "proton keeps DXVK (graphics=dxvk)"    "$out" "graphics_mode=dxvk"
-check "proton empties WINEDLLOVERRIDES"      "$out" "winedlloverrides="
+check "proton overrides only the shim dll"   "$out" "winedlloverrides=version=n,b"
 check "proton disables registry mutation"    "$out" "registry_mutation_enabled=no"
 check "proton uses no virtual desktop"       "$out" "virtual_desktop_mutation_enabled=no"
 check "proton preserves -u WAYLAND_DISPLAY"  "$out" "env -u WAYLAND_DISPLAY"
-check "proton drops WINEDLLOVERRIDES on cmd" "$out" "-u WINEDLLOVERRIDES"
+check "proton sets shim override on cmd"     "$out" "WINEDLLOVERRIDES=version"
+out_noshim="$(WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_SIZING_SHIM=0 WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>/dev/null)"
+check "shim opt-out restores -u WINEDLLOVERRIDES" "$out_noshim" "-u WINEDLLOVERRIDES"
 check "proton logs runner resolution"        "$err" "WAYDAW runner=proton-exp"
 check "proton plans kwin controller load"    "$out" "kwin_decoration_controller=would_load"
 out_optout="$(WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_KWIN_CONTROLLER=0 WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>/dev/null)"
@@ -126,6 +128,33 @@ check "launcher dry-run does not load controller" "$st" "loaded=false"
 out="$(WAYDAW_ABLETON_GRAPHICS=dxvk WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>/dev/null)"
 check "plain bin/ableton still defaults to system wine" "$out" "wine_binary=/usr/bin/wine"
 check "plain bin/ableton still uses working prefix"     "$out" "wineprefix=$WORKING_PREFIX"
+
+printf '== 9. sizing shim (dry-run only; no prefix mutation) ==\n'
+SHIM_DLL="$ROOT_DIR/.local-tools/ableton-sizing-shim/version.dll"
+SHIM_TARGET="$PROTON_PREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/Program/version.dll"
+if [[ -f "$SHIM_DLL" ]]; then
+  [[ "$(head -c2 "$SHIM_DLL")" == "MZ" ]] && ok "shim DLL artifact is a PE binary" || bad "shim DLL artifact is not a PE binary"
+else
+  bad "shim DLL not built ($SHIM_DLL); run compat/ableton-sizing-shim/build.sh"
+fi
+target_before="none"; [[ -f "$SHIM_TARGET" ]] && target_before="$(sha256sum "$SHIM_TARGET" | awk '{print $1}')"
+out="$(WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-proton 2>/dev/null)"
+check "dry-run discloses shim enablement"     "$out" "sizing_shim=would_enable"
+check "dry-run discloses shim source dll"     "$out" "sizing_shim_dll=$SHIM_DLL"
+check "dry-run discloses shim install target" "$out" "sizing_shim_target=$SHIM_TARGET"
+check "dry-run discloses shim cap height"     "$out" "sizing_shim_cap_h=1000"
+check "dry-run command carries shim override" "$out" "WINEDLLOVERRIDES=version"
+target_after="none"; [[ -f "$SHIM_TARGET" ]] && target_after="$(sha256sum "$SHIM_TARGET" | awk '{print $1}')"
+[[ "$target_after" == "$target_before" ]] && ok "dry-run does not install/modify the shim in the prefix" \
+  || bad "dry-run MUTATED the shim target in the prefix"
+out_noshim="$(WAYDAW_ABLETON_SIZING_SHIM=0 WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-proton 2>/dev/null)"
+check "shim opt-out respected by launcher"    "$out_noshim" "sizing_shim=no"
+out_default="$(WAYDAW_ABLETON_GRAPHICS=dxvk WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton 2>/dev/null)"
+check "default launcher has no sizing shim"   "$out_default" "sizing_shim=no"
+ncheck "default launcher has no shim override" "$out_default" "version=n,b"
+[[ -f "$WORKING_PREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/Program/version.dll" ]] \
+  && bad "working prefix contains a version.dll shim (must never happen)" \
+  || ok "working prefix has no shim DLL"
 
 printf '\n== summary ==\npass=%s fail=%s\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
