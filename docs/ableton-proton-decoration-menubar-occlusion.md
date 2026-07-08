@@ -157,3 +157,119 @@ byte-identical before/after); the observer and controller are runtime scripting
 only, both unloaded at cleanup. `cleanup_result=clean`, zero
 Ableton/Wine/Proton/WebView2 processes, working-prefix DXVK hashes unchanged.
 No fix implemented. Do not merge or push from a diagnosis branch.
+
+---
+
+# Fix implemented: min-height floor (2026-07-07, `fix/proton-sizing-shim-minheight`)
+
+The proposed floor was prototyped and validated with real user hand-resize.
+It took **three layers** to make the short-resize path safe — the shim floor
+alone was necessary but not sufficient.
+
+## Layer 1 — Windows-side floor in the sizing shim (primary)
+
+`compat/ableton-sizing-shim/version-shim.c`: the existing `WM_GETMINMAXINFO`
+handler now also raises `ptMinTrackSize.y` to a floor (observed startup value:
+app asks 34 early, 677 later → floored to 820). Belt-and-braces: a guarded
+`WM_WINDOWPOSCHANGING` upward clamp (`cy >= 200 && cy < floor && !IsIconic`)
+for message-carrying paths that skip minmax; minimize rects are left alone.
+The floor is clamped to never exceed the cap (empty-band guard).
+
+- `WAYDAW_ABLETON_SIZING_MIN_H` (launcher) → `WAYDAW_SIZING_SHIM_MIN_H`
+  (DLL), **default 820**; cap unchanged: `WAYDAW_ABLETON_SIZING_CAP_H` →
+  `WAYDAW_SIZING_SHIM_MAX_H`, **default 1040**. Legal band: `[820, 1040]`.
+- **Why 820:** the decorated→borderless flip is at frame ~740–750; 820 leaves
+  ~70 px of margin (interactive drags overshoot the constraint transiently by
+  ~25–55 px before Wine re-asserts, measured), while keeping ~220 px of usable
+  shrink range below the 1040 cap.
+- Dry-run now discloses the floor (`sizing_shim_min_h=820`) alongside cap,
+  source DLL, target, and no-mutation; `bin/verify-proton-runner-mode` gained
+  6 checks (floor disclosed, default 820, overridable, cap still 1040 and
+  independent) — **62/62 PASS**.
+
+**Result:** the app-side mode switch is fully prevented. Across every shrink
+attempt (interactive and synthetic, granted X heights as low as 28 px),
+`_MOTIF_WM_HINTS` stayed `0x7a` and the File/Edit row never disappeared. The
+app's height *belief* never goes below the floor, so the compact mode cannot
+latch. This confirms the diagnosis: the switch is driven by the Win32-side
+height, not by the X geometry.
+
+## Layer 2 — KWin floor backstop (guard 4 in the decoration controller)
+
+Real hand-resize exposed a gap the shim cannot cover: **Wine adopts
+WM-imposed configures through a raw path that sends no sizing messages**
+(the shim's `WM_WINDOWPOSCHANGING` floor counter stayed 0 throughout). A hard
+interactive shrink left the X window **stuck at 861×41** — a sliver — while
+the app still believed it was tall (`_MOTIF` still `0x7a`, CPU calm, menu
+intact but unusable at 41 px).
+
+`config/kwin/waydaw-ableton-decoration.js` gained guard 4: any granted frame
+height `< 800` is raised to `848` (the WM-frame equivalent of the shim band
+bottom; win32 ≈ X client here, +28 px titlebar).
+
+**Hard-won lesson (measured):** the first version clamped unconditionally
+inside `frameGeometryChanged` and degenerated into a compositor-level
+geometry war during held shrink drags — **3858 writes in ~12 s**, making ALL
+interactive resizing sluggish with repaint bars. The fixed guard (a) stands
+down entirely while `w.resize === true` (mid-drag slivers are harmless — the
+shim protects the app's belief), (b) corrects once on
+`interactiveMoveResizeFinished` / next settle, (c) rate-limits writes to one
+per 400 ms per window, like guard 2. After the fix: exactly one floor write
+per release (releases at 110/66/56 px → one write each → settled ≥ floor).
+
+## Layer 3 — post-resize renegotiation nudge (guard 5)
+
+Tall drags exposed the mirror-image gap: when an interactive resize ends,
+the app's counter-configure can be lost (KWin ignores client configure
+requests during the drag), leaving the X window **taller than the app
+paints** — measured X client 1032 vs painted 1006, a permanent 26 px black
+bar at the window bottom (screenshot row means: 0.0 below y≈1007). A 1 px
+external resize forced renegotiation and healed it instantly (app's
+preferred size won, bar repainted).
+
+Guard 5 automates exactly that: when an interactive resize on the target
+window finishes, shrink the frame height by 1 px once. If the app adopted
+the dragged size the pixel is imperceptible; if the counter-configure was
+swallowed, the renegotiation replays and the mismatch heals. Cannot loop
+(the per-resize flag is consumed before the write).
+
+## Validation (real manual resize; copied prefix reseeded to stock bad 1096)
+
+- Startup: placement clamp `1096→1000`; shim loaded
+  (`cap_h=1040, min_h=820`); controller loaded; decorated `0x7a`; menu
+  visible; `_NET_WM_STATE` empty (no stale maximized atoms); UI thread calm.
+- Hard shrink drags (repeated, to granted heights 28–139 px): window
+  rubber-bands or pops back on release; **never settles below the floor;
+  menu row visible throughout; Motif never left `0x7a`**.
+- Tall drag: during-drag black strip (inherent paint lag), **heals on
+  release** via guard 5.
+- Width after height: normal feel (the sluggishness seen mid-session was the
+  guard-4 war, fixed above).
+- File menu opens; Escape closes it. UI thread ~5–15%; no storm at any
+  point; `WM_GETMINMAXINFO` polling is ordinary DefWindowProc traffic.
+- Working-prefix DXVK and `kwinrc`/`kwinrulesrc` hashes byte-identical
+  before/after; working prefix has no shim DLL; no auth interaction.
+
+## Remaining limitations
+
+- **During-drag visuals:** shrink drags show a transient sliver, tall drags a
+  transient black strip, until release. Root fix would be publishing
+  `PMinSize`/`PMaxSize` in `WM_NORMAL_HINTS` so KWin constrains the drag
+  itself, but Wine owns that property and external X-property writers made
+  churn measurably worse before — deferred as a future experiment.
+- **File-menu double-click after Esc:** after Escape closes the menu, the
+  next File click dismisses immediately and needs a second click. Wine
+  menu-capture quirk; shim cannot plausibly cause it (menus are popups,
+  never subclassed; no input messages handled). Pre-existing; cosmetic.
+- Floor/restore constants in the KWin script (`800`/`848`) are fixed (KWin
+  scripts cannot read env vars); the shim-side floor is the configurable one.
+
+## Merge readiness
+
+With this branch, the short-resize blocker recorded above is **fixed**: the
+window cannot settle in the menu-less compact/borderless mode, and the
+File/Edit row survived every shrink attempt in real hand-resize testing.
+The sizing-shim line (`fix/proton-sizing-shim` + this branch) is now
+functionally complete for the Proton-exp resize experience and ready for
+closeout audit; merge remains held per project policy (nothing merged,
+nothing pushed).

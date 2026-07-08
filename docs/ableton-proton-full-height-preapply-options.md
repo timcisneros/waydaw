@@ -333,3 +333,21 @@ each session: `cleanup_result=clean`, controller `loaded=false`, zero
 Proton/Wine/WebView2 processes, working-prefix DXVK hashes verified unchanged
 (sha256 -c OK ×8), `kwinrc`/`kwinrulesrc` byte-identical. The shim DLL lives
 only in the disposable copied prefix.
+
+---
+
+# Addendum (2026-07-07): min-height floor added to the shim
+
+The recommended `WM_GETMINMAXINFO` shim gained a **min floor**
+(`ptMinTrackSize.y`, default 820 via `WAYDAW_ABLETON_SIZING_MIN_H`) to keep
+Ableton out of its menu-less compact/borderless mode (see
+docs/ableton-proton-decoration-menubar-occlusion.md, which documents the fix,
+two KWin-side backstops — floor guard 4 and post-resize renegotiation nudge
+guard 5 — and the real-resize validation). The max cap and its rationale
+above are unchanged (`WAYDAW_ABLETON_SIZING_CAP_H`, default 1040).
+
+One correction to the analysis above: Wine did **not** publish the minmax
+constraints as X `PMin/PMaxSize` hints on this Proton build
+(`WM_NORMAL_HINTS` carried only location/gravity), so the WM does not refuse
+over/under-band drags pre-apply; the constraint holds Windows-side only, and
+WM-imposed geometry needs the KWin-side backstops.

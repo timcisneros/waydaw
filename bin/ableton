@@ -158,6 +158,13 @@ compose_launch_overrides() {
     # ~40px below the full-workarea height where the resize storm forms. See
     # docs/ableton-proton-full-height-preapply-options.md.
     export WAYDAW_SIZING_SHIM_MAX_H="${WAYDAW_ABLETON_SIZING_CAP_H:-1040}"
+    # Shim height floor (Win32 window units). Ableton drops the File/Edit
+    # menu row itself when the window gets short (app-side switch to a
+    # compact/borderless mode around frame height ~740-750). 820 keeps every
+    # resize comfortably above that band while remaining well below the
+    # ~966 content-minimum band the app is happiest in. See
+    # docs/ableton-proton-decoration-menubar-occlusion.md.
+    export WAYDAW_SIZING_SHIM_MIN_H="${WAYDAW_ABLETON_SIZING_MIN_H:-820}"
   fi
 }
 
@@ -196,7 +203,7 @@ print_launch_config() {
   printf 'WAYDAW_ABLETON_GRAPHICS=%s\n' "$ableton_graphics"
   printf 'WINEDLLOVERRIDES=%s\n' "${launch_winedlloverrides:-}"
   printf 'Ableton DXVK=%s\n' "$ableton_dxvk_state"
-  printf 'Sizing shim=%s\n' "$([[ "$sizing_shim_enabled" == 1 ]] && echo "enabled (target=$(sizing_shim_target), cap_h=${WAYDAW_SIZING_SHIM_MAX_H:-1040})" || echo no)"
+  printf 'Sizing shim=%s\n' "$([[ "$sizing_shim_enabled" == 1 ]] && echo "enabled (target=$(sizing_shim_target), cap_h=${WAYDAW_SIZING_SHIM_MAX_H:-1040}, min_h=${WAYDAW_SIZING_SHIM_MIN_H:-820})" || echo no)"
   printf 'GDK_BACKEND=%s\n' "${GDK_BACKEND:-}"
   printf 'QT_QPA_PLATFORM=%s\n' "${QT_QPA_PLATFORM:-}"
   printf 'SDL_VIDEODRIVER=%s\n' "${SDL_VIDEODRIVER:-}"
@@ -263,6 +270,7 @@ print_dry_run() {
     printf 'sizing_shim_dll=%s\n' "$sizing_shim_dll"
     printf 'sizing_shim_target=%s\n' "$(sizing_shim_target)"
     printf 'sizing_shim_cap_h=%s\n' "${WAYDAW_SIZING_SHIM_MAX_H:-1040}"
+    printf 'sizing_shim_min_h=%s\n' "${WAYDAW_SIZING_SHIM_MIN_H:-820}"
     printf 'sizing_shim_dry_run_mutation=none (installed only at real launch)\n'
   else
     printf 'sizing_shim=no\n'

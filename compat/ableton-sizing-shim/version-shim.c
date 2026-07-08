@@ -31,6 +31,15 @@
  * Cap: WAYDAW_SIZING_SHIM_MAX_H (Win32 window-height units), default 1000 —
  * the placement value already proven calm at startup (cfg Size.h=1000).
  *
+ * Floor: WAYDAW_SIZING_SHIM_MIN_H (Win32 window-height units), default 820.
+ * Ableton itself switches to a menu-less compact/borderless presentation
+ * (_MOTIF_WM_HINTS decorations 0x0, File/Edit menu row not rendered) when the
+ * window gets short — decorated→borderless around frame height ~740-750, with
+ * hysteresis back around ~1000+ (see
+ * docs/ableton-proton-decoration-menubar-occlusion.md). Raising
+ * ptMinTrackSize.y keeps every resize path above that band so the app never
+ * enters the menu-less mode. The floor is clamped to never exceed the cap.
+ *
  * Logs to stderr with prefix "waydaw-sizing-shim:" (captured by the
  * launcher's tee into logs/ableton.log).
  */
@@ -44,8 +53,11 @@ static const WCHAR PROP_ORIG[] = L"waydaw.sizing.shim.orig";
 static HMODULE g_real = NULL;
 static HHOOK g_cbt = NULL;
 static LONG g_cap_h = 1000;
+static LONG g_min_h = 820;
 static LONG g_minmax_clamps = 0;
+static LONG g_minmax_floor_clamps = 0;
 static LONG g_pos_clamps = 0;
+static LONG g_pos_floor_clamps = 0;
 
 /* ---- logging (rate-limited: first 5 of each kind, then every 100th) ---- */
 
@@ -148,6 +160,7 @@ static LRESULT CALLBACK sub_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_GETMINMAXINFO && lp) {
         MINMAXINFO *mmi = (MINMAXINFO *)lp;
         LONG before = mmi->ptMaxTrackSize.y;
+        LONG before_min = mmi->ptMinTrackSize.y;
         if (mmi->ptMaxTrackSize.y > g_cap_h)
             mmi->ptMaxTrackSize.y = g_cap_h;
         if (mmi->ptMaxSize.y > g_cap_h)
@@ -159,6 +172,15 @@ static LRESULT CALLBACK sub_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         "waydaw-sizing-shim: clamp WM_GETMINMAXINFO #%ld hwnd=%p maxtrack.y %ld -> %ld\n",
                         (long)n, (void *)hwnd, (long)before, (long)g_cap_h);
         }
+        if (mmi->ptMinTrackSize.y < g_min_h)
+            mmi->ptMinTrackSize.y = g_min_h;
+        if (before_min < g_min_h) {
+            LONG n = ++g_minmax_floor_clamps;
+            if (should_log(n))
+                fprintf(stderr,
+                        "waydaw-sizing-shim: floor WM_GETMINMAXINFO #%ld hwnd=%p mintrack.y %ld -> %ld\n",
+                        (long)n, (void *)hwnd, (long)before_min, (long)g_min_h);
+        }
     } else if (msg == WM_WINDOWPOSCHANGING && lp) {
         WINDOWPOS *pos = (WINDOWPOS *)lp;
         if (!(pos->flags & SWP_NOSIZE) && pos->cy > g_cap_h) {
@@ -168,6 +190,19 @@ static LRESULT CALLBACK sub_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         "waydaw-sizing-shim: clamp WM_WINDOWPOSCHANGING #%ld hwnd=%p cy %ld -> %ld\n",
                         (long)n, (void *)hwnd, (long)pos->cy, (long)g_cap_h);
             pos->cy = g_cap_h;
+        }
+        /* Belt-and-braces floor for paths that skip WM_GETMINMAXINFO. The
+         * cy >= 200 guard leaves minimize/iconify rectangles (tiny cy) and
+         * other special placements alone; only plausible short resizes of
+         * the tracked top-level window are raised to the floor. */
+        if (!(pos->flags & SWP_NOSIZE) && pos->cy >= 200 && pos->cy < g_min_h
+            && !IsIconic(hwnd)) {
+            LONG n = ++g_pos_floor_clamps;
+            if (should_log(n))
+                fprintf(stderr,
+                        "waydaw-sizing-shim: floor WM_WINDOWPOSCHANGING #%ld hwnd=%p cy %ld -> %ld\n",
+                        (long)n, (void *)hwnd, (long)pos->cy, (long)g_min_h);
+            pos->cy = g_min_h;
         }
     } else if (msg == WM_NCDESTROY) {
         if (orig) {
@@ -197,8 +232,8 @@ static void subclass(HWND hwnd, DWORD style)
     cls[0] = 0;
     GetClassNameW(hwnd, cls, 64);
     fprintf(stderr,
-            "waydaw-sizing-shim: subclassed hwnd=%p class=%ls style=0x%08lx cap_h=%ld\n",
-            (void *)hwnd, cls, (unsigned long)style, (long)g_cap_h);
+            "waydaw-sizing-shim: subclassed hwnd=%p class=%ls style=0x%08lx cap_h=%ld min_h=%ld\n",
+            (void *)hwnd, cls, (unsigned long)style, (long)g_cap_h, (long)g_min_h);
 }
 
 static LRESULT CALLBACK cbt_proc(int code, WPARAM wp, LPARAM lp)
@@ -223,17 +258,30 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         const char *env = getenv("WAYDAW_SIZING_SHIM_MAX_H");
+        const char *env_min = getenv("WAYDAW_SIZING_SHIM_MIN_H");
         DisableThreadLibraryCalls(inst);
         if (env) {
             long v = strtol(env, NULL, 10);
             if (v >= 200 && v <= 8000)
                 g_cap_h = (LONG)v;
         }
+        if (env_min) {
+            long v = strtol(env_min, NULL, 10);
+            if (v >= 200 && v <= 8000)
+                g_min_h = (LONG)v;
+        }
+        /* The floor must never exceed the cap or the legal band is empty. */
+        if (g_min_h > g_cap_h) {
+            fprintf(stderr,
+                    "waydaw-sizing-shim: WARNING min_h %ld > cap_h %ld; lowering min_h to cap\n",
+                    (long)g_min_h, (long)g_cap_h);
+            g_min_h = g_cap_h;
+        }
         /* Thread-local hook on the loading (main) thread only — the thread
          * that creates the Ableton main window. Never a global hook. */
         g_cbt = SetWindowsHookExW(WH_CBT, cbt_proc, NULL, GetCurrentThreadId());
-        fprintf(stderr, "waydaw-sizing-shim: loaded (cap_h=%ld, cbt=%s, tid=%lu)\n",
-                (long)g_cap_h, g_cbt ? "installed" : "FAILED",
+        fprintf(stderr, "waydaw-sizing-shim: loaded (cap_h=%ld, min_h=%ld, cbt=%s, tid=%lu)\n",
+                (long)g_cap_h, (long)g_min_h, g_cbt ? "installed" : "FAILED",
                 (unsigned long)GetCurrentThreadId());
     } else if (reason == DLL_PROCESS_DETACH) {
         if (g_cbt)

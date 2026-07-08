@@ -66,6 +66,50 @@ const MANUAL_CAP_MARGIN = 20;
 let capCount = 0;
 let capLogMs = 0;   // rate-limit LOGS only; the clamp itself must always run
 
+// Manual-resize floor (guard 4, 2026-07-07). The Windows-side sizing shim
+// floors WM_GETMINMAXINFO min height at 820 so Ableton can never enter its
+// menu-less compact/borderless mode (app-side switch around frame ~740-750,
+// docs/ableton-proton-decoration-menubar-occlusion.md). But Wine adopts
+// WM-imposed configures through a raw path that sends no sizing messages, so
+// a hard interactive shrink can leave the X window stuck as a short sliver
+// (measured: 861x41 after a hard shrink drag; Wine's win32 belief stayed
+// tall, _MOTIF stayed 0x7a, CPU calm — pure X-side geometry, invisible to
+// the shim). This guard is the WM-side backstop: any granted frame height
+// below MANUAL_FLOOR_MIN is raised back to MANUAL_FLOOR_RESTORE in the same
+// synchronous frameGeometryChanged handler. MANUAL_FLOOR_MIN sits BELOW the
+// shim's floor band (win32 820 ≈ frame ~840+) so this never fights a
+// legitimate shim-allowed height; the restore target is the band bottom so a
+// user's intent to have a short window is honored as closely as allowed.
+// Skips fullscreen/maximize (guard 2 owns those), minimized and shaded
+// windows (their frame heights are legitimately small/special).
+const MANUAL_FLOOR_MIN = 800;
+const MANUAL_FLOOR_RESTORE = 848;
+let floorCount = 0;
+let floorLogMs = 0;
+// Unlike guard 3, the floor write MUST be rate-limited and must never fight
+// an in-progress interactive resize: during a held shrink drag KWin re-applies
+// the pointer geometry after every write, and an unlimited floor degenerates
+// into a compositor-level geometry war (measured 2026-07-07: 3858 writes in
+// ~12s; ALL interactive resizing turned sluggish with repaint bars). Mid-drag
+// slivers are safe to allow — the Windows-side shim keeps the app's height
+// belief >= 820 so the menu-less mode cannot latch — only the FINAL settled
+// geometry matters, corrected on release (interactiveMoveResizeFinished /
+// next frameGeometryChanged) with one write per 400ms settle window.
+const lastFloor = new Map();
+
+// Post-resize renegotiation nudge (guard 5, 2026-07-07). When an interactive
+// resize ends, the app's counter-configure can be lost — KWin ignores client
+// configure requests during the drag — leaving the X window taller than the
+// app paints (measured: X client 1032, app painted 1006, permanent 26px
+// black bar at the bottom; _MOTIF 0x7a, CPU calm). Any post-release
+// configure request forces Wine/app renegotiation and the app's preferred
+// size wins (measured: a 1px external resize snapped the window to 1006 and
+// the bar was repainted). So: when an interactive resize on the target
+// window finishes, shrink the frame height by 1px once. If the app adopted
+// the dragged size the 1px is imperceptible; if its counter-configure was
+// swallowed, this replays the renegotiation and the mismatch heals.
+const resizeSeen = new Set();
+
 function isTarget(w) {
     return w.normalWindow
         && w.resourceClass === "steam_proton"
@@ -175,6 +219,69 @@ function guardManualHeight(w, why) {
     }
 }
 
+// Manual short-resize floor (guard 4). Mirror of guard 3 on the short side;
+// same synchronous-clamp lever, same re-entrancy story (our own write
+// re-fires frameGeometryChanged with height == restore, which passes the
+// threshold check and no-ops).
+function guardManualFloor(w, why) {
+    if (!isTarget(w)) return;
+    if (w.fullScreen === true) return;
+    if ((typeof w.maximizeMode === "number") && ((w.maximizeMode & 1) !== 0)) return;
+    if (w.minimized === true) return;
+    if (typeof w.shade !== "undefined" && w.shade === true) return;
+    var fg = w.frameGeometry;
+    if (!(fg.height < MANUAL_FLOOR_MIN)) return;
+    // User drag in progress: stand down (see comment at MANUAL_FLOOR_MIN).
+    if (w.move === true || w.resize === true) return;
+    var now = Date.now();
+    var prevW = lastFloor.get(w) || 0;
+    if (now - prevW < 400) return;   // don't spin; one action per settle window
+    lastFloor.set(w, now);
+    floorCount += 1;
+    var logged = false;
+    if (now - floorLogMs >= 1000) {
+        floorLogMs = now;
+        logged = true;
+        console.info(TAG, "floor manual height (#" + floorCount + ", " + why + ") fg=" +
+                     fg.width + "x" + fg.height + "+" + fg.x + "+" + fg.y +
+                     " -> h=" + MANUAL_FLOOR_RESTORE);
+    }
+    try {
+        var g = w.frameGeometry;
+        g.height = MANUAL_FLOOR_RESTORE;
+        w.frameGeometry = g;
+    } catch (e) {
+        if (logged) console.warn(TAG, "floor write threw:", e);
+        return;
+    }
+    if (logged && w.frameGeometry.height < MANUAL_FLOOR_MIN) {
+        console.warn(TAG, "floor write did not take: fg.h=" + w.frameGeometry.height +
+                     " (wanted " + MANUAL_FLOOR_RESTORE + ")");
+    }
+}
+
+// Post-resize renegotiation nudge (guard 5). Runs once per finished
+// interactive resize; its own write re-fires frameGeometryChanged with
+// resizeSeen already cleared, so it cannot loop.
+function renegotiateAfterResize(w) {
+    if (!isTarget(w)) return;
+    if (!resizeSeen.has(w)) return;
+    resizeSeen.delete(w);
+    if (w.fullScreen === true) return;
+    if ((typeof w.maximizeMode === "number") && (w.maximizeMode !== 0)) return;
+    var fg = w.frameGeometry;
+    if (!(fg.height > MANUAL_FLOOR_MIN)) return;  // floor guard owns short results
+    console.info(TAG, "post-resize renegotiation nudge fg=" +
+                 fg.width + "x" + fg.height + " -> h=" + (fg.height - 1));
+    try {
+        var g = w.frameGeometry;
+        g.height = g.height - 1;
+        w.frameGeometry = g;
+    } catch (e) {
+        console.warn(TAG, "renegotiation nudge threw:", e);
+    }
+}
+
 function manage(w) {
     if (managed.has(w)) return;
     managed.add(w);
@@ -189,23 +296,37 @@ function manage(w) {
     // noBorder=false restores geometry once, after which noBorder reads
     // false and pin() no-ops.
     w.frameGeometryChanged.connect(() => {
+        // Remember that a user resize touched this window; consumed by the
+        // renegotiation nudge when the interaction finishes.
+        if (w.resize === true) resizeSeen.add(w);
         pin(w, "frameGeometryChanged");
         guardMaximize(w, "frameGeometryChanged");
         guardManualHeight(w, "frameGeometryChanged");
+        guardManualFloor(w, "frameGeometryChanged");
     });
     if (typeof w.maximizedChanged !== "undefined" && w.maximizedChanged) {
         w.maximizedChanged.connect(() => guardMaximize(w, "maximizedChanged"));
     }
-    w.closed.connect(() => { managed.delete(w); lastUnmax.delete(w); });
+    if (typeof w.interactiveMoveResizeFinished !== "undefined" && w.interactiveMoveResizeFinished) {
+        w.interactiveMoveResizeFinished.connect(() => {
+            guardManualFloor(w, "moveResizeFinished");
+            renegotiateAfterResize(w);
+        });
+    } else if (isTarget(w)) {
+        console.warn(TAG, "interactiveMoveResizeFinished unavailable; floor/nudge rely on frameGeometryChanged only");
+    }
+    w.closed.connect(() => { managed.delete(w); lastUnmax.delete(w); lastFloor.delete(w); resizeSeen.delete(w); });
     if (isTarget(w)) {
         console.info(TAG, "target matched:", w.internalId, "caption=", w.caption);
         pin(w, "initial");
         guardMaximize(w, "initial");
         guardManualHeight(w, "initial");
+        guardManualFloor(w, "initial");
     }
 }
 
 workspace.windowList().forEach(manage);
 workspace.windowAdded.connect(manage);
 console.info(TAG, "loaded; watching for steam_proton + 'Ableton Live 12 Suite' normal windows"
-             + " (manual height cap: workarea - " + MANUAL_CAP_MARGIN + ")");
+             + " (manual height cap: workarea - " + MANUAL_CAP_MARGIN
+             + ", manual height floor: <" + MANUAL_FLOOR_MIN + " -> " + MANUAL_FLOOR_RESTORE + ")");
