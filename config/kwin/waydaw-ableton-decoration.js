@@ -2,7 +2,7 @@
 // Ableton main window (see docs/ableton-proton-custom-presentation-controller.md
 // and docs/ableton-proton-exp-message-pump-starvation.md).
 //
-// Two guards for the ONE matching window, both KWin-internal (never touch
+// Three guards for the ONE matching window, all KWin-internal (never touch
 // Wine's X properties — the xprop guard that did made churn worse):
 //
 // 1. Decoration pin. While unauthorized, Ableton's busy re-init makes Wine
@@ -22,6 +22,18 @@
 //    sub-screen-height) geometry, so the storm cannot form. Normal small moves
 //    and resizes are left alone.
 //
+// 3. Manual-resize height cap. A live capture (2026-07-07, see
+//    docs/ableton-proton-manual-resize.md) showed a user EDGE-DRAG to full
+//    workarea height re-enters the storm with maximizeMode still 0 and
+//    _NET_WM_STATE empty — guard 2 never fires on that path. This guard caps
+//    the raw frame height: on every frameGeometryChanged, if the frame height
+//    exceeds (workarea height − MANUAL_CAP_MARGIN), it is clamped back below
+//    the danger zone in the same synchronous handler, before Ableton can latch
+//    a full-height configure. x/y/width are preserved. This is PREVENTION
+//    during the drag, not a restore-after loop: once capped the height never
+//    reaches full workarea, so the app-side storm has nothing to latch. Below
+//    the threshold, moves and resizes are untouched.
+//
 // Scope guard (all three required — must not affect any other Proton/Steam
 // window, and excludes Ableton's authorization Dialog via normalWindow):
 //   resourceClass === "steam_proton"
@@ -40,6 +52,16 @@ let unmaxCount = 0;
 const managed = new Set();
 // Per-window guard against rapid re-fire (ms since last un-maximize action).
 const lastUnmax = new Map();
+
+// Manual-resize cap: frame height must stay at least this many px below the
+// workarea height. On the 2560x1080 workarea this puts the cap at frame 1000
+// — just above the calm startup frame (994 = 966 client + 28 titlebar) and
+// well below the full-workarea frame (1080) where the storm formed. Tradeoff:
+// a drag past the cap rubber-bands at the cap height instead of following the
+// pointer; heights up to (workarea − 80) resize normally.
+const MANUAL_CAP_MARGIN = 80;
+let capCount = 0;
+let capLogMs = 0;   // rate-limit LOGS only; the clamp itself must always run
 
 function isTarget(w) {
     return w.normalWindow
@@ -96,6 +118,60 @@ function guardMaximize(w, why) {
     if (vmax && typeof w.setMaximize === "function") { try { w.setMaximize(false, false); } catch (e) {} }
 }
 
+// Manual full-height resize cap (guard 3).
+//
+// Fires on raw frame height alone, so it covers the interactive edge-drag
+// path where maximizeMode stays 0 and _NET_WM_STATE stays empty (the case
+// guard 2 is blind to, measured 2026-07-07). It must PREVENT the full-height
+// configure from ever being granted: it clamps synchronously inside
+// frameGeometryChanged, the same lever that made guard 2 work. It must NOT
+// degenerate into a restore-after loop — that variant was measured harmful
+// (135 restores/40s, storm continues). The difference: the clamp keeps every
+// granted height below the danger zone during the drag, so the app never
+// latches the full-height belief that makes it fight back. Re-entrancy is
+// safe: our own write re-fires frameGeometryChanged with height == cap,
+// which passes the threshold check and no-ops.
+//
+// When the window IS vertically maximized or fullscreen, guard 2 owns the
+// transition (setMaximize/fullScreen are the correct levers there — a raw
+// geometry write would fight KWin's maximize bookkeeping), so this guard
+// skips those states.
+function guardManualHeight(w, why) {
+    if (!isTarget(w)) return;
+    if (w.fullScreen === true) return;
+    if ((typeof w.maximizeMode === "number") && ((w.maximizeMode & 1) !== 0)) return;
+    var area;
+    try { area = workspace.clientArea(KWin.MaximizeArea, w); } catch (e) { area = null; }
+    if (!area || !(area.height > 0)) return;
+    var capH = area.height - MANUAL_CAP_MARGIN;
+    var fg = w.frameGeometry;
+    if (!(fg.height > capH)) return;
+    capCount += 1;
+    var now = Date.now();
+    var logged = false;
+    if (now - capLogMs >= 1000) {
+        capLogMs = now;
+        logged = true;
+        console.info(TAG, "cap manual height (#" + capCount + ", " + why + ") fg=" +
+                     fg.width + "x" + fg.height + "+" + fg.x + "+" + fg.y +
+                     " -> h=" + capH + " (workarea.h=" + area.height + ")");
+    }
+    // Preserve x/y/width; only pull the frame height back under the cap.
+    // Mutate-and-assign-back keeps the rect valid even if a field is odd.
+    try {
+        var g = w.frameGeometry;
+        g.height = capH;
+        w.frameGeometry = g;
+    } catch (e) {
+        if (logged) console.warn(TAG, "cap write threw:", e);
+        return;
+    }
+    if (logged && w.frameGeometry.height > capH) {
+        console.warn(TAG, "cap write did not take: fg.h=" + w.frameGeometry.height +
+                     " (wanted " + capH + ")");
+    }
+}
+
 function manage(w) {
     if (managed.has(w)) return;
     managed.add(w);
@@ -109,7 +185,11 @@ function manage(w) {
     // is the reliable in-KWin trigger. Re-entrancy is safe: our own
     // noBorder=false restores geometry once, after which noBorder reads
     // false and pin() no-ops.
-    w.frameGeometryChanged.connect(() => { pin(w, "frameGeometryChanged"); guardMaximize(w, "frameGeometryChanged"); });
+    w.frameGeometryChanged.connect(() => {
+        pin(w, "frameGeometryChanged");
+        guardMaximize(w, "frameGeometryChanged");
+        guardManualHeight(w, "frameGeometryChanged");
+    });
     if (typeof w.maximizedChanged !== "undefined" && w.maximizedChanged) {
         w.maximizedChanged.connect(() => guardMaximize(w, "maximizedChanged"));
     }
@@ -118,9 +198,11 @@ function manage(w) {
         console.info(TAG, "target matched:", w.internalId, "caption=", w.caption);
         pin(w, "initial");
         guardMaximize(w, "initial");
+        guardManualHeight(w, "initial");
     }
 }
 
 workspace.windowList().forEach(manage);
 workspace.windowAdded.connect(manage);
-console.info(TAG, "loaded; watching for steam_proton + 'Ableton Live 12 Suite' normal windows");
+console.info(TAG, "loaded; watching for steam_proton + 'Ableton Live 12 Suite' normal windows"
+             + " (manual height cap: workarea - " + MANUAL_CAP_MARGIN + ")");
