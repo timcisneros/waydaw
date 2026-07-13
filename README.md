@@ -2,6 +2,29 @@
 
 Minimal Linux Wayland Wine DAW harness for Ableton Live 12, Max for Live, Bome MIDI Translator Pro, and Windows VST2/VST3 plugins.
 
+[Portfolio case study](https://timcis.com/projects/waydaw)
+
+![Explicit environment checks reporting pass and warning states](docs/images/environment-check.png)
+
+## What this demonstrates
+
+- Explicit launchers and recovery operations for a shared Wine prefix.
+- 59 focused, non-mutating diagnostic commands covering audio, MIDI, Wine,
+  windowing, plugins, and application state.
+- Evidence-led compatibility investigation documented alongside the scripts.
+- Guardrails around known updater, authorization, routing, and presentation
+  failures instead of opaque one-off shell fixes.
+
+Start with the environment report:
+
+```sh
+./bin/check
+```
+
+The command reports prerequisites and known risks without installing packages
+or mutating the shared prefix. Use `./bin/session` only after the checks match
+the supported environment described below.
+
 This is an operational wrapper around one shared Wine prefix:
 
 ```sh

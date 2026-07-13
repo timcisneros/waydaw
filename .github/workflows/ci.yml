@@ -1,0 +1,17 @@
+name: Shell verification
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Bash syntax
+        run: find bin -type f -print0 | xargs -0 -r bash -n
+
