@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Experimental native winewayland.drv entry point.
+#
+# Wine 11 does not yet negotiate xdg-decoration, so KDE cannot supply its
+# native server-side titlebar/frame. Wine's own frame is expected here. This
+# path is useful for presentation-driver diagnosis, not normal DAW sessions.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ "${1:-}" == "--debug-wayland" ]]; then
+  export WINEDEBUG="warn+waylanddrv,warn+vulkan,warn+wgl"
+  shift
+fi
+
+printf 'WARNING: native Wine Wayland cannot currently provide KDE server-side window frames.\n' >&2
+printf 'WARNING: use ./bin/ableton-wayland for the stabilized KDE-frame/menu path.\n' >&2
+export WAYDAW_ABLETON_WINDOW_DRIVER=wayland
+exec "$ROOT_DIR/bin/ableton" "$@"

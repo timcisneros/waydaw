@@ -97,6 +97,7 @@ session_type="${XDG_SESSION_TYPE:-unknown}"
 case "$session_type" in
   wayland)
     pass "current session type: wayland"
+    warn "./bin/ableton is the unguarded system-Wine path; use ./bin/ableton-wayland for the guarded Proton/XWayland KDE-frame path."
     ;;
   x11)
     warn "current session type: x11. Harness still forces Wine-adjacent toolkits toward X11/XWayland."
@@ -132,9 +133,10 @@ fi
 
 printf '\nConfigured environment:\n'
 printf '  WINEPREFIX=%s\n' "$WINEPREFIX"
-printf '  GDK_BACKEND=%s\n' "$GDK_BACKEND"
-printf '  QT_QPA_PLATFORM=%s\n' "$QT_QPA_PLATFORM"
-printf '  SDL_VIDEODRIVER=%s\n' "$SDL_VIDEODRIVER"
+printf '  GDK_BACKEND=%s\n' "${GDK_BACKEND:-unset}"
+printf '  QT_QPA_PLATFORM=%s\n' "${QT_QPA_PLATFORM:-unset}"
+printf '  SDL_VIDEODRIVER=%s\n' "${SDL_VIDEODRIVER:-unset}"
 printf '  WINEDLLOVERRIDES=%s\n' "${WINEDLLOVERRIDES:-unset}"
+printf '  WAYDAW_ABLETON_WINDOW_DRIVER=%s\n' "${WAYDAW_ABLETON_WINDOW_DRIVER:-x11}"
 
 exit "$status"

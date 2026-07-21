@@ -133,13 +133,34 @@ pw-jack ./waydaw/bin/session
 
 ## Windowing Root Cause
 
-The managed-window flicker under KDE Plasma Wayland is an XWayland frame-synchronization defect in KWin 5.27, fixed upstream in Plasma 6.2/6.3. Ubuntu 24.04 has no Plasma 6 backport. The two real fix paths are a release upgrade to Plasma 6.3+ or bypassing XWayland with Wine's native Wayland driver:
+Ableton's DXVK window is stable in a native Plasma X11 session but can enter a
+`VK_SUBOPTIMAL_KHR` swapchain-recreation loop when presented through XWayland.
+This repository has reproduced that loop on current Plasma 6 as well as older
+KWin releases, so a Plasma upgrade alone is not treated as a fix.
+
+The supported Plasma Wayland-session launcher uses the guarded Proton runner
+through XWayland. This is intentional: the sizing shim preserves Ableton's
+File/Edit menu row, and the runtime KWin controller supplies and pins the
+native KDE frame:
 
 ```sh
 ./bin/ableton-wayland
 ```
 
-Evidence chain and ranked plan: `docs/ROOT_CAUSE_AND_FIX_PLAN.md`.
+Use `WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-wayland` to inspect the effective
+command without launching. This path uses the copied Proton test prefix and
+does not touch the working prefix.
+
+Wine's native Wayland driver remains diagnostic-only because Wine 11 does not
+yet negotiate `xdg-decoration`; KDE therefore cannot provide its server-side
+titlebar and Wine draws its own frame. It is available explicitly as:
+
+```sh
+./bin/ableton-native-wayland
+```
+
+The X11/XWayland comparison and measured swapchain signature are recorded in
+`docs/ableton-x11-ab-test.md`.
 
 ## Windowing Diagnostics
 
@@ -151,25 +172,9 @@ Capture the current desktop, KWin, Wine process, Wine graphics registry, and DXV
 ./waydaw/bin/windowing-check
 ```
 
-Native managed Ableton window experiments are paused under KDE Wayland. Do not use live `xprop`, `./waydaw/bin/window-identify`, or KDE Detect Window Properties against Ableton; even identification testing can recreate the uncloseable window state.
-
-Manual comparison results belong in:
-
-```sh
-./waydaw/docs/WINDOWING_TEST_RESULTS.md
-```
-
-The safer containment investigation order is documented in:
-
-```sh
-./waydaw/docs/NATIVE_WINDOWING_NEXT_PLAN.md
-```
-
-KDE Window Rules are offline-only unless they can be prepared without launching the unsafe Ableton window:
-
-```sh
-./waydaw/docs/KDE_WINDOW_RULES_GUIDE.md
-```
+Do not use live `xprop`, `./waydaw/bin/window-identify`, or KDE Detect Window
+Properties against an unstable Ableton window; identification can add more
+X11/XWayland property traffic while the presentation loop is active.
 
 ## Ableton Windowing Diagnosis Without Screenshots
 
@@ -426,6 +431,9 @@ waydaw/
   bin/start-midi-bridge
   bin/disable-ableton-updates
   bin/ableton
+  bin/ableton-wayland
+  bin/ableton-native-wayland
+  bin/ableton-proton
   bin/bome
   bin/kill-session
   bin/reset-ableton-prefs
@@ -541,10 +549,16 @@ Start the optional ALSA-to-JACK MIDI bridge:
 ./waydaw/bin/start-midi-bridge
 ```
 
-Launch Ableton Live 12:
+Launch Ableton Live 12 with system Wine (unguarded baseline):
 
 ```sh
 ./waydaw/bin/ableton
+```
+
+On a Plasma Wayland desktop, use the guarded KDE-frame/menu path:
+
+```sh
+./waydaw/bin/ableton-wayland
 ```
 
 Launch Bome MIDI Translator Pro:

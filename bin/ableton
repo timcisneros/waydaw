@@ -11,6 +11,7 @@ mkdir -p "$LOG_DIR"
 
 diagnostic_no_registry="${WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY:-0}"
 dry_run="${WAYDAW_ABLETON_DRY_RUN:-0}"
+window_driver="${WAYDAW_ABLETON_WINDOW_DRIVER:-x11}"
 # Set to 1 only by the proton-exp runner (config/ableton-runner.sh); the
 # default system-Wine path never sets it, so this stays a no-op by default.
 kwin_controller_enabled="${WAYDAW_ABLETON_KWIN_CONTROLLER:-0}"
@@ -23,6 +24,20 @@ sizing_shim_enabled="${WAYDAW_ABLETON_SIZING_SHIM:-0}"
 sizing_shim_dll="${WAYDAW_ABLETON_SIZING_SHIM_DLL:-}"
 registry_mutation_enabled=yes
 virtual_desktop_mutation_enabled=yes
+
+case "$window_driver" in
+  x11) ;;
+  wayland)
+    if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+      printf 'ERROR: WAYDAW_ABLETON_WINDOW_DRIVER=wayland requires WAYLAND_DISPLAY.\n' >&2
+      exit 1
+    fi
+    ;;
+  *)
+    printf 'ERROR: invalid WAYDAW_ABLETON_WINDOW_DRIVER=%s (expected: x11 or wayland).\n' "$window_driver" >&2
+    exit 1
+    ;;
+esac
 
 warn_if_ableton_updates_present() {
   local autoupdates="$WINEPREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/_autoupdates"
@@ -210,15 +225,26 @@ print_launch_config() {
   printf 'WINEDLLOVERRIDES=%s\n' "${launch_winedlloverrides:-}"
   printf 'Ableton DXVK=%s\n' "$ableton_dxvk_state"
   printf 'Sizing shim=%s\n' "$([[ "$sizing_shim_enabled" == 1 ]] && echo "enabled (target=$(sizing_shim_target), cap_h=${WAYDAW_SIZING_SHIM_MAX_H:-1006}, min_h=${WAYDAW_SIZING_SHIM_MIN_H:-820})" || echo no)"
+  printf 'Window driver=%s\n' "$window_driver"
   printf 'GDK_BACKEND=%s\n' "${GDK_BACKEND:-}"
   printf 'QT_QPA_PLATFORM=%s\n' "${QT_QPA_PLATFORM:-}"
   printf 'SDL_VIDEODRIVER=%s\n' "${SDL_VIDEODRIVER:-}"
-  printf 'DISPLAY=%s\n' "${DISPLAY:-}"
-  printf 'WAYLAND_DISPLAY=(unset for wine process; host value was %s)\n' "${WAYLAND_DISPLAY:-empty}"
+  if [[ "$window_driver" == wayland ]]; then
+    printf 'DISPLAY=(unset for wine process; host value was %s)\n' "${DISPLAY:-empty}"
+    printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY:-}"
+  else
+    printf 'DISPLAY=%s\n' "${DISPLAY:-}"
+    printf 'WAYLAND_DISPLAY=(unset for wine process; host value was %s)\n' "${WAYLAND_DISPLAY:-empty}"
+  fi
   printf 'Registry mutation enabled=%s\n' "$registry_mutation_enabled"
   printf 'Virtual desktop mutation enabled=%s\n' "$virtual_desktop_mutation_enabled"
   if [[ "$diagnostic_no_registry" == 1 ]]; then
     printf 'Wine registry inspection=skipped in diagnostic no-registry mode\n'
+  elif [[ "$window_driver" == wayland ]]; then
+    # Do not start an X11 wine helper before the native-Wayland process. A
+    # registry query here is informational only and could initialize Wine's
+    # desktop integration with the wrong display driver for this session.
+    printf 'Wine X11 registry inspection=skipped for native Wayland\n'
   else
     print_wine_reg_value "Wine X11 Managed" 'HKCU\Software\Wine\X11 Driver' "Managed"
     print_wine_reg_value "Wine X11 Decorated" 'HKCU\Software\Wine\X11 Driver' "Decorated"
@@ -226,7 +252,11 @@ print_launch_config() {
     print_wine_reg_value "Wine Explorer Default Desktop" 'HKCU\Software\Wine\Explorer\Desktops' "Default"
   fi
   printf 'Ableton executable=%s\n' "$ableton_exe"
-  printf 'Launch command=env -u WAYLAND_DISPLAY WINEPREFIX=%q' "$WINEPREFIX"
+  if [[ "$window_driver" == wayland ]]; then
+    printf 'Launch command=env -u DISPLAY WINEPREFIX=%q' "$WINEPREFIX"
+  else
+    printf 'Launch command=env -u WAYLAND_DISPLAY WINEPREFIX=%q' "$WINEPREFIX"
+  fi
   if [[ -n "${launch_winedlloverrides:-}" ]]; then
     printf ' WINEDLLOVERRIDES=%q' "$launch_winedlloverrides"
   fi
@@ -244,17 +274,22 @@ print_launch_config() {
 }
 
 print_dry_run() {
-  local wine_binary launch_command
+  local wine_binary launch_command unset_display
   wine_binary="$(command -v wine)"
-  if [[ -n "${launch_winedlloverrides:-}" ]]; then
-    printf -v launch_command 'env -u WAYLAND_DISPLAY WINEPREFIX=%q WINEDLLOVERRIDES=%q wine %q' \
-      "$WINEPREFIX" "$launch_winedlloverrides" "$ableton_exe"
-  elif [[ "$diagnostic_no_registry" == 1 ]]; then
-    printf -v launch_command 'env -u WAYLAND_DISPLAY -u WINEDLLOVERRIDES WINEPREFIX=%q wine %q' \
-      "$WINEPREFIX" "$ableton_exe"
+  if [[ "$window_driver" == wayland ]]; then
+    unset_display='-u DISPLAY'
   else
-    printf -v launch_command 'env -u WAYLAND_DISPLAY WINEPREFIX=%q wine %q' \
-      "$WINEPREFIX" "$ableton_exe"
+    unset_display='-u WAYLAND_DISPLAY'
+  fi
+  if [[ -n "${launch_winedlloverrides:-}" ]]; then
+    printf -v launch_command 'env %s WINEPREFIX=%q WINEDLLOVERRIDES=%q wine %q' \
+      "$unset_display" "$WINEPREFIX" "$launch_winedlloverrides" "$ableton_exe"
+  elif [[ "$diagnostic_no_registry" == 1 ]]; then
+    printf -v launch_command 'env %s -u WINEDLLOVERRIDES WINEPREFIX=%q wine %q' \
+      "$unset_display" "$WINEPREFIX" "$ableton_exe"
+  else
+    printf -v launch_command 'env %s WINEPREFIX=%q wine %q' \
+      "$unset_display" "$WINEPREFIX" "$ableton_exe"
   fi
   if [[ "$#" -gt 0 ]]; then
     local arg
@@ -266,11 +301,18 @@ print_dry_run() {
   printf 'wine_binary=%s\n' "$wine_binary"
   printf 'wineprefix=%s\n' "$WINEPREFIX"
   printf 'graphics_mode=%s\n' "$ableton_graphics"
+  printf 'window_driver=%s\n' "$window_driver"
   printf 'winedlloverrides=%s\n' "${launch_winedlloverrides:-}"
   printf 'registry_mutation_enabled=%s\n' "$registry_mutation_enabled"
   printf 'virtual_desktop_mutation_enabled=%s\n' "$virtual_desktop_mutation_enabled"
   printf 'dxvk_expected_active=%s\n' "$([[ "$ableton_graphics" == dxvk ]] && echo yes || echo no)"
-  printf 'kwin_decoration_controller=%s\n' "$([[ "$kwin_controller_enabled" == 1 ]] && echo would_load || echo no)"
+  if [[ "$kwin_controller_enabled" == 1 && "$window_driver" == x11 ]]; then
+    printf 'kwin_decoration_controller=would_load\n'
+  elif [[ "$kwin_controller_enabled" == 1 ]]; then
+    printf 'kwin_decoration_controller=skipped_for_native_wayland\n'
+  else
+    printf 'kwin_decoration_controller=no\n'
+  fi
   if [[ "$sizing_shim_enabled" == 1 ]]; then
     printf 'sizing_shim=would_enable\n'
     printf 'sizing_shim_dll=%s\n' "$sizing_shim_dll"
@@ -312,7 +354,7 @@ if ! configure_ableton_graphics; then
   exit 1
 fi
 compose_launch_overrides
-if [[ "$diagnostic_no_registry" == 1 ]]; then
+if [[ "$diagnostic_no_registry" == 1 || "$window_driver" == wayland ]]; then
   registry_mutation_enabled=no
   virtual_desktop_mutation_enabled=no
 fi
@@ -322,7 +364,7 @@ if [[ "$dry_run" == 1 ]]; then
   exit 0
 fi
 
-if [[ "$diagnostic_no_registry" != 1 ]]; then
+if [[ "$diagnostic_no_registry" != 1 && "$window_driver" == x11 ]]; then
   if ! configure_ableton_windowing; then
     printf 'ERROR: failed to configure Ableton Wine windowing in WINEPREFIX=%s\n' "$WINEPREFIX" | tee -a "$LOG_FILE" >&2
     printf 'ERROR: unable to set Managed=Y, Decorated=Y, and disable Wine virtual desktop before launch.\n' | tee -a "$LOG_FILE" >&2
@@ -350,7 +392,7 @@ fi
 # --print-launch-config exit above). Idempotent — the controller no-ops if
 # already loaded. On failure we launch anyway but say so LOUDLY: the session
 # would run without titlebar-flicker protection.
-if [[ "$kwin_controller_enabled" == 1 ]]; then
+if [[ "$kwin_controller_enabled" == 1 && "$window_driver" == x11 ]]; then
   if "$ROOT_DIR/bin/ableton-kwin-decoration-controller" --load 2>&1 | tee -a "$LOG_FILE"; then
     printf 'WAYDAW: KWin decoration controller active (unloaded by bin/ableton-proton-cleanup)\n' | tee -a "$LOG_FILE"
   else
@@ -359,17 +401,31 @@ if [[ "$kwin_controller_enabled" == 1 ]]; then
   fi
 fi
 
+if [[ "$kwin_controller_enabled" == 1 && "$window_driver" == wayland ]]; then
+  printf 'WAYDAW: skipping the X11-specific KWin decoration controller for native Wayland\n' | tee -a "$LOG_FILE"
+fi
+
 set +e
+launch_env=(env)
+if [[ "$window_driver" == wayland ]]; then
+  launch_env+=(-u DISPLAY)
+else
+  launch_env+=(-u WAYLAND_DISPLAY)
+fi
+if [[ -z "${launch_winedlloverrides:-}" && "$diagnostic_no_registry" == 1 ]]; then
+  launch_env+=(-u WINEDLLOVERRIDES)
+fi
+launch_env+=(WINEPREFIX="$WINEPREFIX")
 if [[ -n "${launch_winedlloverrides:-}" ]]; then
   # Explicit overrides (graphics and/or sizing shim). Setting the variable
   # outright gives the same host-value isolation the no-registry unset did.
-  env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" WINEDLLOVERRIDES="$launch_winedlloverrides" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
+  "${launch_env[@]}" WINEDLLOVERRIDES="$launch_winedlloverrides" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
   wine_status="${PIPESTATUS[0]}"
 elif [[ "$diagnostic_no_registry" == 1 ]]; then
-  env -u WAYLAND_DISPLAY -u WINEDLLOVERRIDES WINEPREFIX="$WINEPREFIX" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
+  "${launch_env[@]}" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
   wine_status="${PIPESTATUS[0]}"
 else
-  env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
+  "${launch_env[@]}" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
   wine_status="${PIPESTATUS[0]}"
 fi
 set -e
