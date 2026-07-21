@@ -151,13 +151,19 @@ compose_launch_overrides() {
       launch_winedlloverrides="version=n,b"
     fi
     # Shim height cap (Win32 window units), read by the DLL via getenv().
-    # Decoupled from the conservative startup placement clamp
-    # (WAYDAW_ABLETON_MAX_WINDOW_HEIGHT, default 1000): the window is BORN
-    # calm and short, then the user may resize UP to this cap. 1040 sits well
-    # above Ableton's ~966 content-minimum (giving real vertical range) and
-    # ~40px below the full-workarea height where the resize storm forms. See
-    # docs/ableton-proton-full-height-preapply-options.md.
-    export WAYDAW_SIZING_SHIM_MAX_H="${WAYDAW_ABLETON_SIZING_CAP_H:-1040}"
+    # Default 1006 = the unauthorized demo's FIXED painted layout height
+    # (measured 2026-07-08 across every session and birth state: the app
+    # never re-layouts taller than ~1006 pre-auth — cfg seeds, drags, and
+    # imposed sizes above it all leave a permanent unpainted strip at the
+    # bottom). Capping the app's height belief at the paint ceiling makes
+    # the strip unreachable: drag releases rubber-band back to the tallest
+    # painted height, the same belief-clamp mechanism that killed the
+    # full-height storm. Still well above the 820 floor (usable range) and
+    # far below the full-workarea storm zone. If a post-authorization
+    # session re-layouts freely, raise via WAYDAW_ABLETON_SIZING_CAP_H
+    # (validated safe up to 1040). See
+    # docs/ableton-proton-presentation-contract.md.
+    export WAYDAW_SIZING_SHIM_MAX_H="${WAYDAW_ABLETON_SIZING_CAP_H:-1006}"
     # Shim height floor (Win32 window units). Ableton drops the File/Edit
     # menu row itself when the window gets short (app-side switch to a
     # compact/borderless mode around frame height ~740-750). 820 keeps every
@@ -203,7 +209,7 @@ print_launch_config() {
   printf 'WAYDAW_ABLETON_GRAPHICS=%s\n' "$ableton_graphics"
   printf 'WINEDLLOVERRIDES=%s\n' "${launch_winedlloverrides:-}"
   printf 'Ableton DXVK=%s\n' "$ableton_dxvk_state"
-  printf 'Sizing shim=%s\n' "$([[ "$sizing_shim_enabled" == 1 ]] && echo "enabled (target=$(sizing_shim_target), cap_h=${WAYDAW_SIZING_SHIM_MAX_H:-1040}, min_h=${WAYDAW_SIZING_SHIM_MIN_H:-820})" || echo no)"
+  printf 'Sizing shim=%s\n' "$([[ "$sizing_shim_enabled" == 1 ]] && echo "enabled (target=$(sizing_shim_target), cap_h=${WAYDAW_SIZING_SHIM_MAX_H:-1006}, min_h=${WAYDAW_SIZING_SHIM_MIN_H:-820})" || echo no)"
   printf 'GDK_BACKEND=%s\n' "${GDK_BACKEND:-}"
   printf 'QT_QPA_PLATFORM=%s\n' "${QT_QPA_PLATFORM:-}"
   printf 'SDL_VIDEODRIVER=%s\n' "${SDL_VIDEODRIVER:-}"
@@ -269,7 +275,7 @@ print_dry_run() {
     printf 'sizing_shim=would_enable\n'
     printf 'sizing_shim_dll=%s\n' "$sizing_shim_dll"
     printf 'sizing_shim_target=%s\n' "$(sizing_shim_target)"
-    printf 'sizing_shim_cap_h=%s\n' "${WAYDAW_SIZING_SHIM_MAX_H:-1040}"
+    printf 'sizing_shim_cap_h=%s\n' "${WAYDAW_SIZING_SHIM_MAX_H:-1006}"
     printf 'sizing_shim_min_h=%s\n' "${WAYDAW_SIZING_SHIM_MIN_H:-820}"
     printf 'sizing_shim_dry_run_mutation=none (installed only at real launch)\n'
   else

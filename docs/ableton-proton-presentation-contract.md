@@ -208,3 +208,103 @@ levers, and together they turn "maximize is awkward" into "maximize means
 safe-fit" — the contract made user-visible. Constant unification
 (controller templating from the launcher env) can ride along with the
 guard-2 change since the controller file is being touched anyway.
+
+---
+
+# UX note (2026-07-08): the native-feel boundary
+
+User feedback after live safe-fit validation: *"the window overall just
+doesn't have a native feel."* This section treats that as product feedback
+about the whole presentation layer, not as a bug, and answers one question:
+**should WayDAW keep chasing native feel, or define an intentionally
+non-native but stable "WayDAW window mode"?**
+
+## 1. What now works reliably (proven, most of it user-validated)
+
+- Launch: calm startup on the copied Proton-exp prefix, placement clamp,
+  shim + controller lifecycle, cleanup leaves zero residue.
+- Interaction: File menu opens, Escape closes, input stays alive, UI thread
+  calm (5–20%), no message-pump storm in any tested scenario.
+- Resize-storm prevention: cap band held through hard shrink drags, tall
+  drags, width-after-height, maximize attempts, and synthetic abuse.
+- Menu preservation: `_MOTIF` stayed decorated through every shrink attempt
+  (granted X heights down to 28 px); the File/Edit row never disappeared.
+- Full-width fit: one maximize click → real horizontal maximize, full width,
+  painted edge-to-edge; `bin/ableton-proton-fit` does the same on demand.
+- Restore/toggle: second maximize click restores the previous size
+  (synthetic-validated; user confirmed "maximize does go back").
+- Manual height: drags move the height freely inside the band and reach the
+  band top (observed live at 2560×1032).
+
+## 2. What still feels non-native
+
+- Maximize semantics: maximize means safe-fit (full width, kept height),
+  not KDE fill-the-screen; the titlebar button state never shows
+  "maximized".
+- Height is bounded: cap ~1040 and floor 820 — a native window would do
+  neither.
+- During-drag artifacts: transient sliver on shrink, transient black strip
+  on tall drags, rubber-banding on release.
+- File-menu double-click-after-Esc quirk (Wine menu capture).
+- KDE-titlebar expectations (button states, drag-anywhere maximize
+  gestures, quick-tile) don't map cleanly onto what Wine/Ableton tolerate.
+- Stale `_NET_WM_STATE` maximize atoms can linger (Wine-side residue;
+  cosmetic, KWin behavior unaffected).
+
+## 3. Non-native by design — inherent safety tradeoffs (do not "fix")
+
+- No true vertical maximize: full workarea height is the measured storm
+  trigger. This is the load-bearing wall of the whole compat layer.
+- The height cap: same reason.
+- The height floor: below it Ableton itself deletes its menu row.
+- Safe-fit instead of real maximize: the only maximize semantics compatible
+  with the two constraints above.
+
+## 4. Possibly polishable later (ordered by value/risk)
+
+1. During-drag artifacts — the `WM_NORMAL_HINTS`/PMinSize-PMaxSize
+   experiment (shim-side, making Wine publish the band so KWin refuses
+   out-of-band drags pre-apply) would remove sliver/strip/rubber-banding in
+   one stroke. Highest polish value; needs its own careful branch.
+- 2. Launcher messaging — print the window-mode rules at launch (one line:
+   "window mode: safe-fit maximize, height band 820–1040") so behavior
+   reads as designed, not broken.
+3. Fit ergonomics — a keybinding or tray affordance for
+   `bin/ableton-proton-fit`; possibly a `--restore` counterpart.
+4. A dedicated WayDAW window-control overlay — only if the mode sticks
+   long-term; heavyweight.
+
+## 5. Explicitly not chased now (destabilization risk)
+
+- True full-height maximize (the storm).
+- KWin persistent rules (policy: runtime scripting only).
+- External writers of Wine-owned X properties (measured two-writer churn).
+- Auto height completion through Wine's opaque win32↔X mapping: three
+  mechanisms were prototyped live (KWin-write + heal, message/timer-based
+  shim completion, watcher-thread shim completion); instrumentation showed
+  the app's Win32 belief already at band top while Wine presented 66 px
+  less — the discrepancy lives inside Wine's NC/mapping accounting, varies
+  by decoration state, and touching it means modifying the storm-critical
+  clamps on guesswork. All three prototypes were REVERTED; the shim on this
+  branch is byte-identical to the merged, validated one.
+
+## 6. Recommendation
+
+**Proceed as "stable WayDAW window mode" — merge after validation.** The
+native-feel gap is real but the alternative (chasing indistinguishability
+from a native KDE app) runs through exactly the mechanisms that caused
+weeks of storms: full-height geometry, Wine property races, and NC-mapping
+internals. The honest product definition:
+
+- `./bin/ableton-proton` runs Ableton in a constrained, stable
+  presentation mode.
+- Maximize means safe-fit (full width, height kept), toggled by a second
+  click. It is not native maximize and does not claim to be.
+- Height is bounded for safety: ~820 to ~1040.
+- Known limitations: during-drag visual artifacts, the menu double-click
+  quirk, lingering maximize atoms.
+- Stability and recoverability beat perfect native feel.
+
+Ship that, say it clearly (launcher line + README), and revisit native
+feel only through the one experiment with real leverage
+(`WM_NORMAL_HINTS`) when there is appetite for a new investigation branch.

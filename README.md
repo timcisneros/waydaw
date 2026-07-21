@@ -28,7 +28,7 @@ the supported environment described below.
 This is an operational wrapper around one shared Wine prefix:
 
 ```sh
-~/.wine_ableton12
+~/WinePrefixes/ableton12
 ```
 
 It is intentionally Bash-first, small, explicit, and easy to reset. It does not install Wine, Ableton, Bome, plugins, drivers, or system packages.
@@ -40,7 +40,7 @@ Ableton Live, Max for Live, Bome, plugin scanners, VST2/VST3 paths, registry sta
 The harness always uses:
 
 ```sh
-WINEPREFIX="$HOME/.wine_ableton12"
+WINEPREFIX="$HOME/WinePrefixes/ableton12"
 ```
 
 ## Why XWayland
@@ -111,7 +111,7 @@ Manual updates are preferred because they keep installation and DAW launch as se
 Manual update workflow:
 
 ```sh
-# 1. Backup ~/.wine_ableton12
+# 1. Backup ~/WinePrefixes/ableton12
 # 2. Install the new Live build manually from your Ableton account
 # 3. Avoid the in-app updater
 ./waydaw/bin/disable-ableton-updates
@@ -169,6 +169,33 @@ KDE Window Rules are offline-only unless they can be prepared without launching 
 
 ```sh
 ./waydaw/docs/KDE_WINDOW_RULES_GUIDE.md
+```
+
+## Ableton Windowing Diagnosis Without Screenshots
+
+Use these diagnostics when Ableton launches but the KDE titlebar, menu bar, window bounds, or flicker behavior needs to be diagnosed from logs only.
+
+Start from a clean Ableton/Wine session:
+
+```bash
+./bin/kill-session
+./bin/ableton
+```
+
+In another terminal, collect the log-only windowing data:
+
+```bash
+./bin/log-ableton-window-geometry
+./bin/watch-ableton-window-geometry
+./bin/diagnose-ableton-windowing
+```
+
+These commands do not take screenshots and do not use Wine virtual desktop. Do not make new windowing fixes until the diagnostic output identifies the failing layer with:
+
+```text
+derived_issue=...
+rule_fired=...
+evidence=...
 ```
 
 ## Linux MIDI Routing Model
@@ -330,7 +357,7 @@ Expected shape:
 
 - PipeWire running as the user audio server.
 - PipeWire JACK compatibility available, usually through `pw-jack`.
-- WineASIO installed and registered in the shared `~/.wine_ableton12` prefix.
+- WineASIO installed and registered in the shared `~/WinePrefixes/ableton12` prefix.
 - Ableton configured to use WineASIO in audio preferences.
 
 ## WineASIO Readiness Workflow

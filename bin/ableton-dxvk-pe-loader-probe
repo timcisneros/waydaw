@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_PREFIX="${SOURCE_PREFIX:-$HOME/WinePrefixes/ableton12}"
+LOG_ROOT="$ROOT_DIR/logs/ableton-dxvk-pe-loader-probes"
+TOOL_OUT="$ROOT_DIR/.local-tools/dxvk-load-probe.exe"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+
+say() { printf '%s\n' "$*"; }
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+ableton-dxvk-pe-loader-probe - PE LoadLibrary/GetProcAddress DXVK loader probe
+
+USAGE:
+  bin/ableton-dxvk-pe-loader-probe [--build-only]
+  bin/ableton-dxvk-pe-loader-probe --runner <path> --label <label>
+
+SAFETY:
+  * Does not launch Ableton.
+  * Does not touch the working/source prefix.
+  * Creates copied test prefixes only.
+  * Builds tools/dxvk-load-probe.c to .local-tools/dxvk-load-probe.exe when a
+    PE-capable compiler is already installed.
+  * Always runs system Wine as the control. With --runner, also runs that runner
+    in native_only and native_then_builtin modes.
+EOF
+}
+
+BUILD_ONLY=no
+CUSTOM_RUNNER=""
+CUSTOM_LABEL=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --build-only) BUILD_ONLY=yes; shift ;;
+    --runner)
+      [[ $# -ge 2 ]] || fail "--runner requires a path"
+      CUSTOM_RUNNER="$2"
+      shift 2
+      ;;
+    --label)
+      [[ $# -ge 2 ]] || fail "--label requires a value"
+      CUSTOM_LABEL="$2"
+      shift 2
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1 (see --help)" ;;
+  esac
+done
+
+if [[ -n "$CUSTOM_RUNNER" && -z "$CUSTOM_LABEL" ]]; then
+  fail "--label is required with --runner"
+fi
+if [[ -z "$CUSTOM_RUNNER" && -n "$CUSTOM_LABEL" ]]; then
+  fail "--runner is required with --label"
+fi
+
+resolve_runner_bin() {
+  local runner="$1" cand
+  for cand in "$runner/bin" "$runner/files/bin" "$runner"; do
+    if [[ -x "$cand/wine" ]]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+sha256_file() {
+  local f="$1"
+  [[ -f "$f" ]] || { printf 'missing'; return 0; }
+  sha256sum "$f" 2>/dev/null | awk '{print $1}'
+}
+
+copy_system32_dxvk() {
+  local test_prefix="$1" rel src dst
+  for rel in "drive_c/windows/system32/d3d11.dll" "drive_c/windows/system32/dxgi.dll"; do
+    src="$SOURCE_PREFIX/$rel"
+    dst="$test_prefix/$rel"
+    [[ -f "$src" ]] || fail "source DLL missing: $src"
+    mkdir -p "$(dirname "$dst")"
+    cp -f "$src" "$dst" || fail "copy failed: $src -> $dst"
+  done
+}
+
+hashes_match_source() {
+  local test_prefix="$1" rel
+  for rel in "drive_c/windows/system32/d3d11.dll" "drive_c/windows/system32/dxgi.dll"; do
+    [[ "$(sha256_file "$SOURCE_PREFIX/$rel")" == "$(sha256_file "$test_prefix/$rel")" ]] || return 1
+  done
+  return 0
+}
+
+grep_yes_no() {
+  local pattern="$1" file="$2"
+  grep -qiE "$pattern" "$file" 2>/dev/null && printf 'yes' || printf 'no'
+}
+
+loader_mapped_prefix_dll() {
+  local dll="$1" file="$2"
+  grep -qiE "map_image_into_view mapping PE file L\".*${dll}\\.dll\"" "$file" 2>/dev/null && printf 'yes' || printf 'no'
+}
+
+loader_loaded_builtin_dll() {
+  local dll="$1" file="$2"
+  grep -qiE "Loaded L\".*${dll}\\.dll\".*: builtin" "$file" 2>/dev/null && printf 'yes' || printf 'no'
+}
+
+loader_lines() {
+  local file="$1"
+  grep -iE 'd3d11|dxgi|wined3d|loaddll|module|builtin|native|not found|failed|error|err:' "$file" 2>/dev/null \
+    | tail -50 \
+    | sed 's/[[:cntrl:]]//g' \
+    | tr '\n' '|' \
+    | sed 's/|$//'
+}
+
+build_probe() {
+  mkdir -p "$ROOT_DIR/.local-tools"
+  if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+    x86_64-w64-mingw32-gcc -Wall -Wextra -O2 \
+      -o "$TOOL_OUT" "$ROOT_DIR/tools/dxvk-load-probe.c" || return 1
+  elif command -v clang >/dev/null 2>&1; then
+    clang --target=x86_64-w64-windows-gnu -Wall -Wextra -O2 \
+      -o "$TOOL_OUT" "$ROOT_DIR/tools/dxvk-load-probe.c" || return 1
+  else
+    say "pe_loader_probe_build_available=no"
+    say "missing_compilers=x86_64-w64-mingw32-gcc clang"
+    return 2
+  fi
+
+  if [[ -f "$TOOL_OUT" ]]; then
+    say "pe_loader_probe_build_available=yes"
+    say "pe_loader_probe=$TOOL_OUT"
+    file "$TOOL_OUT" || true
+    return 0
+  fi
+  return 1
+}
+
+run_case() {
+  local runner="$1" runner_label="$2" mode="$3" overrides="$4"
+  local runner_bin test_prefix rundir log stdout_file stderr_file result wine_version exit_code hash_match
+
+  runner_bin="$(resolve_runner_bin "$runner")" || fail "runner wine not found: $runner"
+  test_prefix="$HOME/WinePrefixes/ableton12-pe-loader-probe-${runner_label}-${mode}-${STAMP}"
+  rundir="$LOG_ROOT/${STAMP}-${runner_label}-${mode}"
+  log="$rundir/winedebug-loader.log"
+  stdout_file="$rundir/probe.stdout"
+  stderr_file="$rundir/probe.stderr"
+  result="$rundir/result.env"
+
+  [[ -e "$test_prefix" ]] && fail "refusing: test prefix already exists: $test_prefix"
+  mkdir -p "$rundir"
+
+  say "[pe-probe:$runner_label:$mode] copying source prefix -> $test_prefix"
+  rsync -a "$SOURCE_PREFIX/" "$test_prefix/" || fail "rsync failed"
+
+  say "[pe-probe:$runner_label:$mode] runner prefix update"
+  env -u WAYLAND_DISPLAY WINEPREFIX="$test_prefix" PATH="$runner_bin:$PATH" wineboot -u >> "$log" 2>&1 || true
+
+  copy_system32_dxvk "$test_prefix"
+  if hashes_match_source "$test_prefix"; then hash_match=yes; else hash_match=no; fi
+  wine_version="$(env PATH="$runner_bin:$PATH" wine --version 2>&1 | head -1)"
+
+  say "[pe-probe:$runner_label:$mode] running PE loader probe: $overrides"
+  env -u WAYLAND_DISPLAY WINEPREFIX="$test_prefix" PATH="$runner_bin:$PATH" \
+    WINEDEBUG="+loaddll,+module" WINEDLLOVERRIDES="$overrides" \
+    wine "$TOOL_OUT" >"$stdout_file" 2>"$stderr_file"
+  exit_code="$?"
+  cat "$stderr_file" >> "$log"
+
+  env -u WAYLAND_DISPLAY WINEPREFIX="$test_prefix" PATH="$runner_bin:$PATH" wineserver -k >> "$log" 2>&1 || true
+
+  {
+    printf 'runner=%s\n' "$runner"
+    printf 'wine_version=%s\n' "$wine_version"
+    printf 'test_prefix=%s\n' "$test_prefix"
+    printf 'override_mode=%s\n' "$mode"
+    printf 'dxvk_hashes_match_source=%s\n' "$hash_match"
+    printf 'probe_exit_code=%s\n' "$exit_code"
+    printf 'probe_stdout=%s\n' "$(tr '\n' '|' < "$stdout_file" | sed 's/|$//')"
+    printf 'probe_stderr=%s\n' "$(tr '\n' '|' < "$stderr_file" | sed 's/|$//')"
+    printf 'loader_mapped_prefix_d3d11=%s\n' "$(loader_mapped_prefix_dll d3d11 "$log")"
+    printf 'loader_mapped_prefix_dxgi=%s\n' "$(loader_mapped_prefix_dll dxgi "$log")"
+    printf 'loader_loaded_wined3d=%s\n' "$(grep_yes_no 'wined3d\.dll' "$log")"
+    printf 'loader_loaded_builtin_d3d11=%s\n' "$(loader_loaded_builtin_dll d3d11 "$log")"
+    printf 'loader_loaded_builtin_dxgi=%s\n' "$(loader_loaded_builtin_dll dxgi "$log")"
+    printf 'loader_error_lines=%s\n' "$(loader_lines "$log")"
+    printf 'ableton_launched=no\n'
+    printf 'working_prefix_touched=no\n'
+    printf 'run_dir=%s\n' "$rundir"
+  } > "$result"
+
+  say "[pe-probe:$runner_label:$mode] result: $result"
+  cat "$result"
+}
+
+[[ -d "$SOURCE_PREFIX" ]] || fail "source prefix missing: $SOURCE_PREFIX"
+mkdir -p "$LOG_ROOT"
+
+build_probe
+build_status="$?"
+if [[ "$build_status" == "2" ]]; then
+  exit 2
+elif [[ "$build_status" != "0" ]]; then
+  fail "PE loader probe build failed"
+fi
+[[ "$BUILD_ONLY" == "yes" ]] && exit 0
+
+run_case "/usr" "system-wine-11-staging-control" "native_only" "d3d11,dxgi=n"
+run_case "/usr" "system-wine-11-staging-control" "native_then_builtin" "d3d11,dxgi=n,b"
+
+if [[ -n "$CUSTOM_RUNNER" ]]; then
+  run_case "$CUSTOM_RUNNER" "$CUSTOM_LABEL" "native_only" "d3d11,dxgi=n"
+  run_case "$CUSTOM_RUNNER" "$CUSTOM_LABEL" "native_then_builtin" "d3d11,dxgi=n,b"
+else
+  run_case ".local-runners/kron4ek-wine-11.11-staging-tkg" "candidate2-kron4ek-wine-11-11" "native_only" "d3d11,dxgi=n"
+  run_case ".local-runners/kron4ek-wine-11.11-staging-tkg" "candidate2-kron4ek-wine-11-11" "native_then_builtin" "d3d11,dxgi=n,b"
+fi

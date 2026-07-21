@@ -97,6 +97,30 @@ let floorLogMs = 0;
 // next frameGeometryChanged) with one write per 400ms settle window.
 const lastFloor = new Map();
 
+// Safe-fit (2026-07-08, docs/ableton-proton-presentation-contract.md).
+// What "maximize" MEANS for this window: full workarea width via REAL
+// horizontal-only maximize, height left at the app's believed value — never
+// real vertical maximize (full workarea height is the storm trigger), never
+// the menu-less short mode.
+let fitCount = 0;
+// Windows we put into safe-fit (horizontal maximize). A second maximize
+// request while in safe-fit means "go back" and is restored NATIVELY by
+// KWin (setMaximize(false,false) -> KWin's own pre-maximize bookkeeping).
+const fitApplied = new Set();
+
+// Why horizontal-only REAL maximize is the safe-fit mechanism (measured
+// 2026-07-08): imposed frameGeometry writes and external resize requests
+// are adopted by Wine without a re-layout — the app keeps painting its
+// believed height (e.g. 1006) inside the bigger rect, leaving a permanent
+// dead strip at the bottom (imposed 1030/1031 painted only ~1006; imposing
+// exactly 1006 painted fully). The app's height belief moves ONLY through
+// Wine's messaged path (interactive drags, real maximize state changes).
+// Horizontal maximize IS such a messaged state change, is KWin-tracked
+// (native restore), only touches width (measured-free axis), and painted
+// edge-to-edge in the probe. Height is deliberately left at the app's own
+// believed value — raising it belongs to the app/user via drags, not to a
+// WM-side imposition that cannot reflow the app.
+
 // Post-resize renegotiation nudge (guard 5, 2026-07-07). When an interactive
 // resize ends, the app's counter-configure can be lost — KWin ignores client
 // configure requests during the drag — leaving the X window taller than the
@@ -162,7 +186,26 @@ function guardMaximize(w, why) {
                  ") maximizeMode=" + w.maximizeMode + " fullScreen=" + w.fullScreen +
                  " fg.h=" + w.frameGeometry.height);
     if (fs) { try { w.fullScreen = false; } catch (e) {} }
-    if (vmax && typeof w.setMaximize === "function") { try { w.setMaximize(false, false); } catch (e) {} }
+    if (vmax && typeof w.setMaximize === "function") {
+        // Translate, don't swallow (2026-07-08): cancelling alone also threw
+        // away the SAFE horizontal half of a full-maximize, so the user's
+        // click visibly did nothing and they clicked again. First maximize
+        // request -> horizontal-only real maximize (safe-fit; see the
+        // mechanism comment at fitApplied). Second request while already in
+        // safe-fit -> native KWin restore ("unmaximize" that actually goes
+        // back). Rate-limited by lastUnmax above.
+        if (fitApplied.has(w)) {
+            fitApplied.delete(w);
+            fitCount += 1;
+            console.info(TAG, "safe-fit toggle: native restore (#" + fitCount + ", " + why + ")");
+            try { w.setMaximize(false, false); } catch (e) {}
+        } else {
+            fitApplied.add(w);
+            fitCount += 1;
+            console.info(TAG, "maximize -> safe-fit horizontal-only (#" + fitCount + ", " + why + ")");
+            try { w.setMaximize(false, true); } catch (e) {}
+        }
+    }
 }
 
 // Manual full-height resize cap (guard 3).
@@ -299,6 +342,10 @@ function manage(w) {
         // Remember that a user resize touched this window; consumed by the
         // renegotiation nudge when the interaction finishes.
         if (w.resize === true) resizeSeen.add(w);
+        // Leaving maximize entirely (drag, restore, app change) invalidates
+        // the safe-fit toggle state.
+        if (fitApplied.has(w) && typeof w.maximizeMode === "number" && w.maximizeMode === 0)
+            fitApplied.delete(w);
         pin(w, "frameGeometryChanged");
         guardMaximize(w, "frameGeometryChanged");
         guardManualHeight(w, "frameGeometryChanged");
@@ -315,7 +362,7 @@ function manage(w) {
     } else if (isTarget(w)) {
         console.warn(TAG, "interactiveMoveResizeFinished unavailable; floor/nudge rely on frameGeometryChanged only");
     }
-    w.closed.connect(() => { managed.delete(w); lastUnmax.delete(w); lastFloor.delete(w); resizeSeen.delete(w); });
+    w.closed.connect(() => { managed.delete(w); lastUnmax.delete(w); lastFloor.delete(w); resizeSeen.delete(w); fitApplied.delete(w); });
     if (isTarget(w)) {
         console.info(TAG, "target matched:", w.internalId, "caption=", w.caption);
         pin(w, "initial");
@@ -329,4 +376,5 @@ workspace.windowList().forEach(manage);
 workspace.windowAdded.connect(manage);
 console.info(TAG, "loaded; watching for steam_proton + 'Ableton Live 12 Suite' normal windows"
              + " (manual height cap: workarea - " + MANUAL_CAP_MARGIN
-             + ", manual height floor: <" + MANUAL_FLOOR_MIN + " -> " + MANUAL_FLOOR_RESTORE + ")");
+             + ", manual height floor: <" + MANUAL_FLOOR_MIN + " -> " + MANUAL_FLOOR_RESTORE
+             + ", maximize -> safe-fit horizontal-only, toggle restores)");

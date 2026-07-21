@@ -1,0 +1,561 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/ableton-window-geometry.log"
+KWIN_RULES_FILE="${KWIN_RULES_FILE:-$HOME/.config/kwinrulesrc}"
+RULE_ID="${WAYDAW_ABLETON_KWIN_RULE_ID:-waydaw-ableton-live-12-geometry}"
+EXPECTED_POSITION="${WAYDAW_ABLETON_KWIN_POSITION:-40,40}"
+EXPECTED_SIZE="${WAYDAW_ABLETON_KWIN_SIZE:-1600,900}"
+mkdir -p "$LOG_DIR"
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+missing_tool() { have_cmd "$1" || printf 'MISSING_TOOL=%s\n' "$1"; }
+
+kv() {
+  printf '%s=%s\n' "$1" "${2:-unknown}"
+}
+
+section() {
+  printf '\n[%s]\n' "$1"
+}
+
+read_config() {
+  local group="$1" key="$2"
+  if have_cmd kreadconfig6; then
+    kreadconfig6 --file "$KWIN_RULES_FILE" --group "$group" --key "$key" 2>/dev/null || true
+  else
+    awk -v group="$group" -v key="$key" '
+      $0 == "[" group "]" { in_group = 1; next }
+      /^\[/ { in_group = 0 }
+      in_group && index($0, key "=") == 1 {
+        sub("^[^=]+=", "")
+        print
+        exit
+      }
+    ' "$KWIN_RULES_FILE" 2>/dev/null || true
+  fi
+}
+
+wine_reg_value() {
+  local key="$1" value_name="$2" output
+  have_cmd wine || return 1
+  output="$(env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" wine reg query "$key" /v "$value_name" 2>/dev/null)" || return 1
+  awk -v value_name="$value_name" '
+    $1 == value_name {
+      value = $0
+      sub("^[[:space:]]*" value_name "[[:space:]]+REG_[^[:space:]]+[[:space:]]+", "", value)
+      sub(/\r$/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END { if (!found) exit 1 }
+  ' <<<"$output"
+}
+
+print_wine_reg_value() {
+  local label="$1" key="$2" value_name="$3" value
+  if value="$(wine_reg_value "$key" "$value_name")"; then
+    kv "$label" "$value"
+  else
+    kv "$label" "unset"
+  fi
+}
+
+find_ableton_exe() {
+  local drive_c="$WINEPREFIX/drive_c" candidate
+  for candidate in \
+    "$drive_c/ProgramData/Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe" \
+    "$drive_c/ProgramData/Ableton/Live 12 Standard/Program/Ableton Live 12 Standard.exe" \
+    "$drive_c/ProgramData/Ableton/Live 12 Intro/Program/Ableton Live 12 Intro.exe" \
+    "$drive_c/Program Files/Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe" \
+    "$drive_c/Program Files/Ableton/Live 12 Standard/Program/Ableton Live 12 Standard.exe" \
+    "$drive_c/Program Files/Ableton/Live 12 Intro/Program/Ableton Live 12 Intro.exe" \
+    "$drive_c/Program Files (x86)/Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe" \
+    "$drive_c/Program Files (x86)/Ableton/Live 12 Standard/Program/Ableton Live 12 Standard.exe" \
+    "$drive_c/Program Files (x86)/Ableton/Live 12 Intro/Program/Ableton Live 12 Intro.exe"; do
+    [[ -f "$candidate" ]] && printf '%s\n' "$candidate" && return 0
+  done
+  find "$drive_c" -type f -iname 'Ableton Live 12*.exe' 2>/dev/null | head -n 1
+}
+
+derive_launch_config() {
+  local graphics="${WAYDAW_ABLETON_GRAPHICS:-wined3d}"
+  case "$graphics" in
+    wined3d) printf 'dxgi,d3d11=b' ;;
+    dxvk) printf '%s' "${WINEDLLOVERRIDES:-}" ;;
+    *) printf 'invalid-WAYDAW_ABLETON_GRAPHICS=%s' "$graphics" ;;
+  esac
+}
+
+print_generated_launch_config() {
+  local exe overrides graphics
+  exe="$(find_ableton_exe || true)"
+  overrides="$(derive_launch_config)"
+  graphics="${WAYDAW_ABLETON_GRAPHICS:-wined3d}"
+  kv "WINEPREFIX" "$WINEPREFIX"
+  kv "WAYDAW_ABLETON_GRAPHICS" "$graphics"
+  kv "WAYDAW_ABLETON_KWIN_POSITION" "$EXPECTED_POSITION"
+  kv "WAYDAW_ABLETON_KWIN_SIZE" "$EXPECTED_SIZE"
+  kv "computed_WINEDLLOVERRIDES" "$overrides"
+  kv "Ableton executable" "${exe:-not_found}"
+  kv "print_launch_config_source" "computed_without_calling_bin_ableton"
+  kv "print_launch_config_side_effects" "none"
+  if [[ -n "$exe" ]]; then
+    printf 'final_launch_command=env -u WAYLAND_DISPLAY WINEPREFIX=%q' "$WINEPREFIX"
+    [[ -n "$overrides" ]] && printf ' WINEDLLOVERRIDES=%q' "$overrides"
+    printf ' wine %q\n' "$exe"
+  else
+    kv "final_launch_command" "unavailable_ableton_executable_not_found"
+  fi
+}
+
+screen_x=0
+screen_y=0
+screen_width=0
+screen_height=0
+workarea_x=0
+workarea_y=0
+workarea_width=0
+workarea_height=0
+
+collect_screen_geometry() {
+  local line
+  if have_cmd wmctrl; then
+    line="$(wmctrl -d 2>/dev/null | awk '$2 == "*" { print; exit }')"
+    if [[ "$line" =~ DG:\ ([0-9]+)x([0-9]+) ]]; then
+      screen_width="${BASH_REMATCH[1]}"
+      screen_height="${BASH_REMATCH[2]}"
+    fi
+    if [[ "$line" =~ WA:\ ([0-9-]+),([0-9-]+)\ ([0-9]+)x([0-9]+) ]]; then
+      workarea_x="${BASH_REMATCH[1]}"
+      workarea_y="${BASH_REMATCH[2]}"
+      workarea_width="${BASH_REMATCH[3]}"
+      workarea_height="${BASH_REMATCH[4]}"
+    fi
+  fi
+  if [[ "$screen_width" -eq 0 ]] && have_cmd xrandr; then
+    line="$(xrandr --query 2>/dev/null | awk '/ connected / { print; exit }')"
+    if [[ "$line" =~ ([0-9]+)x([0-9]+)\+([0-9-]+)\+([0-9-]+) ]]; then
+      screen_width="${BASH_REMATCH[1]}"
+      screen_height="${BASH_REMATCH[2]}"
+      screen_x="${BASH_REMATCH[3]}"
+      screen_y="${BASH_REMATCH[4]}"
+    fi
+  fi
+  if [[ "$screen_width" -eq 0 ]] && have_cmd xdpyinfo; then
+    line="$(xdpyinfo 2>/dev/null | awk '/dimensions:/ { print; exit }')"
+    if [[ "$line" =~ dimensions:[[:space:]]+([0-9]+)x([0-9]+) ]]; then
+      screen_width="${BASH_REMATCH[1]}"
+      screen_height="${BASH_REMATCH[2]}"
+    fi
+  fi
+  if [[ "$workarea_width" -eq 0 ]]; then
+    workarea_width="$screen_width"
+  fi
+  if [[ "$workarea_height" -eq 0 ]]; then
+    workarea_height="$screen_height"
+  fi
+}
+
+print_screen_values() {
+  collect_screen_geometry
+  kv "detected_screen_x" "$screen_x"
+  kv "detected_screen_y" "$screen_y"
+  kv "detected_screen_width" "$screen_width"
+  kv "detected_screen_height" "$screen_height"
+  kv "detected_workarea_x" "$workarea_x"
+  kv "detected_workarea_y" "$workarea_y"
+  kv "detected_workarea_width" "$workarea_width"
+  kv "detected_workarea_height" "$workarea_height"
+  kv "screen_right" "$((screen_x + screen_width))"
+  kv "screen_bottom" "$((screen_y + screen_height))"
+  kv "workarea_right" "$((workarea_x + workarea_width))"
+  kv "workarea_bottom" "$((workarea_y + workarea_height))"
+}
+
+print_raw_tool_output() {
+  local tool="$1"; shift
+  section "raw $tool"
+  if have_cmd "$tool"; then
+    if [[ "$tool" == "xdpyinfo" ]]; then
+      "$tool" "$@" 2>&1 | awk '
+        NR <= 40 { print; next }
+        /dimensions:/ || /XWAYLAND/ || /RANDR/ || /Composite/ || /Present/ { print }
+      ' || true
+    else
+      "$tool" "$@" 2>&1 || true
+    fi
+  else
+    missing_tool "$tool"
+  fi
+}
+
+print_kwin_rules() {
+  local group in_group=0 key value lower_group lower_value
+  [[ -f "$KWIN_RULES_FILE" ]] || { kv "kwinrulesrc" "missing"; return; }
+  awk '
+    /^\[/ {
+      group = $0
+      gsub(/^\[|\]$/, "", group)
+      lower = tolower(group)
+      relevant = lower ~ /(waydaw|ableton|wine)/
+      next
+    }
+    relevant {
+      lower_line = tolower($0)
+      if (lower_line ~ /(waydaw|ableton|wine)/) relevant = 1
+    }
+    relevant && $0 != "" {
+      if (!printed[group]) {
+        print "kwin_group=" group
+        printed[group] = 1
+      }
+      split($0, parts, "=")
+      key = parts[1]
+      if (key ~ /^(Description|wmclass|wmclassmatch|title|titlematch|position|positionrule|size|sizerule|noborder|noborderrule|fullscreen|fullscreenrule|maximizehoriz|maximizehorizrule|maximizevert|maximizevertrule|placement|placementrule)$/) {
+        print group "." $0
+      }
+    }
+  ' "$KWIN_RULES_FILE"
+}
+
+normalize_id() {
+  local id="$1"
+  if [[ "$id" == 0x* ]]; then
+    printf '%s\n' "$id"
+  else
+    printf '0x%x\n' "$id" 2>/dev/null || printf '%s\n' "$id"
+  fi
+}
+
+candidate_ids() {
+  set +o pipefail
+  {
+    if have_cmd wmctrl; then
+      wmctrl -lxG 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /Ableton|Live 12|wine/ { print $1 }'
+    else
+      missing_tool wmctrl >&2
+    fi
+    if have_cmd xdotool; then
+      xdotool search --name Ableton 2>/dev/null | while read -r id; do normalize_id "$id"; done
+      xdotool search --class Ableton 2>/dev/null | while read -r id; do normalize_id "$id"; done
+      xdotool search --name "Live 12" 2>/dev/null | while read -r id; do normalize_id "$id"; done
+    else
+      missing_tool xdotool >&2
+    fi
+    if have_cmd xprop; then
+      xprop -root _NET_CLIENT_LIST _NET_CLIENT_LIST_STACKING 2>/dev/null |
+        tr ',' '\n' |
+        awk '/0x[0-9a-fA-F]+/ { for (i=1; i<=NF; i++) if ($i ~ /^0x[0-9a-fA-F]+$/) print $i }' |
+        while read -r id; do
+          local props
+          props="$(xprop -id "$id" WM_CLASS WM_NAME _NET_WM_NAME 2>/dev/null || true)"
+          if grep -Eiq 'Ableton|Live 12|wine' <<<"$props"; then
+            printf '%s\n' "$id"
+          fi
+        done
+    fi
+  } | awk 'NF && !seen[$0]++'
+  set -o pipefail
+}
+
+wmctrl_geometry_for_id() {
+  local id="$1"
+  have_cmd wmctrl || return 1
+  wmctrl -lxG 2>/dev/null | awk -v id="$id" '$1 == id { print; exit }'
+}
+
+xprop_value() {
+  local id="$1" prop="$2"
+  have_cmd xprop || return 1
+  xprop -id "$id" "$prop" 2>/dev/null | sed 's/\r$//' || true
+}
+
+xwininfo_value() {
+  local id="$1" pattern="$2"
+  have_cmd xwininfo || return 1
+  xwininfo -id "$id" 2>/dev/null | awk -F: -v pat="$pattern" '$1 ~ pat { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
+}
+
+field_from_wmctrl() {
+  local line="$1" idx="$2"
+  awk -v idx="$idx" '{ print $idx }' <<<"$line"
+}
+
+window_title_from_wmctrl() {
+  local line="$1"
+  awk '{ for (i=9; i<=NF; i++) printf "%s%s", (i==9 ? "" : " "), $i; print "" }' <<<"$line"
+}
+
+derive_issue() {
+  local candidate_count="$1" actual_wmclass="$2" window_bottom="$3" screen_bottom_value="$4" workarea_bottom_value="$5" actual_size="$6" expected_size="$7" frame_top="$8" window_y="$9" estimated_client_y="${10}"
+  local expected_wmclass rule_present
+  expected_wmclass="$(read_config "$RULE_ID" wmclass)"
+  rule_present=false
+  [[ -n "$expected_wmclass" ]] && rule_present=true
+
+  if [[ "$candidate_count" -eq 0 ]]; then
+    printf 'derived_issue=no_ableton_window_found\n'
+    printf 'rule_fired=no candidate window matched Ableton/Live/Wine discovery patterns\n'
+    printf 'evidence=candidate_count=0 missing_discovery_tools=%s\n' "$(missing_discovery_tools)"
+  elif [[ "$rule_present" != true ]]; then
+    printf 'derived_issue=kwin_rule_not_installed\n'
+    printf 'rule_fired=expected Waydaw Ableton KWin rule group missing\n'
+    printf 'evidence=rule_id=%s present=false\n' "$RULE_ID"
+  elif [[ -n "$actual_wmclass" && "$actual_wmclass" != *"$expected_wmclass"* ]]; then
+    printf 'derived_issue=kwin_rule_not_matching_window_class\n'
+    printf 'rule_fired=actual_wmclass != expected_wmclass\n'
+    printf 'evidence=actual_wmclass=%s expected_wmclass=%s\n' "$actual_wmclass" "$expected_wmclass"
+  elif [[ "$actual_size" == "0,0" && "$(missing_discovery_tools)" != "none" ]]; then
+    printf 'derived_issue=window_geometry_unavailable\n'
+    printf 'rule_fired=geometry tool output unavailable for candidate window\n'
+    printf 'evidence=actual_size=%s missing_discovery_tools=%s\n' "$actual_size" "$(missing_discovery_tools)"
+  elif [[ "$workarea_bottom_value" -gt 0 && "$window_bottom" -gt "$workarea_bottom_value" ]]; then
+    printf 'derived_issue=window_exceeds_workarea\n'
+    printf 'rule_fired=window_bottom > workarea_bottom\n'
+    printf 'evidence=window_bottom=%s workarea_bottom=%s\n' "$window_bottom" "$workarea_bottom_value"
+  elif [[ "$screen_bottom_value" -gt 0 && "$window_bottom" -gt "$screen_bottom_value" ]]; then
+    printf 'derived_issue=window_exceeds_screen\n'
+    printf 'rule_fired=window_bottom > screen_bottom\n'
+    printf 'evidence=window_bottom=%s screen_bottom=%s\n' "$window_bottom" "$screen_bottom_value"
+  elif [[ -n "$expected_size" && "$actual_size" != "$expected_size" ]]; then
+    printf 'derived_issue=kwin_rule_present_but_geometry_ignored\n'
+    printf 'rule_fired=actual_size != expected_rule_size\n'
+    printf 'evidence=actual=%s expected=%s\n' "$actual_size" "$expected_size"
+  elif [[ "$frame_top" -gt 0 && "$estimated_client_y" -gt "$window_y" ]]; then
+    printf 'derived_issue=frame_extents_cover_client_top\n'
+    printf 'rule_fired=frame_top > 0 and decorated window overlaps/offsets client region\n'
+    printf 'evidence=frame_top=%s window_y=%s estimated_client_y=%s\n' "$frame_top" "$window_y" "$estimated_client_y"
+  else
+    printf 'derived_issue=no_geometry_failure_detected\n'
+    printf 'rule_fired=all deterministic geometry checks passed\n'
+    printf 'evidence=window_bounds_within_workarea=true wmclass_matches_rule=true\n'
+  fi
+}
+
+missing_discovery_tools() {
+  local tools=()
+  have_cmd wmctrl || tools+=("wmctrl")
+  have_cmd xdotool || tools+=("xdotool")
+  have_cmd xwininfo || tools+=("xwininfo")
+  if [[ "${#tools[@]}" -eq 0 ]]; then
+    printf 'none'
+  else
+    local IFS=,
+    printf '%s' "${tools[*]}"
+  fi
+}
+
+print_window_candidate() {
+  local id="$1" candidate_count="$2" wmline title wmclass wmname pid wtype state extents
+  local kde_frame_strut gtk_frame_extents allowed_actions
+  local x=0 y=0 width=0 height=0 xinfo_x xinfo_y xinfo_w xinfo_h map_state override_state
+  local frame_left=0 frame_right=0 frame_top=0 frame_bottom=0
+  local window_right window_bottom screen_right_value screen_bottom_value workarea_right_value workarea_bottom_value
+  local expected_wmclass expected_position expected_size actual_matches_position actual_matches_size wmclass_matches_rule
+  local estimated_client_x estimated_client_y estimated_client_width estimated_client_height estimated_client_bottom
+
+  wmline="$(wmctrl_geometry_for_id "$id" || true)"
+  [[ -n "$wmline" ]] && x="$(field_from_wmctrl "$wmline" 3)" && y="$(field_from_wmctrl "$wmline" 4)" && width="$(field_from_wmctrl "$wmline" 5)" && height="$(field_from_wmctrl "$wmline" 6)"
+  [[ -n "$wmline" ]] && title="$(window_title_from_wmctrl "$wmline")" || title="$(xprop_value "$id" WM_NAME | sed -E 's/.*= "?([^"]*)"?/\1/' || true)"
+  wmclass="$(xprop_value "$id" WM_CLASS | sed -E 's/WM_CLASS\(STRING\) = //; s/"//g' || true)"
+  wmname="$(xprop_value "$id" _NET_WM_NAME || true)"
+  pid="$(xprop_value "$id" _NET_WM_PID || true)"
+  wtype="$(xprop_value "$id" _NET_WM_WINDOW_TYPE || true)"
+  state="$(xprop_value "$id" _NET_WM_STATE || true)"
+  extents="$(xprop_value "$id" _NET_FRAME_EXTENTS | sed -E 's/.*= //' || true)"
+  kde_frame_strut="$(xprop_value "$id" _KDE_NET_WM_FRAME_STRUT || true)"
+  gtk_frame_extents="$(xprop_value "$id" _GTK_FRAME_EXTENTS || true)"
+  allowed_actions="$(xprop_value "$id" _NET_WM_ALLOWED_ACTIONS || true)"
+  if [[ "$extents" =~ ^([0-9]+),[[:space:]]*([0-9]+),[[:space:]]*([0-9]+),[[:space:]]*([0-9]+) ]]; then
+    frame_left="${BASH_REMATCH[1]}"
+    frame_right="${BASH_REMATCH[2]}"
+    frame_top="${BASH_REMATCH[3]}"
+    frame_bottom="${BASH_REMATCH[4]}"
+  fi
+  xinfo_x="$(xwininfo_value "$id" "Absolute upper-left X" || true)"
+  xinfo_y="$(xwininfo_value "$id" "Absolute upper-left Y" || true)"
+  xinfo_w="$(xwininfo_value "$id" "Width" || true)"
+  xinfo_h="$(xwininfo_value "$id" "Height" || true)"
+  map_state="$(xwininfo_value "$id" "Map State" || true)"
+  override_state="$(xwininfo_value "$id" "Override Redirect State" || true)"
+  [[ "$x" -eq 0 && "${xinfo_x:-}" =~ ^-?[0-9]+$ ]] && x="$xinfo_x"
+  [[ "$y" -eq 0 && "${xinfo_y:-}" =~ ^-?[0-9]+$ ]] && y="$xinfo_y"
+  [[ "$width" -eq 0 && "${xinfo_w:-}" =~ ^[0-9]+$ ]] && width="$xinfo_w"
+  [[ "$height" -eq 0 && "${xinfo_h:-}" =~ ^[0-9]+$ ]] && height="$xinfo_h"
+
+  window_right=$((x + width))
+  window_bottom=$((y + height))
+  screen_right_value=$((screen_x + screen_width))
+  screen_bottom_value=$((screen_y + screen_height))
+  workarea_right_value=$((workarea_x + workarea_width))
+  workarea_bottom_value=$((workarea_y + workarea_height))
+  estimated_client_x=$((x + frame_left))
+  estimated_client_y=$((y + frame_top))
+  estimated_client_width=$((width - frame_left - frame_right))
+  estimated_client_height=$((height - frame_top - frame_bottom))
+  estimated_client_bottom=$((estimated_client_y + estimated_client_height))
+  expected_wmclass="$(read_config "$RULE_ID" wmclass)"
+  expected_position="$(read_config "$RULE_ID" position)"
+  expected_size="$(read_config "$RULE_ID" size)"
+  [[ "$x,$y" == "$expected_position" ]] && actual_matches_position=true || actual_matches_position=false
+  [[ "$width,$height" == "$expected_size" ]] && actual_matches_size=true || actual_matches_size=false
+  [[ -n "$expected_wmclass" && "$wmclass" == *"$expected_wmclass"* ]] && wmclass_matches_rule=true || wmclass_matches_rule=false
+
+  section "candidate_window $id"
+  kv "window_id" "$id"
+  kv "discovery_source" "wmctrl_xdotool_xprop_xwininfo"
+  kv "title" "$title"
+  kv "WM_CLASS" "$wmclass"
+  kv "_NET_WM_NAME" "$wmname"
+  kv "_NET_WM_PID" "$pid"
+  kv "_NET_WM_WINDOW_TYPE" "$wtype"
+  kv "_NET_WM_STATE" "$state"
+  kv "_NET_WM_ALLOWED_ACTIONS" "$allowed_actions"
+  kv "_NET_FRAME_EXTENTS" "$extents"
+  kv "_KDE_NET_WM_FRAME_STRUT" "$kde_frame_strut"
+  kv "_GTK_FRAME_EXTENTS" "$gtk_frame_extents"
+  kv "wmctrl x" "$x"
+  kv "wmctrl y" "$y"
+  kv "wmctrl width" "$width"
+  kv "wmctrl height" "$height"
+  kv "xwininfo Absolute upper-left X" "${xinfo_x:-unknown}"
+  kv "xwininfo Absolute upper-left Y" "${xinfo_y:-unknown}"
+  kv "xwininfo Width" "${xinfo_w:-unknown}"
+  kv "xwininfo Height" "${xinfo_h:-unknown}"
+  kv "xwininfo Map State" "${map_state:-unknown}"
+  kv "xwininfo Override Redirect State" "${override_state:-unknown}"
+  kv "window_x" "$x"
+  kv "window_y" "$y"
+  kv "window_width" "$width"
+  kv "window_height" "$height"
+  kv "window_right" "$window_right"
+  kv "window_bottom" "$window_bottom"
+  kv "exceeds_screen_left" "$([[ "$x" -lt "$screen_x" ]] && printf true || printf false)"
+  kv "exceeds_screen_top" "$([[ "$y" -lt "$screen_y" ]] && printf true || printf false)"
+  kv "exceeds_screen_right" "$([[ "$screen_right_value" -gt 0 && "$window_right" -gt "$screen_right_value" ]] && printf true || printf false)"
+  kv "exceeds_screen_bottom" "$([[ "$screen_bottom_value" -gt 0 && "$window_bottom" -gt "$screen_bottom_value" ]] && printf true || printf false)"
+  kv "exceeds_workarea_left" "$([[ "$x" -lt "$workarea_x" ]] && printf true || printf false)"
+  kv "exceeds_workarea_top" "$([[ "$y" -lt "$workarea_y" ]] && printf true || printf false)"
+  kv "exceeds_workarea_right" "$([[ "$workarea_right_value" -gt 0 && "$window_right" -gt "$workarea_right_value" ]] && printf true || printf false)"
+  kv "exceeds_workarea_bottom" "$([[ "$workarea_bottom_value" -gt 0 && "$window_bottom" -gt "$workarea_bottom_value" ]] && printf true || printf false)"
+  kv "frame_left" "$frame_left"
+  kv "frame_right" "$frame_right"
+  kv "frame_top" "$frame_top"
+  kv "frame_bottom" "$frame_bottom"
+  kv "estimated_client_x" "$estimated_client_x"
+  kv "estimated_client_y" "$estimated_client_y"
+  kv "estimated_client_width" "$estimated_client_width"
+  kv "estimated_client_height" "$estimated_client_height"
+  kv "estimated_client_bottom" "$estimated_client_bottom"
+  kv "expected_rule_position" "$expected_position"
+  kv "expected_rule_size" "$expected_size"
+  kv "actual_matches_expected_position" "$actual_matches_position"
+  kv "actual_matches_expected_size" "$actual_matches_size"
+  kv "actual_wmclass" "$wmclass"
+  kv "expected_wmclass" "$expected_wmclass"
+  kv "wmclass_matches_rule" "$wmclass_matches_rule"
+  derive_issue "$candidate_count" "$wmclass" "$window_bottom" "$screen_bottom_value" "$workarea_bottom_value" "$width,$height" "$expected_size" "$frame_top" "$y" "$estimated_client_y"
+}
+
+main_report() {
+  local ids id count wm_check wm_name
+  section "A. Environment"
+  kv "timestamp" "$(date '+%Y-%m-%d %H:%M:%S%z')"
+  kv "hostname" "$(hostname 2>/dev/null || printf unknown)"
+  kv "USER" "${USER:-}"
+  kv "PWD" "$PWD"
+  kv "XDG_SESSION_TYPE" "${XDG_SESSION_TYPE:-}"
+  kv "DESKTOP_SESSION" "${DESKTOP_SESSION:-}"
+  kv "KDE_FULL_SESSION" "${KDE_FULL_SESSION:-}"
+  kv "KDE_SESSION_VERSION" "${KDE_SESSION_VERSION:-}"
+  kv "DISPLAY" "${DISPLAY:-}"
+  kv "WAYLAND_DISPLAY" "${WAYLAND_DISPLAY:-}"
+  missing_tool wmctrl
+  missing_tool xdotool
+  missing_tool xprop
+  missing_tool xwininfo
+  missing_tool kscreen-doctor
+  missing_tool xrandr
+  missing_tool xdpyinfo
+  missing_tool qdbus6
+
+  section "Window manager/KWin support"
+  if have_cmd xprop; then
+    wm_check="$(xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | awk '{ print $NF }' || true)"
+    kv "_NET_SUPPORTING_WM_CHECK" "${wm_check:-unknown}"
+    if [[ -n "${wm_check:-}" && "$wm_check" == 0x* ]]; then
+      wm_name="$(xprop -id "$wm_check" _NET_WM_NAME WM_NAME 2>/dev/null || true)"
+      kv "window_manager_name" "$wm_name"
+    else
+      kv "window_manager_name" "unknown"
+    fi
+  else
+    missing_tool xprop
+  fi
+  if have_cmd qdbus6; then
+    qdbus6 org.kde.KWin /KWin supportInformation 2>/dev/null || true
+  elif have_cmd qdbus; then
+    qdbus org.kde.KWin /KWin supportInformation 2>/dev/null || true
+  else
+    missing_tool qdbus6
+  fi
+
+  section "B. Screen/work-area"
+  print_raw_tool_output kscreen-doctor -o
+  print_raw_tool_output xrandr --query
+  print_raw_tool_output wmctrl -d
+  print_raw_tool_output xdpyinfo
+  print_screen_values
+
+  section "C. Waydaw launch config"
+  print_generated_launch_config
+
+  section "D. Wine registry state"
+  print_wine_reg_value 'HKCU\Software\Wine\X11 Driver\Managed' 'HKCU\Software\Wine\X11 Driver' Managed
+  print_wine_reg_value 'HKCU\Software\Wine\X11 Driver\Decorated' 'HKCU\Software\Wine\X11 Driver' Decorated
+  print_wine_reg_value 'HKCU\Software\Wine\Explorer\Desktop' 'HKCU\Software\Wine\Explorer' Desktop
+  print_wine_reg_value 'HKCU\Software\Wine\Explorer\Desktops\Default' 'HKCU\Software\Wine\Explorer\Desktops' Default
+  if have_cmd wine; then
+    env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" wine reg query 'HKCU\Software\Wine\AppDefaults\Ableton Live 12 Suite.exe' /s 2>/dev/null || kv "AppDefaults Ableton Live 12 Suite.exe" "unset"
+    print_wine_reg_value 'DllOverrides dxgi' 'HKCU\Software\Wine\DllOverrides' dxgi
+    print_wine_reg_value 'DllOverrides d3d11' 'HKCU\Software\Wine\DllOverrides' d3d11
+    print_wine_reg_value 'DllOverrides d3d10' 'HKCU\Software\Wine\DllOverrides' d3d10
+    print_wine_reg_value 'DllOverrides d3d9' 'HKCU\Software\Wine\DllOverrides' d3d9
+  else
+    missing_tool wine
+  fi
+
+  section "E. KWin rules"
+  print_kwin_rules
+
+  section "F. Live Ableton/XWayland window discovery"
+  if have_cmd wmctrl; then wmctrl -lxG 2>/dev/null || true; else missing_tool wmctrl; fi
+  if have_cmd xdotool; then
+    printf 'xdotool search --name Ableton:\n'; xdotool search --name Ableton 2>/dev/null || true
+    printf 'xdotool search --class Ableton:\n'; xdotool search --class Ableton 2>/dev/null || true
+    printf 'xdotool search --name "Live 12":\n'; xdotool search --name "Live 12" 2>/dev/null || true
+  else
+    missing_tool xdotool
+  fi
+
+  section "G. Derived checks"
+  ids="$(candidate_ids 2>/dev/null || true)"
+  count="$(printf '%s\n' "$ids" | awk 'NF { c++ } END { print c+0 }')"
+  kv "candidate_count" "$count"
+  if [[ "$count" -eq 0 ]]; then
+    derive_issue 0 "" 0 "$((screen_y + screen_height))" "$((workarea_y + workarea_height))" "" "$(read_config "$RULE_ID" size)" 0 0 0
+  else
+    while IFS= read -r id; do
+      [[ -n "$id" ]] && print_window_candidate "$id" "$count"
+    done <<<"$ids"
+  fi
+}
+
+main_report | tee -a "$LOG_FILE"

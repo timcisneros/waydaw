@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HELPER="$ROOT_DIR/tools/ableton-x11-cursor-define"
+
+MODE="probe"
+INTERVAL="0.5"
+LOG_FILE=""
+FORCE_VISIBLE=0
+
+say() { printf '%s\n' "$*"; }
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+ableton-cursor-guard - X11/XWayland Ableton cursor/input probe
+
+USAGE:
+  bin/ableton-cursor-guard --probe-only
+  bin/ableton-cursor-guard --dry-run
+  bin/ableton-cursor-guard --watch [--interval <seconds>] [--log <path>]
+  bin/ableton-cursor-guard --watch --force-visible [--log <path>]
+  bin/ableton-cursor-guard --help
+
+OUTPUT FIELDS:
+  cursor_guard_active=
+  ableton_window_id=
+  pointer_inside_ableton=
+  cursor_visibility_action=
+  errors=
+
+SAFETY:
+  V1 targets X11/XWayland only. It does not move/resize windows, synthesize
+  clicks, change KWin geometry, edit launchers, touch the Wine prefix, or change
+  the global desktop cursor theme.
+
+  --probe-only and --dry-run inspect only.
+  --force-visible requires the local helper tools/ableton-x11-cursor-define and
+  applies XDefineCursor only to the detected Ableton top-level window. On exit it
+  calls XUndefineCursor for that same window.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --probe-only|--dry-run) MODE="probe"; shift ;;
+    --watch) MODE="watch"; shift ;;
+    --force-visible) FORCE_VISIBLE=1; shift ;;
+    --interval) INTERVAL="${2:-}"; shift 2 ;;
+    --log) LOG_FILE="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1 (see --help)" ;;
+  esac
+done
+
+emit() {
+  if [[ -n "$LOG_FILE" ]]; then
+    printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "$LOG_FILE"
+  else
+    say "$*"
+  fi
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || return 1
+}
+
+session_ok() {
+  [[ -n "${DISPLAY:-}" ]] || return 1
+  return 0
+}
+
+find_ableton_window() {
+  wmctrl -lxG 2>/dev/null \
+    | awk 'BEGIN{IGNORECASE=1} /ableton live 12 suite/ && $0 !~ /xwaylandvideobridge/ && $6 > 500 {print $1; exit}'
+}
+
+window_geom() {
+  local wid="$1"
+  xwininfo -id "$wid" 2>/dev/null | awk '
+    /Absolute upper-left X:/ {x=$NF}
+    /Absolute upper-left Y:/ {y=$NF}
+    /Width:/ {w=$NF}
+    /Height:/ {h=$NF}
+    END {
+      if (x != "" && y != "" && w != "" && h != "") printf "%s %s %s %s\n", x, y, w, h
+    }'
+}
+
+pointer_xy() {
+  xdotool getmouselocation --shell 2>/dev/null | awk -F= '
+    $1=="X"{x=$2}
+    $1=="Y"{y=$2}
+    END {if (x != "" && y != "") printf "%s %s\n", x, y}'
+}
+
+inside_window() {
+  local wid="$1" geom xy x y w h px py
+  geom="$(window_geom "$wid")"
+  xy="$(pointer_xy)"
+  [[ -n "$geom" && -n "$xy" ]] || { say "unknown"; return 0; }
+  read -r x y w h <<<"$geom"
+  read -r px py <<<"$xy"
+  if (( px >= x && px < x + w && py >= y && py < y + h )); then
+    say "yes"
+  else
+    say "no"
+  fi
+}
+
+errors_for_probe() {
+  local errors=()
+  session_ok || errors+=("no_DISPLAY")
+  need_cmd wmctrl || errors+=("missing_wmctrl")
+  need_cmd xwininfo || errors+=("missing_xwininfo")
+  need_cmd xdotool || errors+=("missing_xdotool")
+  if [[ "$FORCE_VISIBLE" == 1 && ! -x "$HELPER" ]]; then
+    errors+=("missing_cursor_helper_build_with_tools/build-ableton-x11-cursor-define")
+  fi
+  if ((${#errors[@]} == 0)); then
+    say "none"
+  else
+    local IFS=,
+    say "${errors[*]}"
+  fi
+}
+
+force_cursor() {
+  local wid="$1"
+  [[ "$FORCE_VISIBLE" == 1 ]] || { say "not_requested"; return 0; }
+  [[ -x "$HELPER" ]] || { say "helper_missing_not_forced"; return 0; }
+  "$HELPER" define "$wid" left_ptr >/dev/null 2>&1 && say "defined_left_ptr_on_ableton_window" || say "define_failed"
+}
+
+restore_cursor() {
+  local wid="${1:-}"
+  [[ -n "$wid" && "$FORCE_VISIBLE" == 1 && -x "$HELPER" ]] || return 0
+  "$HELPER" undefine "$wid" >/dev/null 2>&1 || true
+}
+
+emit_probe_once() {
+  local active="$1" wid inside action errors
+  errors="$(errors_for_probe)"
+  wid="$(find_ableton_window)"
+  [[ -n "$wid" ]] || wid="not_found"
+  if [[ "$wid" != "not_found" ]]; then
+    inside="$(inside_window "$wid")"
+    action="$(force_cursor "$wid")"
+  else
+    inside="unknown"
+    action="none_no_ableton_window"
+  fi
+  emit "cursor_guard_active=$active ableton_window_id=$wid pointer_inside_ableton=$inside cursor_visibility_action=$action errors=$errors"
+}
+
+if [[ "$MODE" == "probe" ]]; then
+  emit_probe_once "no"
+  exit 0
+fi
+
+last_forced_window=""
+cleanup() {
+  restore_cursor "$last_forced_window"
+}
+trap cleanup EXIT INT TERM
+
+while :; do
+  wid="$(find_ableton_window)"
+  if [[ -n "${wid:-}" && "$FORCE_VISIBLE" == 1 ]]; then
+    last_forced_window="$wid"
+  fi
+  emit_probe_once "yes"
+  sleep "$INTERVAL"
+done

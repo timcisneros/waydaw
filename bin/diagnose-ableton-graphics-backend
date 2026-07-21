@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# diagnose-ableton-graphics-backend
+#
+# Read-only. Determines what graphics backend Ableton is ACTUALLY using vs what
+# Waydaw requested. Motivated by the proven contradiction: WAYDAW_ABLETON_GRAPHICS
+# =wined3d (WINEDLLOVERRIDES=dxgi,d3d11=b) is requested, yet logs show DXVK active
+# (DXVK 2.7.1 / VK_SUBOPTIMAL_KHR / "recreating swapchain" / Presenter). This script
+# inspects the prefix d3d11/dxgi DLLs and registry overrides to explain why.
+#
+# It NEVER modifies anything (no DLL move/delete, no reg writes).
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+ABLETON_LOG="$LOG_DIR/ableton.log"
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+kv() { printf '%s=%s\n' "$1" "${2:-unknown}"; }
+section() { printf '\n[%s]\n' "$1"; }
+
+requested="${WAYDAW_ABLETON_GRAPHICS:-wined3d}"
+case "$requested" in
+  wined3d) effective_overrides="dxgi,d3d11=b" ;;
+  dxvk)    effective_overrides="${WINEDLLOVERRIDES:-<dxvk: native dlls, no =b override>}" ;;
+  clean-wined3d-test) effective_overrides="dxgi,d3d11=b (+DXVK dlls moved aside)" ;;
+  *)       effective_overrides="<invalid WAYDAW_ABLETON_GRAPHICS=$requested>" ;;
+esac
+
+section "requested_backend"
+kv "WAYDAW_ABLETON_GRAPHICS_requested" "$requested"
+kv "computed_WINEDLLOVERRIDES" "$effective_overrides"
+kv "process_env_WINEDLLOVERRIDES" "${WINEDLLOVERRIDES:-<unset in this shell>}"
+kv "WINEPREFIX" "$WINEPREFIX"
+
+# --- Registry DllOverrides (authoritative for what Wine loads at runtime) ---
+section "registry_dll_overrides"
+reg_override() {
+  local name="$1" out
+  if have_cmd wine; then
+    out="$(env -u WAYLAND_DISPLAY WINEPREFIX="$WINEPREFIX" wine reg query 'HKCU\Software\Wine\DllOverrides' /v "$name" 2>/dev/null | awk -v n="$name" '$1==n{print $NF}' || true)"
+    kv "HKCU_DllOverrides_$name" "${out:-<unset>}"
+  else
+    kv "HKCU_DllOverrides_$name" "<wine not found>"
+  fi
+}
+reg_override dxgi
+reg_override d3d11
+reg_override d3d10core
+reg_override d3d9
+
+# --- Inspect the on-disk DLLs in the prefix ---
+section "prefix_dll_inspection"
+classify_dll() {
+  local path="$1" label="$2"
+  if [[ ! -e "$path" ]]; then
+    kv "${label}_present" "false"
+    return
+  fi
+  kv "${label}_present" "true"
+  kv "${label}_path" "$path"
+  if [[ -L "$path" ]]; then
+    kv "${label}_symlink_target" "$(readlink -f "$path" 2>/dev/null || readlink "$path")"
+  else
+    kv "${label}_symlink" "no"
+  fi
+  have_cmd file && kv "${label}_file_type" "$(file -b "$path" 2>/dev/null)"
+  have_cmd stat && kv "${label}_size_bytes" "$(stat -c '%s' "$path" 2>/dev/null)"
+  have_cmd sha256sum && kv "${label}_sha256" "$(sha256sum "$path" 2>/dev/null | awk '{print $1}')"
+
+  # Deterministic backend signature via strings markers (read-only).
+  local dxvk_hit="" wine_hit="" ver=""
+  if have_cmd strings; then
+    dxvk_hit="$(strings -n 4 "$path" 2>/dev/null | grep -m1 -iE 'dxvk' || true)"
+    ver="$(strings -n 4 "$path" 2>/dev/null | grep -m1 -oE 'DXVK[: ]*v?[0-9]+\.[0-9]+(\.[0-9]+)?' || true)"
+    wine_hit="$(strings -n 4 "$path" 2>/dev/null | grep -m1 -iE 'wine builtin|wined3d|The Wine Project' || true)"
+  fi
+  if [[ -n "$dxvk_hit" ]]; then
+    kv "${label}_backend_signature" "DXVK${ver:+ ($ver)}"
+  elif [[ -n "$wine_hit" ]]; then
+    kv "${label}_backend_signature" "wine_builtin ($wine_hit)"
+  else
+    kv "${label}_backend_signature" "indeterminate"
+  fi
+}
+
+declare -A sigs
+inspect_set() {
+  local arch="$1" base="$2" f
+  for f in d3d11 dxgi; do
+    classify_dll "$base/$f.dll" "${arch}_${f}"
+  done
+}
+inspect_set "system32" "$WINEPREFIX/drive_c/windows/system32"
+inspect_set "syswow64" "$WINEPREFIX/drive_c/windows/syswow64"
+
+# --- Current-run log counts (segment at most recent launch marker; ableton.log
+#     is append-only across runs so whole-file counts are contaminated) ---
+section "recent_log_counts_this_run"
+if [[ -f "$ABLETON_LOG" ]]; then
+  last_launch="$(grep -n 'effective environment before Ableton launch' "$ABLETON_LOG" 2>/dev/null | tail -1 | cut -d: -f1 || true)"
+  if [[ -n "${last_launch:-}" ]]; then
+    tmp="$(mktemp)"; tail -n +"$last_launch" "$ABLETON_LOG" > "$tmp"
+    kv "log_segment" "from_line_${last_launch}_to_end (this run)"
+    kv "DXVK_lines" "$(grep -c 'DXVK' "$tmp" 2>/dev/null || echo 0)"
+    kv "DXVK_version_lines" "$(grep -c 'DXVK: 2' "$tmp" 2>/dev/null || echo 0)"
+    kv "VK_SUBOPTIMAL_KHR_count" "$(grep -c 'VK_SUBOPTIMAL_KHR' "$tmp" 2>/dev/null || echo 0)"
+    kv "recreating_swapchain_count" "$(grep -c 'recreating swapchain' "$tmp" 2>/dev/null || echo 0)"
+    kv "Presenter_count" "$(grep -c 'Presenter' "$tmp" 2>/dev/null || echo 0)"
+    kv "D3D11_lines" "$(grep -ci 'd3d11' "$tmp" 2>/dev/null || echo 0)"
+    rm -f "$tmp"
+  else
+    kv "log_segment" "no_launch_marker_found"
+  fi
+else
+  kv "ableton_log" "missing"
+fi
+
+# --- Derive effective backend / DXVK_active ---
+section "derived"
+sys_d3d11_sig="$(strings -n 4 "$WINEPREFIX/drive_c/windows/system32/d3d11.dll" 2>/dev/null | grep -m1 -iE 'dxvk' || true)"
+sys_dxgi_sig="$(strings -n 4 "$WINEPREFIX/drive_c/windows/system32/dxgi.dll" 2>/dev/null | grep -m1 -iE 'dxvk' || true)"
+dxvk_dlls_present=false
+[[ -n "$sys_d3d11_sig" || -n "$sys_dxgi_sig" ]] && dxvk_dlls_present=true
+
+vk_run=0
+if [[ -f "$ABLETON_LOG" ]]; then
+  ll="$(grep -n 'effective environment before Ableton launch' "$ABLETON_LOG" 2>/dev/null | tail -1 | cut -d: -f1 || true)"
+  [[ -n "${ll:-}" ]] && vk_run="$(tail -n +"$ll" "$ABLETON_LOG" | grep -c 'recreating swapchain' || echo 0)"
+fi
+
+dxvk_active=false
+[[ "$vk_run" -gt 0 ]] && dxvk_active=true
+
+kv "prefix_has_native_dxvk_dlls" "$dxvk_dlls_present"
+kv "DXVK_active_this_run" "$dxvk_active"
+kv "backend_requested" "$requested"
+if [[ "$dxvk_active" == true ]]; then
+  kv "backend_effective" "dxvk"
+elif [[ "$requested" == "wined3d" ]]; then
+  kv "backend_effective" "wined3d_builtin_likely"
+else
+  kv "backend_effective" "unknown"
+fi
+
+if [[ "$requested" == "wined3d" && "$dxvk_active" == true ]]; then
+  kv "derived_issue" "wined3d_requested_but_dxvk_active"
+  if [[ "$dxvk_dlls_present" == true ]]; then
+    kv "rule_fired" "system32 d3d11/dxgi are DXVK binaries; native DXVK overrides the dxgi,d3d11=b builtin request"
+    kv "evidence" "system32_d3d11_dxvk=$([[ -n "$sys_d3d11_sig" ]] && echo yes || echo no) system32_dxgi_dxvk=$([[ -n "$sys_dxgi_sig" ]] && echo yes || echo no) recreating_swapchain_this_run=$vk_run"
+    kv "recommended_next_fix" "run a clean-wined3d test that moves the DXVK dlls aside (with backup+restore) or use a copied test prefix; do NOT edit the working prefix in place"
+  else
+    kv "rule_fired" "DXVK active but system32 dlls not obviously DXVK; check syswow64 / registry overrides / wine build"
+    kv "evidence" "recreating_swapchain_this_run=$vk_run dxvk_dlls_present=$dxvk_dlls_present"
+    kv "recommended_next_fix" "inspect syswow64 dlls and HKCU DllOverrides; confirm which d3d11 Ableton (64-bit) loads"
+  fi
+elif [[ "$requested" == "wined3d" && "$dxvk_active" == false ]]; then
+  kv "derived_issue" "wined3d_effective"
+  kv "rule_fired" "no recreating-swapchain lines this run"
+  kv "evidence" "recreating_swapchain_this_run=$vk_run"
+  kv "recommended_next_fix" "none_for_graphics_backend"
+else
+  kv "derived_issue" "dxvk_mode_or_unclassified"
+  kv "rule_fired" "requested=$requested dxvk_active=$dxvk_active"
+  kv "evidence" "recreating_swapchain_this_run=$vk_run"
+  kv "recommended_next_fix" "compare against wined3d/clean-wined3d test"
+fi

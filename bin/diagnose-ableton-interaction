@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# diagnose-ableton-interaction
+#
+# Deterministic check of whether the live Ableton main window can actually be
+# activated/focused, or whether something (a modal child, a helper/dialog above
+# it in the stacking order, or override-redirect) blocks interaction.
+#
+# This is a separate axis from window bounds. It is read-mostly; the only side
+# effect is one `wmctrl -ia` activation request on the main window (that IS the
+# test). No geometry is changed. No forced KWin rule, no virtual desktop.
+#
+# Emits deterministic:
+#   interaction_state=active_but_input_not_confirmed|blocked_by_child_or_modal|cannot_activate|unknown
+#   interaction_rule_fired=...
+#   interaction_evidence=...
+#
+# Honesty contract: we never synthesize keyboard/mouse input. Therefore the best
+# positive result is `active_but_input_not_confirmed` (KWin focused the window)
+# never a bare `activates` claim of app interactivity. `activates` is reserved
+# as documentation of the WM-level fact, surfaced via `wm_activation=success`.
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+RULE_WMCLASS="${WAYDAW_ABLETON_WMCLASS:-ableton live 12 suite.exe}"
+SETTLE_SECONDS="${WAYDAW_INTERACTION_SETTLE:-0.6}"
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+kv() { printf '%s=%s\n' "$1" "${2:-unknown}"; }
+
+# Convert 0x-hex or decimal token to a canonical decimal string ("" if junk).
+to_dec() {
+  local v="${1:-}"
+  [[ -z "$v" ]] && { printf ''; return; }
+  if [[ "$v" =~ ^0[xX][0-9a-fA-F]+$ ]]; then printf '%d' "$((v))"
+  elif [[ "$v" =~ ^[0-9]+$ ]]; then printf '%d' "$v"
+  else printf ''
+  fi
+}
+
+window_type() { xprop -id "$1" _NET_WM_WINDOW_TYPE 2>/dev/null | sed -E 's/.*= //; s/\r$//' || true; }
+window_state() { xprop -id "$1" _NET_WM_STATE 2>/dev/null | sed -E 's/.*= //; s/\r$//' || true; }
+allowed_actions() { xprop -id "$1" _NET_WM_ALLOWED_ACTIONS 2>/dev/null | sed -E 's/.*= //; s/\r$//' || true; }
+wm_class() { xprop -id "$1" WM_CLASS 2>/dev/null | sed -E 's/WM_CLASS\(STRING\) = //; s/"//g; s/\r$//' || true; }
+wm_name() { xprop -id "$1" _NET_WM_NAME 2>/dev/null | sed -E 's/.*= //; s/"//g; s/\r$//' || true; }
+xwi_field() { xwininfo -id "$1" 2>/dev/null | awk -F: -v p="$2" '$1 ~ p { sub(/^[[:space:]]+/,"",$2); print $2; exit }'; }
+map_state() { xwi_field "$1" "Map State"; }
+override_state() { xwi_field "$1" "Override Redirect State"; }
+height_of() { local h; h="$(xwi_field "$1" "Height")"; [[ "$h" =~ ^[0-9]+$ ]] && printf '%s' "$h" || printf '0'; }
+
+active_window_dec() {
+  local raw; raw="$(xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | awk '{print $NF}')"
+  to_dec "$raw"
+}
+
+# bottom-to-top stacking as decimal ids (one per line)
+stacking_dec() {
+  xprop -root _NET_CLIENT_LIST_STACKING 2>/dev/null |
+    sed -E 's/.*# //' | tr ',' '\n' |
+    while read -r tok; do
+      tok="${tok//[[:space:]]/}"
+      [[ -z "$tok" ]] && continue
+      d="$(to_dec "$tok")"
+      [[ -n "$d" ]] && printf '%s\n' "$d"
+    done
+}
+
+transient_for_dec() {
+  local raw; raw="$(xprop -id "$1" WM_TRANSIENT_FOR 2>/dev/null | awk '{print $NF}')"
+  to_dec "$raw"
+}
+
+# Main Ableton window: class match + NORMAL + IsViewable, tallest.
+find_main_window() {
+  local best_id="" best_h=-1 id type mstate h
+  while read -r id; do
+    [[ -z "$id" ]] && continue
+    type="$(window_type "$id")"
+    [[ "$type" == *"_NET_WM_WINDOW_TYPE_NORMAL"* ]] || continue
+    mstate="$(map_state "$id")"
+    [[ "$mstate" == "IsViewable" ]] || continue
+    h="$(height_of "$id")"
+    if [[ "$h" -gt "$best_h" ]]; then best_h="$h"; best_id="$id"; fi
+  done < <(wmctrl -lxG 2>/dev/null | grep -iF "$RULE_WMCLASS" | awk '{print $1}')
+  printf '%s' "$best_id"
+}
+
+for t in wmctrl xprop xwininfo; do
+  have_cmd "$t" || { kv "interaction_state" "unknown"; kv "interaction_rule_fired" "required tool missing"; kv "interaction_evidence" "missing_tool=$t"; exit 1; }
+done
+
+win_id="$(find_main_window)"
+if [[ -z "$win_id" ]]; then
+  kv "interaction_state" "unknown"
+  kv "interaction_rule_fired" "no NORMAL IsViewable window matched wmclass"
+  kv "interaction_evidence" "wmclass=$RULE_WMCLASS"
+  exit 1
+fi
+win_dec="$(to_dec "$win_id")"
+
+kv "main_window_id" "$win_id"
+kv "main_window_wmclass" "$(wm_class "$win_id")"
+kv "main_window_name" "$(wm_name "$win_id")"
+kv "main_window_type" "$(window_type "$win_id")"
+kv "main_window_state" "$(window_state "$win_id")"
+kv "main_window_allowed_actions" "$(allowed_actions "$win_id")"
+kv "main_window_map_state" "$(map_state "$win_id")"
+kv "main_window_override_redirect" "$(override_state "$win_id")"
+
+# --- BEFORE activation ---
+active_before="$(active_window_dec)"
+focus_before=""
+if have_cmd xdotool; then focus_before="$(xdotool getwindowfocus 2>/dev/null || true)"; fi
+kv "active_window_before_dec" "${active_before:-none}"
+kv "focus_window_before_dec" "${focus_before:-unavailable}"
+kv "main_window_dec" "$win_dec"
+
+# Stacking + helper/dialog-above detection (before activation).
+mapfile -t stack < <(stacking_dec)
+main_idx=-1
+for i in "${!stack[@]}"; do [[ "${stack[$i]}" == "$win_dec" ]] && main_idx="$i"; done
+
+above_ableton_windows=""
+above_modal=""
+if [[ "$main_idx" -ge 0 ]]; then
+  for (( j=main_idx+1; j<${#stack[@]}; j++ )); do
+    sd="${stack[$j]}"
+    # find the matching wmctrl/hex id for property reads
+    hid="$(printf '0x%x' "$sd")"
+    cls="$(wm_class "$hid")"
+    typ="$(window_type "$hid")"
+    st="$(window_state "$hid")"
+    ms="$(map_state "$hid")"
+    tf="$(transient_for_dec "$hid")"
+    shopt -s nocasematch
+    if [[ "$cls" == *"$RULE_WMCLASS"* && "$ms" == "IsViewable" ]]; then
+      above_ableton_windows+="${hid}(type=${typ##*_NET_WM_WINDOW_TYPE_};state=${st};transient_for=${tf:-none}) "
+      # A DIALOG/MODAL, or a window transient-for the main window, blocks it.
+      if [[ "$typ" == *DIALOG* || "$st" == *MODAL* || "$tf" == "$win_dec" ]]; then
+        above_modal+="${hid} "
+      fi
+    fi
+    shopt -u nocasematch
+  done
+fi
+kv "stacking_main_index" "$main_idx"
+kv "stacking_total" "${#stack[@]}"
+kv "ableton_windows_above_main" "${above_ableton_windows:-none}"
+kv "modal_or_dialog_above_main" "${above_modal:-none}"
+
+# --- ACTIVATE ---
+kv "activation_command" "wmctrl -ia $win_id"
+wmctrl -ia "$win_id" 2>/dev/null || true
+sleep "$SETTLE_SECONDS"
+
+# --- AFTER activation ---
+active_after="$(active_window_dec)"
+focus_after=""
+if have_cmd xdotool; then focus_after="$(xdotool getwindowfocus 2>/dev/null || true)"; fi
+kv "active_window_after_dec" "${active_after:-none}"
+kv "focus_window_after_dec" "${focus_after:-unavailable}"
+kv "main_window_state_after" "$(window_state "$win_id")"
+
+# --- DERIVE interaction_state ---
+override="$(override_state "$win_id")"
+active_is_main=false
+[[ -n "$active_after" && "$active_after" == "$win_dec" ]] && active_is_main=true
+focus_is_main=false
+[[ -n "$focus_after" && "$focus_after" == "$win_dec" ]] && focus_is_main=true
+
+active_after_hex=""
+[[ -n "$active_after" ]] && active_after_hex="$(printf '0x%x' "$active_after")"
+
+# A higher-stacked transient/dialog/modal child takes precedence: even if KWin
+# briefly focuses main, such a child can intercept input, so report it as blocked.
+if [[ -n "$above_modal" ]]; then
+  kv "wm_activation" "intercepted_by_child"
+  kv "input_confirmation" "not_attempted_no_synthetic_input_sent"
+  kv "interaction_state" "blocked_by_child_or_modal"
+  kv "interaction_rule_fired" "a class-matching DIALOG/MODAL/transient-for-main window is stacked above main and may intercept input"
+  kv "interaction_evidence" "modal_or_dialog_above_main=$above_modal active_after=${active_after_hex:-none} main=$win_id"
+elif [[ -n "$active_after" && -n "$above_ableton_windows" && "$above_ableton_windows" == *"$active_after_hex"* ]]; then
+  kv "wm_activation" "intercepted_by_child"
+  kv "input_confirmation" "not_attempted_no_synthetic_input_sent"
+  kv "interaction_state" "blocked_by_child_or_modal"
+  kv "interaction_rule_fired" "active window after activation is an Ableton child window stacked above main"
+  kv "interaction_evidence" "active_after=$active_after_hex above=$above_ableton_windows main=$win_id"
+elif [[ "$active_is_main" == true || "$focus_is_main" == true ]]; then
+  # KWin activation/focus succeeded. We deliberately do NOT synthesize input, so
+  # we cannot prove the app actually receives clicks/keyboard. Stay honest.
+  kv "wm_activation" "success"
+  kv "input_confirmation" "not_attempted_no_synthetic_input_sent"
+  kv "interaction_state" "active_but_input_not_confirmed"
+  kv "interaction_rule_fired" "wmctrl -ia made _NET_ACTIVE_WINDOW/focus == main; app-level input delivery was NOT tested (no synthetic input) so interactivity is unproven"
+  kv "interaction_evidence" "active_after=${active_after_hex:-none} focus_after=${focus_after:-NA} main=$win_dec active_is_main=$active_is_main focus_is_main=$focus_is_main no_child_above=true"
+elif [[ "$override" == [Yy]* ]]; then
+  kv "wm_activation" "failed"
+  kv "input_confirmation" "not_attempted_no_synthetic_input_sent"
+  kv "interaction_state" "cannot_activate"
+  kv "interaction_rule_fired" "main window is override-redirect; WM cannot manage/activate it"
+  kv "interaction_evidence" "override_redirect=$override active_after=${active_after_hex:-none} main=$win_id"
+else
+  kv "wm_activation" "failed"
+  kv "input_confirmation" "not_attempted_no_synthetic_input_sent"
+  kv "interaction_state" "cannot_activate"
+  kv "interaction_rule_fired" "after wmctrl -ia, neither _NET_ACTIVE_WINDOW nor focus became main, and no child window explains it"
+  kv "interaction_evidence" "active_after=${active_after_hex:-none} focus_after=${focus_after:-NA} main=$win_id ableton_above=${above_ableton_windows:-none}"
+fi

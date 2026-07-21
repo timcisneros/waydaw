@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+GEOMETRY_LOG="$LOG_DIR/ableton-window-geometry.log"
+WATCH_LOG="$LOG_DIR/ableton-window-geometry-watch.log"
+mkdir -p "$LOG_DIR"
+
+kv() { printf '%s=%s\n' "$1" "${2:-unknown}"; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+last_value() {
+  local key="$1" file="$2"
+  local line value=""
+  [[ -f "$file" ]] || return 1
+  while IFS= read -r line; do
+    if [[ "$line" == "$key="* ]]; then
+      value="${line#"$key="}"
+    fi
+  done <"$file"
+  [[ -n "$value" ]] || return 1
+  printf '%s\n' "$value"
+}
+
+derive_recommendation() {
+  local kwin_state="$1" live_state="$2" resize_state="$3" graphics_state="$4" repaint_state="$5" performance_state="$6"
+  if [[ "$live_state" == "no_window" ]]; then
+    kv "recommended_next_fix" "launch_ableton_then_rerun_geometry_logger"
+    kv "recommended_next_fix_rule_fired" "live_geometry_state == no_window"
+    kv "recommended_next_fix_evidence" "live_geometry_state=$live_state"
+  elif [[ "$kwin_state" == "missing" ]]; then
+    kv "recommended_next_fix" "install_or_reinstall_ableton_kwin_rule"
+    kv "recommended_next_fix_rule_fired" "kwin_rule_state == missing"
+    kv "recommended_next_fix_evidence" "kwin_rule_state=$kwin_state"
+  elif [[ "$kwin_state" == "not_matching" ]]; then
+    kv "recommended_next_fix" "update_kwin_rule_wmclass_to_actual_window_class"
+    kv "recommended_next_fix_rule_fired" "kwin_rule_state == not_matching"
+    kv "recommended_next_fix_evidence" "kwin_rule_state=$kwin_state"
+  elif [[ "$kwin_state" == "ignored" ]]; then
+    kv "recommended_next_fix" "change_kwin_rule_from_apply_initially_to_force_or_adjust_match"
+    kv "recommended_next_fix_rule_fired" "kwin_rule_state == ignored"
+    kv "recommended_next_fix_evidence" "kwin_rule_state=$kwin_state"
+  elif [[ "$live_state" == "exceeds_workarea" ]]; then
+    kv "recommended_next_fix" "reduce_forced_ableton_window_size_or_force_position_inside_workarea"
+    kv "recommended_next_fix_rule_fired" "live_geometry_state == exceeds_workarea"
+    kv "recommended_next_fix_evidence" "live_geometry_state=$live_state"
+  elif [[ "$(last_value derived_issue "$GEOMETRY_LOG" 2>/dev/null || true)" == "frame_extents_cover_client_top" ]]; then
+    kv "recommended_next_fix" "use_kwin_no_titlebar_rule_with_decorated_y_or_adjust_window_y_by_frame_top"
+    kv "recommended_next_fix_rule_fired" "derived_issue == frame_extents_cover_client_top"
+    kv "recommended_next_fix_evidence" "derived_issue=frame_extents_cover_client_top"
+  elif [[ "$resize_state" == "resizing" && "$graphics_state" == "dxvk_resize_loop_correlated" ]]; then
+    kv "recommended_next_fix" "investigate_dxvk_swapchain_path_or_use_different_wine_build_without_dxvk_backed_d3d11"
+    kv "recommended_next_fix_rule_fired" "resize_state == resizing and graphics_state == dxvk_resize_loop_correlated"
+    kv "recommended_next_fix_evidence" "resize_state=$resize_state graphics_state=$graphics_state"
+  elif [[ "$performance_state" == "forced_geometry_rule_correlated" ]]; then
+    kv "recommended_next_fix" "disable_or_weaken_forced_kwin_geometry_rule_for_controlled_test"
+    kv "recommended_next_fix_rule_fired" "performance_regression_state == forced_geometry_rule_correlated"
+    kv "recommended_next_fix_evidence" "performance_regression_state=$performance_state"
+  elif [[ "$repaint_state" == "decoration_state_changed_during_watch" || "$repaint_state" == "frame_extents_appeared_late" ]]; then
+    kv "recommended_next_fix" "collect_control_log_with_forced_geometry_disabled_keep_xwayland_decorated_y_no_virtual_desktop"
+    kv "recommended_next_fix_rule_fired" "repaint_or_decoration_state indicates decoration repaint transition"
+    kv "recommended_next_fix_evidence" "repaint_or_decoration_state=$repaint_state"
+  else
+    kv "recommended_next_fix" "no_windowing_fix_from_current_logs_collect_longer_watch_log"
+    kv "recommended_next_fix_rule_fired" "no deterministic failure state selected a fix"
+    kv "recommended_next_fix_evidence" "kwin_rule_state=$kwin_state live_geometry_state=$live_state resize_state=$resize_state graphics_state=$graphics_state repaint_or_decoration_state=$repaint_state performance_regression_state=$performance_state"
+  fi
+}
+
+printf '[launch_config]\n'
+kv "launch_config_collection" "computed_non_mutating"
+if [[ -x "$ROOT_DIR/bin/ableton" ]]; then
+  kv "bin_ableton_print_launch_config" "skipped_to_preserve_non_mutating_diagnose_contract"
+  kv "bin_ableton_print_launch_config_side_effect" "launcher writes Wine registry values before printing"
+fi
+if [[ "${WAYDAW_ABLETON_GRAPHICS:-wined3d}" == "wined3d" ]]; then
+  kv "computed_WINEDLLOVERRIDES" "dxgi,d3d11=b"
+else
+  kv "computed_WINEDLLOVERRIDES" "${WINEDLLOVERRIDES:-}"
+fi
+kv "WINEPREFIX" "$WINEPREFIX"
+kv "WAYDAW_ABLETON_GRAPHICS" "${WAYDAW_ABLETON_GRAPHICS:-wined3d}"
+kv "WAYDAW_ABLETON_KWIN_POSITION" "${WAYDAW_ABLETON_KWIN_POSITION:-40,40}"
+kv "WAYDAW_ABLETON_KWIN_SIZE" "${WAYDAW_ABLETON_KWIN_SIZE:-1600,900}"
+
+printf '\n[ableton_windowing_status]\n'
+if [[ -x "$ROOT_DIR/bin/ableton-windowing-status" ]]; then
+  "$ROOT_DIR/bin/ableton-windowing-status" 2>&1 || true
+else
+  kv "ableton-windowing-status" "missing"
+fi
+
+printf '\n[geometry_report]\n'
+"$ROOT_DIR/bin/log-ableton-window-geometry" 2>&1 || true
+
+printf '\n[recent_ableton_log_tail]\n'
+tail -n 120 "$LOG_DIR/ableton.log" 2>/dev/null || true
+printf '\n[recent_launch_geometry_log_tail]\n'
+tail -n 120 "$LOG_DIR/ableton-launch-geometry.log" 2>/dev/null || true
+printf '\n[recent_graphics_lines]\n'
+grep -hE 'DXVK|VK_SUBOPTIMAL_KHR|Presenter|swapchain|D3D11|Ableton wine exit code' "$LOG_DIR/ableton.log" "$LOG_DIR/ableton-launch-geometry.log" 2>/dev/null | tail -n 120 || true
+
+derived_issue="$(last_value derived_issue "$GEOMETRY_LOG" 2>/dev/null || printf no_ableton_window_found)"
+rule_fired="$(last_value rule_fired "$GEOMETRY_LOG" 2>/dev/null || printf 'no diagnostic rule fired')"
+evidence="$(last_value evidence "$GEOMETRY_LOG" 2>/dev/null || printf 'no diagnostic evidence')"
+net_wm_state="$(last_value '_NET_WM_STATE' "$GEOMETRY_LOG" 2>/dev/null || true)"
+wine_managed="$(last_value 'HKCU\Software\Wine\X11 Driver\Managed' "$GEOMETRY_LOG" 2>/dev/null || true)"
+wine_decorated="$(last_value 'HKCU\Software\Wine\X11 Driver\Decorated' "$GEOMETRY_LOG" 2>/dev/null || true)"
+wine_desktop="$(last_value 'HKCU\Software\Wine\Explorer\Desktop' "$GEOMETRY_LOG" 2>/dev/null || true)"
+wine_default_desktop="$(last_value 'HKCU\Software\Wine\Explorer\Desktops\Default' "$GEOMETRY_LOG" 2>/dev/null || true)"
+
+if [[ "$wine_managed" == "Y" && "$wine_decorated" == "Y" && "$wine_desktop" == "unset" && "$wine_default_desktop" == "unset" ]]; then
+  config_state="ok"; config_rule="Managed=Y and Decorated=Y and Wine Explorer Desktop values unset"; config_ev="Managed=$wine_managed Decorated=$wine_decorated Desktop=$wine_desktop Default=$wine_default_desktop"
+else
+  config_state="bad"; config_rule="one or more required Wine windowing values differ"; config_ev="Managed=$wine_managed Decorated=$wine_decorated Desktop=$wine_desktop Default=$wine_default_desktop"
+fi
+
+kwin_maximizevert="$(last_value 'waydaw-ableton-live-12-geometry.maximizevert' "$GEOMETRY_LOG" 2>/dev/null || true)"
+kwin_maximizevertrule="$(last_value 'waydaw-ableton-live-12-geometry.maximizevertrule' "$GEOMETRY_LOG" 2>/dev/null || true)"
+if [[ "$kwin_maximizevert" == "false" && "$kwin_maximizevertrule" == "3" && "$net_wm_state" == *"_NET_WM_STATE_MAXIMIZED_VERT"* ]]; then
+  kwin_state="ignored"
+  kwin_rule="KWin rule forces maximizevert=false but live window state contains _NET_WM_STATE_MAXIMIZED_VERT"
+  kwin_ev="maximizevert=$kwin_maximizevert maximizevertrule=$kwin_maximizevertrule _NET_WM_STATE=$net_wm_state"
+else
+  case "$derived_issue" in
+    kwin_rule_not_installed) kwin_state="missing"; kwin_rule="$rule_fired"; kwin_ev="$evidence" ;;
+    kwin_rule_not_matching_window_class) kwin_state="not_matching"; kwin_rule="$rule_fired"; kwin_ev="$evidence" ;;
+    kwin_rule_present_but_geometry_ignored) kwin_state="ignored"; kwin_rule="$rule_fired"; kwin_ev="$evidence" ;;
+    *) kwin_state="ok"; kwin_rule="derived_issue did not identify KWin rule missing/not_matching/ignored"; kwin_ev="derived_issue=$derived_issue" ;;
+  esac
+fi
+
+case "$derived_issue" in
+  no_ableton_window_found) live_state="no_window" ;;
+  window_exceeds_screen) live_state="exceeds_screen" ;;
+  window_exceeds_workarea) live_state="exceeds_workarea" ;;
+  window_geometry_unavailable) live_state="unknown_geometry" ;;
+  *) live_state="ok" ;;
+esac
+live_rule="$rule_fired"
+live_ev="$evidence"
+
+watch_final="$(last_value final_derived_issue "$WATCH_LOG" 2>/dev/null || true)"
+watch_resizes="$(last_value number_of_resizes "$WATCH_LOG" 2>/dev/null || true)"
+watch_moves="$(last_value number_of_moves "$WATCH_LOG" 2>/dev/null || true)"
+watch_state_changes="$(last_value number_of_state_changes "$WATCH_LOG" 2>/dev/null || true)"
+watch_frame_extent_changes="$(last_value number_of_frame_extent_changes "$WATCH_LOG" 2>/dev/null || true)"
+watch_frame_extents_appeared_late="$(last_value frame_extents_appeared_late "$WATCH_LOG" 2>/dev/null || true)"
+if [[ "$watch_final" == "no_ableton_window_found_during_watch" ]]; then
+  resize_state="no_window"; resize_rule="number_of_distinct_window_ids == 0"; resize_ev="final_derived_issue=$watch_final"
+elif [[ "$watch_final" == "window_resize_loop_detected" || "$watch_final" == "dxvk_swapchain_resize_loop_correlated" || "${watch_resizes:-0}" -gt 0 ]]; then
+  resize_state="resizing"; resize_rule="number_of_resizes > 0"; resize_ev="number_of_resizes=${watch_resizes:-unknown} final_derived_issue=${watch_final:-unknown}"
+elif [[ -n "$watch_final" ]]; then
+  resize_state="stable"; resize_rule="watch completed without recorded resize"; resize_ev="number_of_resizes=${watch_resizes:-0} final_derived_issue=$watch_final"
+else
+  resize_state="unknown"; resize_rule="watch log unavailable"; resize_ev="watch_log=$WATCH_LOG"
+fi
+
+recent_graphics="$(grep -hE 'DXVK|VK_SUBOPTIMAL_KHR|Presenter|swapchain|D3D11' "$LOG_DIR/ableton.log" "$LOG_DIR/ableton-launch-geometry.log" 2>/dev/null | tail -n 200 || true)"
+vk_count="$(grep -c 'VK_SUBOPTIMAL_KHR' <<<"$recent_graphics" || true)"
+dxvk_count="$(grep -c 'DXVK' <<<"$recent_graphics" || true)"
+if [[ "$watch_final" == "dxvk_swapchain_resize_loop_correlated" ]]; then
+  graphics_state="dxvk_resize_loop_correlated"; graphics_rule="final_derived_issue == dxvk_swapchain_resize_loop_correlated"; graphics_ev="vk_suboptimal_count=$vk_count number_of_resizes=${watch_resizes:-unknown}"
+elif [[ "$dxvk_count" -gt 0 || "$vk_count" -gt 0 ]]; then
+  graphics_state="dxvk_active"; graphics_rule="recent logs contain DXVK"; graphics_ev="DXVK_lines=$dxvk_count VK_SUBOPTIMAL_KHR_lines=$vk_count"
+elif [[ "${WAYDAW_ABLETON_GRAPHICS:-wined3d}" == "wined3d" ]]; then
+  graphics_state="wined3d_requested"; graphics_rule="WAYDAW_ABLETON_GRAPHICS defaults to wined3d"; graphics_ev="WAYDAW_ABLETON_GRAPHICS=${WAYDAW_ABLETON_GRAPHICS:-wined3d}"
+else
+  graphics_state="unknown"; graphics_rule="no deterministic graphics log marker found"; graphics_ev="DXVK_lines=$dxvk_count VK_SUBOPTIMAL_KHR_lines=$vk_count"
+fi
+
+if [[ "$live_state" == "no_window" || "$resize_state" == "no_window" ]]; then
+  repaint_state="no_window"
+  repaint_rule="live_geometry_state == no_window or resize_state == no_window"
+  repaint_ev="live_geometry_state=$live_state resize_state=$resize_state"
+elif [[ "${watch_frame_extents_appeared_late:-false}" == "true" ]]; then
+  repaint_state="frame_extents_appeared_late"
+  repaint_rule="frame_extents_appeared_late == true"
+  repaint_ev="number_of_frame_extent_changes=${watch_frame_extent_changes:-unknown} frame_extents_appeared_late=$watch_frame_extents_appeared_late"
+elif [[ "${watch_frame_extent_changes:-0}" -gt 0 ]]; then
+  repaint_state="frame_extents_changed_during_watch"
+  repaint_rule="number_of_frame_extent_changes > 0"
+  repaint_ev="number_of_frame_extent_changes=$watch_frame_extent_changes"
+elif [[ "${watch_state_changes:-0}" -gt 0 ]]; then
+  repaint_state="decoration_state_changed_during_watch"
+  repaint_rule="number_of_state_changes > 0"
+  repaint_ev="number_of_state_changes=$watch_state_changes"
+else
+  repaint_state="no_decoration_transition_detected"
+  repaint_rule="number_of_frame_extent_changes == 0 and number_of_state_changes == 0"
+  repaint_ev="number_of_frame_extent_changes=${watch_frame_extent_changes:-0} number_of_state_changes=${watch_state_changes:-0}"
+fi
+
+kwin_positionrule="$(last_value 'waydaw-ableton-live-12-geometry.positionrule' "$GEOMETRY_LOG" 2>/dev/null || true)"
+kwin_sizerule="$(last_value 'waydaw-ableton-live-12-geometry.sizerule' "$GEOMETRY_LOG" 2>/dev/null || true)"
+if [[ "$watch_final" == "dxvk_swapchain_resize_loop_correlated" ]]; then
+  performance_state="graphics_swapchain_resize_correlated"
+  performance_rule="final_derived_issue == dxvk_swapchain_resize_loop_correlated"
+  performance_ev="final_derived_issue=$watch_final number_of_resizes=${watch_resizes:-unknown}"
+elif [[ "${watch_resizes:-0}" -gt 0 && ( "$kwin_positionrule" == "3" || "$kwin_sizerule" == "3" ) ]]; then
+  performance_state="forced_geometry_rule_correlated"
+  performance_rule="number_of_resizes > 0 and forced KWin geometry rule is active"
+  performance_ev="number_of_resizes=$watch_resizes positionrule=$kwin_positionrule sizerule=$kwin_sizerule"
+elif [[ "$graphics_state" == "dxvk_active" && "${watch_resizes:-0}" -eq 0 ]]; then
+  performance_state="graphics_markers_without_resize_correlation"
+  performance_rule="DXVK markers present but number_of_resizes == 0"
+  performance_ev="graphics_state=$graphics_state number_of_resizes=${watch_resizes:-0}"
+elif [[ "$resize_state" == "no_window" ]]; then
+  performance_state="no_window"
+  performance_rule="resize_state == no_window"
+  performance_ev="resize_state=$resize_state"
+else
+  performance_state="no_log_evidence"
+  performance_rule="no deterministic resize or graphics correlation selected"
+  performance_ev="number_of_resizes=${watch_resizes:-unknown} graphics_state=$graphics_state positionrule=${kwin_positionrule:-unknown} sizerule=${kwin_sizerule:-unknown}"
+fi
+
+printf '\nDIAGNOSIS:\n'
+kv "config_state" "$config_state"
+kv "config_rule_fired" "$config_rule"
+kv "config_evidence" "$config_ev"
+kv "kwin_rule_state" "$kwin_state"
+kv "kwin_rule_fired" "$kwin_rule"
+kv "kwin_rule_evidence" "$kwin_ev"
+kv "live_geometry_state" "$live_state"
+kv "live_geometry_rule_fired" "$live_rule"
+kv "live_geometry_evidence" "$live_ev"
+kv "resize_state" "$resize_state"
+kv "resize_rule_fired" "$resize_rule"
+kv "resize_evidence" "$resize_ev"
+kv "graphics_state" "$graphics_state"
+kv "graphics_rule_fired" "$graphics_rule"
+kv "graphics_evidence" "$graphics_ev"
+kv "repaint_or_decoration_state" "$repaint_state"
+kv "repaint_or_decoration_rule_fired" "$repaint_rule"
+kv "repaint_or_decoration_evidence" "$repaint_ev"
+kv "performance_regression_state" "$performance_state"
+kv "performance_regression_rule_fired" "$performance_rule"
+kv "performance_regression_evidence" "$performance_ev"
+derive_recommendation "$kwin_state" "$live_state" "$resize_state" "$graphics_state" "$repaint_state" "$performance_state"

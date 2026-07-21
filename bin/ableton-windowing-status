@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+RULE_ID="waydaw-ableton-live-12-geometry"
+KWIN_RULES_FILE="${KWIN_RULES_FILE:-$HOME/.config/kwinrulesrc}"
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+wine_reg_value() {
+  local key="$1"
+  local value_name="$2"
+  local output
+
+  if ! have_cmd wine; then
+    return 1
+  fi
+
+  output="$(env -u WAYLAND_DISPLAY wine reg query "$key" /v "$value_name" 2>/dev/null)" || return 1
+  awk -v value_name="$value_name" '
+    $1 == value_name {
+      value = $0
+      sub("^[[:space:]]*" value_name "[[:space:]]+REG_[^[:space:]]+[[:space:]]+", "", value)
+      sub(/\r$/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' <<<"$output"
+}
+
+print_wine_reg_value() {
+  local label="$1"
+  local key="$2"
+  local value_name="$3"
+  local value
+
+  if value="$(wine_reg_value "$key" "$value_name")"; then
+    printf '%s=%s\n' "$label" "$value"
+  else
+    printf '%s=unset\n' "$label"
+  fi
+}
+
+read_config() {
+  local group="$1"
+  local key="$2"
+
+  if have_cmd kreadconfig6; then
+    kreadconfig6 --file "$KWIN_RULES_FILE" --group "$group" --key "$key" 2>/dev/null || true
+  else
+    awk -v group="$group" -v key="$key" '
+      $0 == "[" group "]" { in_group = 1; next }
+      /^\[/ { in_group = 0 }
+      in_group && index($0, key "=") == 1 {
+        sub("^[^=]+=", "")
+        print
+        exit
+      }
+    ' "$KWIN_RULES_FILE" 2>/dev/null || true
+  fi
+}
+
+kwin_rule_exists() {
+  [[ "$(read_config "$RULE_ID" wmclass)" == "ableton live 12 suite.exe" ]] &&
+    [[ "$(read_config "$RULE_ID" wmclassmatch)" == "1" ]]
+}
+
+print_screen_info() {
+  printf 'Screen/work-area detection:\n'
+  if have_cmd kscreen-doctor && output="$(kscreen-doctor -o 2>/dev/null)"; then
+    printf '%s\n' "$output" | sed 's/^/  /'
+  elif have_cmd xrandr && output="$(xrandr --query 2>/dev/null)"; then
+    printf '%s\n' "$output" | sed -n '/ connected /p' | sed 's/^/  /'
+  else
+    printf '  unavailable\n'
+  fi
+}
+
+printf 'WINEPREFIX=%s\n' "$WINEPREFIX"
+print_wine_reg_value "Wine X11 Managed" 'HKCU\Software\Wine\X11 Driver' "Managed"
+print_wine_reg_value "Wine X11 Decorated" 'HKCU\Software\Wine\X11 Driver' "Decorated"
+print_wine_reg_value "Wine Explorer Desktop" 'HKCU\Software\Wine\Explorer' "Desktop"
+print_wine_reg_value "Wine Explorer Default Desktop" 'HKCU\Software\Wine\Explorer\Desktops' "Default"
+print_screen_info
+printf 'KWin rules file=%s\n' "$KWIN_RULES_FILE"
+printf 'Ableton KWin rule id=%s\n' "$RULE_ID"
+
+if kwin_rule_exists; then
+  printf 'Ableton KWin match-only rule=present\n'
+else
+  printf 'Ableton KWin match-only rule=missing-or-incomplete\n'
+fi
+printf 'KWin Ableton wmclass=%s\n' "$(read_config "$RULE_ID" wmclass)"
+printf 'KWin Ableton position=%s rule=%s\n' "$(read_config "$RULE_ID" position)" "$(read_config "$RULE_ID" positionrule)"
+printf 'KWin Ableton size=%s rule=%s\n' "$(read_config "$RULE_ID" size)" "$(read_config "$RULE_ID" sizerule)"
+printf 'KWin Ableton fullscreen=%s rule=%s\n' "$(read_config "$RULE_ID" fullscreen)" "$(read_config "$RULE_ID" fullscreenrule)"
+printf 'KWin Ableton maximizehoriz=%s rule=%s\n' "$(read_config "$RULE_ID" maximizehoriz)" "$(read_config "$RULE_ID" maximizehorizrule)"
+printf 'KWin Ableton maximizevert=%s rule=%s\n' "$(read_config "$RULE_ID" maximizevert)" "$(read_config "$RULE_ID" maximizevertrule)"

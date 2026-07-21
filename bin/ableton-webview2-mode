@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+say() { printf '%s\n' "$*"; }
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+ableton-webview2-mode - reversible WebView2 launch environment for Ableton
+
+USAGE:
+  bin/ableton-webview2-mode --print-env <mode>
+  bin/ableton-webview2-mode --explain <mode>
+  bin/ableton-webview2-mode --restore-info
+  bin/ableton-webview2-mode --help
+
+MODES:
+  default
+  disable-gpu
+  disable-gpu-no-sandbox
+  force-device-scale-0-5
+  isolated-user-data
+  disabled-runtime
+
+SAFETY:
+  Environment modes print shell exports only. They do not touch the Wine prefix,
+  DXVK, KWin, launcher files, or WebView2 runtime files.
+
+  disabled-runtime is documented only because a prior reversible rename test is
+  recorded in docs/ableton-wine-current-findings.md. This tool does not rename or
+  delete runtime files.
+
+  This tool never sets DXVK_LOG_LEVEL=none.
+EOF
+}
+
+valid_mode() {
+  case "$1" in
+    default|disable-gpu|disable-gpu-no-sandbox|force-device-scale-0-5|isolated-user-data|disabled-runtime) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+print_env() {
+  local mode="$1"
+  valid_mode "$mode" || fail "unknown WebView2 mode: $mode"
+
+  case "$mode" in
+    default)
+      say "unset WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+      say "unset WEBVIEW2_USER_DATA_FOLDER"
+      say "unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"
+      ;;
+    disable-gpu)
+      say "export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--disable-gpu'"
+      say "unset WEBVIEW2_USER_DATA_FOLDER"
+      say "unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"
+      ;;
+    disable-gpu-no-sandbox)
+      say "export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--disable-gpu --no-sandbox --disable-gpu-sandbox'"
+      say "unset WEBVIEW2_USER_DATA_FOLDER"
+      say "unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"
+      ;;
+    force-device-scale-0-5)
+      say "export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--force-device-scale-factor=0.5'"
+      say "unset WEBVIEW2_USER_DATA_FOLDER"
+      say "unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"
+      ;;
+    isolated-user-data)
+      say "unset WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+      say "export WEBVIEW2_USER_DATA_FOLDER='\${XDG_RUNTIME_DIR:-/tmp}/waydaw-ableton-webview2-user-data-\${USER:-user}'"
+      say "unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"
+      ;;
+    disabled-runtime)
+      say "# disabled-runtime has no environment-only implementation."
+      say "# This tool intentionally does not rename or delete WebView2 runtime files."
+      say "unset WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+      say "unset WEBVIEW2_USER_DATA_FOLDER"
+      say "unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"
+      ;;
+  esac
+}
+
+explain_mode() {
+  local mode="$1"
+  valid_mode "$mode" || fail "unknown WebView2 mode: $mode"
+
+  case "$mode" in
+    default)
+      cat <<'EOF'
+mode=default
+mutation=no
+effect=Runs Ableton with baseline WebView2 environment; all WebView2 env vars are unset.
+measurement_note=Use this as matrix baseline. Do not set DXVK_LOG_LEVEL=none.
+EOF
+      ;;
+    disable-gpu)
+      cat <<'EOF'
+mode=disable-gpu
+mutation=no
+effect=Adds WebView2 browser args that disable Chromium GPU acceleration while leaving the runtime present.
+env_var=WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+signal=Tests whether the WebView2 GPU process crash is tied to Chromium GPU use.
+measurement_note=Does not change DXVK; do not set DXVK_LOG_LEVEL=none.
+EOF
+      ;;
+    disable-gpu-no-sandbox)
+      cat <<'EOF'
+mode=disable-gpu-no-sandbox
+mutation=no
+effect=Adds WebView2 browser args for disabled GPU plus sandbox bypass flags.
+env_var=WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+signal=Separates GPU-process failure from Wine sandbox/process integration issues.
+measurement_note=Diagnostic only. Do not treat as a permanent launcher change.
+EOF
+      ;;
+    force-device-scale-0-5)
+      cat <<'EOF'
+mode=force-device-scale-0-5
+mutation=no
+effect=Sets only the Chromium device scale factor to 0.5 for the WebView2 process tree.
+env_var=WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+signal=Tests whether the start-screen content is oversized relative to its fixed Ableton-owned dialog viewport.
+measurement_note=Does not alter Wine DPI, KDE scale, KWin geometry, DXVK, or WebView2 profile data.
+EOF
+      ;;
+    isolated-user-data)
+      cat <<'EOF'
+mode=isolated-user-data
+mutation=no_prefix_mutation
+effect=Sets WEBVIEW2_USER_DATA_FOLDER to a throwaway runtime directory outside the prefix.
+env_var=WEBVIEW2_USER_DATA_FOLDER
+signal=Tests whether WebView2 profile/crash-recovery state contributes to startup failure.
+restore=Remove the printed runtime folder after testing if desired.
+EOF
+      ;;
+    disabled-runtime)
+      cat <<'EOF'
+mode=disabled-runtime
+mutation=not_performed_by_this_tool
+effect=Documents the prior reversible WebView2 runtime rename test only.
+signal=Prior result: stopped msedgewebview2 crash lines but did not make the editor interactable.
+restore=See --restore-info and docs/ableton-wine-current-findings.md.
+EOF
+      ;;
+  esac
+}
+
+restore_info() {
+  cat <<'EOF'
+restore_scope=environment_modes
+restore_command=unset WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS WEBVIEW2_USER_DATA_FOLDER WEBVIEW2_BROWSER_EXECUTABLE_FOLDER
+
+restore_scope=disabled_runtime_prior_test_reference
+status=already_restored_as_of_docs/ableton-wine-current-findings.md
+note=If runtime files are ever renamed again, print exact mv restore commands before changing anything.
+reference=docs/ableton-wine-current-findings.md
+prior_restore_commands:
+  mv "$HOME/WinePrefixes/ableton12/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/143.0.3650.96/msedgewebview2.exe.disabled.<ts>" "$HOME/WinePrefixes/ableton12/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/143.0.3650.96/msedgewebview2.exe"
+  mv "$HOME/WinePrefixes/ableton12/drive_c/Program Files (x86)/Microsoft/EdgeCore/143.0.3650.96/msedgewebview2.exe.disabled.<ts>" "$HOME/WinePrefixes/ableton12/drive_c/Program Files (x86)/Microsoft/EdgeCore/143.0.3650.96/msedgewebview2.exe"
+
+working_prefix_touched_by_this_tool=no
+dxvk_log_level_changed_by_this_tool=no
+EOF
+  printf 'repo_root=%s\n' "$ROOT_DIR"
+}
+
+[[ $# -gt 0 ]] || { usage; exit 0; }
+
+case "${1:-}" in
+  --print-env)
+    [[ $# -eq 2 ]] || fail "usage: --print-env <mode>"
+    print_env "$2"
+    ;;
+  --explain)
+    [[ $# -eq 2 ]] || fail "usage: --explain <mode>"
+    explain_mode "$2"
+    ;;
+  --restore-info)
+    [[ $# -eq 1 ]] || fail "usage: --restore-info"
+    restore_info
+    ;;
+  -h|--help)
+    usage
+    ;;
+  *)
+    fail "unknown argument: $1 (see --help)"
+    ;;
+esac

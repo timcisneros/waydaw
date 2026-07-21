@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# fix-ableton-window-bounds
+#
+# Light, measured, post-map bounds check/correction for the live Ableton window.
+#
+# IMPORTANT determinism note: `wmctrl -lxG` on this KDE-Wayland/XWayland setup
+# reports window x,y at ~2x the true root coordinates (size is correct), which
+# manufactures a phantom "28px bottom overshoot". The authoritative geometry is
+# the X server's own absolute coordinates from `xwininfo` (cross-checked with
+# `xdotool getwindowgeometry`). This script therefore DECIDES on xwininfo ground
+# truth and only reports wmctrl's value for comparison. With the window actually
+# fitting (decorated 0..workarea_bottom), it correctly prints no_change_needed
+# and never perturbs the window.
+#
+# This is NOT a forced KWin geometry rule and NOT a Wine virtual desktop.
+# It only ever touches the live Ableton main window, via wmctrl/xprop/xwininfo,
+# and only when the window TRULY overshoots the workarea bottom.
+#
+# Modes:
+#   --dry-run   measure + print the correction that WOULD be applied (default)
+#   --apply     remove maximized state, then shrink height by the real overshoot
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+RULE_WMCLASS="${WAYDAW_ABLETON_WMCLASS:-ableton live 12 suite.exe}"
+SETTLE_SECONDS="${WAYDAW_FIX_BOUNDS_SETTLE:-0.5}"
+
+mode="--dry-run"
+case "${1:-}" in
+  --dry-run|"") mode="--dry-run" ;;
+  --apply) mode="--apply" ;;
+  -h|--help) printf 'usage: %s [--dry-run|--apply]\n' "$(basename "$0")"; exit 0 ;;
+  *) printf 'ERROR: unknown argument: %s\n' "$1" >&2; exit 2 ;;
+esac
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+kv() { printf '%s=%s\n' "$1" "${2:-unknown}"; }
+
+require_tools() {
+  local missing=() t
+  for t in wmctrl xprop xwininfo; do have_cmd "$t" || missing+=("$t"); done
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    kv "derived_issue" "diagnostic_tools_missing"
+    kv "rule_fired" "required tools not on PATH"
+    local IFS=,; kv "evidence" "missing_tools=${missing[*]}"
+    exit 1
+  fi
+}
+
+# Workarea of the active desktop, from wmctrl -d (size is reliable from wmctrl).
+workarea_x=0; workarea_y=0; workarea_width=0; workarea_height=0
+collect_workarea() {
+  local line
+  line="$(wmctrl -d 2>/dev/null | awk '$2 == "*" { print; exit }')"
+  [[ -z "$line" ]] && line="$(wmctrl -d 2>/dev/null | awk 'NR==1 { print; exit }')"
+  if [[ "$line" =~ WA:\ ([0-9-]+),([0-9-]+)\ ([0-9]+)x([0-9]+) ]]; then
+    workarea_x="${BASH_REMATCH[1]}"; workarea_y="${BASH_REMATCH[2]}"
+    workarea_width="${BASH_REMATCH[3]}"; workarea_height="${BASH_REMATCH[4]}"
+  fi
+}
+
+window_type() { xprop -id "$1" _NET_WM_WINDOW_TYPE 2>/dev/null | sed 's/\r$//' || true; }
+window_state() { xprop -id "$1" _NET_WM_STATE 2>/dev/null | sed -E 's/.*= //; s/\r$//' || true; }
+map_state() {
+  xwininfo -id "$1" 2>/dev/null | awk -F: '$1 ~ /Map State/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
+}
+
+# Frame extents: left right top bottom (globals).
+fe_left=0; fe_right=0; fe_top=0; fe_bottom=0
+read_frame_extents() {
+  local extents
+  extents="$(xprop -id "$1" _NET_FRAME_EXTENTS 2>/dev/null | sed -E 's/.*= //; s/\r$//' || true)"
+  if [[ "$extents" =~ ^([0-9]+),[[:space:]]*([0-9]+),[[:space:]]*([0-9]+),[[:space:]]*([0-9]+) ]]; then
+    fe_left="${BASH_REMATCH[1]}"; fe_right="${BASH_REMATCH[2]}"
+    fe_top="${BASH_REMATCH[3]}"; fe_bottom="${BASH_REMATCH[4]}"
+  else
+    fe_left=0; fe_right=0; fe_top=0; fe_bottom=0
+  fi
+}
+
+# Ground-truth client geometry in root coordinates (globals), via xwininfo.
+tx=0; ty=0; tw=0; th=0
+read_truth_geometry() {
+  local out
+  out="$(xwininfo -id "$1" 2>/dev/null)" || return 1
+  tx="$(awk -F: '/Absolute upper-left X/{gsub(/ /,"",$2);print $2;exit}' <<<"$out")"
+  ty="$(awk -F: '/Absolute upper-left Y/{gsub(/ /,"",$2);print $2;exit}' <<<"$out")"
+  tw="$(awk -F: '/Width:/{gsub(/ /,"",$2);print $2;exit}' <<<"$out")"
+  th="$(awk -F: '/Height:/{gsub(/ /,"",$2);print $2;exit}' <<<"$out")"
+  [[ -n "$tx" && -n "$ty" && -n "$tw" && -n "$th" ]] || return 1
+  return 0
+}
+
+# wmctrl-reported geometry, kept ONLY for comparison/transparency (globals).
+wx=0; wy=0; ww=0; wh=0
+read_wmctrl_geometry() {
+  local line
+  line="$(wmctrl -lxG 2>/dev/null | awk -v id="$1" '$1 == id { print; exit }')"
+  [[ -z "$line" ]] && return 1
+  wx="$(awk '{print $3}' <<<"$line")"; wy="$(awk '{print $4}' <<<"$line")"
+  ww="$(awk '{print $5}' <<<"$line")"; wh="$(awk '{print $6}' <<<"$line")"
+  return 0
+}
+
+# Choose the live Ableton main window: class matches, type NORMAL, IsViewable,
+# tallest (excludes the floating dialog and unmapped helper windows). Class is
+# matched against the whole wmctrl line because the class column contains spaces.
+find_main_window() {
+  local best_id="" best_h=-1 id type mstate
+  while read -r id; do
+    [[ -z "$id" ]] && continue
+    type="$(window_type "$id")"
+    [[ "$type" == *"_NET_WM_WINDOW_TYPE_NORMAL"* ]] || continue
+    mstate="$(map_state "$id")"
+    [[ "$mstate" == "IsViewable" ]] || continue
+    read_truth_geometry "$id" || continue
+    if [[ "$th" -gt "$best_h" ]]; then best_h="$th"; best_id="$id"; fi
+  done < <(wmctrl -lxG 2>/dev/null | grep -iF "$RULE_WMCLASS" | awk '{print $1}')
+  printf '%s' "$best_id"
+}
+
+require_tools
+collect_workarea
+workarea_bottom=$((workarea_y + workarea_height))
+
+kv "mode" "$mode"
+kv "geometry_source" "xwininfo_absolute_ground_truth (wmctrl shown for comparison only)"
+kv "workarea" "${workarea_x},${workarea_y} ${workarea_width}x${workarea_height}"
+kv "workarea_bottom" "$workarea_bottom"
+
+if [[ "$workarea_height" -le 0 ]]; then
+  kv "derived_issue" "workarea_unavailable"; kv "rule_fired" "wmctrl -d returned no usable WA"; kv "evidence" "workarea=${workarea_width}x${workarea_height}"; exit 1
+fi
+
+win_id="$(find_main_window)"
+if [[ -z "$win_id" ]]; then
+  kv "derived_issue" "no_ableton_window_found"; kv "rule_fired" "no NORMAL IsViewable window matched wmclass"; kv "evidence" "wmclass=$RULE_WMCLASS"; exit 1
+fi
+
+read_truth_geometry "$win_id" || { kv "derived_issue" "window_geometry_unavailable"; kv "rule_fired" "xwininfo had no geometry"; kv "evidence" "window_id=$win_id"; exit 1; }
+read_frame_extents "$win_id"
+read_wmctrl_geometry "$win_id" || true
+state="$(window_state "$win_id")"
+
+# Decorated window edges in true root coordinates.
+decorated_top=$((ty - fe_top))
+decorated_bottom=$((ty + th + fe_bottom))
+overshoot=$((decorated_bottom - workarea_bottom))
+wmctrl_bottom=$((wy + wh))
+
+kv "window_id" "$win_id"
+kv "window_state" "$state"
+kv "frame_extents_lrtb" "${fe_left},${fe_right},${fe_top},${fe_bottom}"
+kv "truth_client_geometry" "${tx},${ty} ${tw}x${th}"
+kv "truth_decorated_top" "$decorated_top"
+kv "truth_decorated_bottom" "$decorated_bottom"
+kv "truth_overshoot" "$overshoot"
+kv "wmctrl_reported_geometry" "${wx},${wy} ${ww}x${wh}"
+kv "wmctrl_reported_bottom" "$wmctrl_bottom"
+kv "wmctrl_vs_truth_position_inflation" "x:$((wx - tx)) y:$((wy - ty))"
+
+if [[ "$overshoot" -le 0 ]]; then
+  kv "derived_issue" "no_change_needed"
+  kv "rule_fired" "ground-truth decorated_bottom <= workarea_bottom"
+  kv "evidence" "truth_decorated_bottom=$decorated_bottom workarea_bottom=$workarea_bottom truth_overshoot=$overshoot (wmctrl_reported_bottom=$wmctrl_bottom is an x2-position artifact, not physical)"
+  exit 0
+fi
+
+# Real overshoot path: anchor the top, shrink height by the overshoot so the
+# bottom rises to the workarea edge. No move (moves are unreliable here); just
+# resize via xdotool (ground-truth reliable), after clearing maximized state.
+orig_state="$state"
+target_w="$tw"
+target_h=$((th - overshoot))
+[[ "$target_h" -lt 200 ]] && target_h="$th"
+
+if [[ "$mode" == "--dry-run" ]]; then
+  kv "derived_issue" "window_exceeds_workarea"
+  kv "rule_fired" "ground-truth decorated_bottom > workarea_bottom"
+  kv "evidence" "truth_decorated_bottom=$decorated_bottom workarea_bottom=$workarea_bottom truth_overshoot=$overshoot frame_top=$fe_top"
+  kv "would_run_1" "wmctrl -ir $win_id -b remove,maximized_vert,maximized_horz,fullscreen"
+  kv "would_run_2" "xdotool windowsize --sync $win_id $target_w $target_h"
+  kv "planned_truth_geometry" "${tx},${ty} ${target_w}x${target_h}"
+  exit 0
+fi
+
+# --apply
+wmctrl -ir "$win_id" -b remove,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
+sleep "$SETTLE_SECONDS"
+if have_cmd xdotool; then
+  xdotool windowsize --sync "$win_id" "$target_w" "$target_h" 2>/dev/null || true
+else
+  wmctrl -ir "$win_id" -e "0,${wx},${wy},${target_w},${target_h}" 2>/dev/null || true
+fi
+sleep "$SETTLE_SECONDS"
+
+read_truth_geometry "$win_id" || true
+read_frame_extents "$win_id"
+final_state="$(window_state "$win_id")"
+final_bottom=$((ty + th + fe_bottom))
+final_overshoot=$((final_bottom - workarea_bottom))
+
+kv "applied_remove_maximized" "wmctrl -ir $win_id -b remove,maximized_vert,maximized_horz,fullscreen"
+kv "applied_resize" "xdotool windowsize --sync $win_id $target_w $target_h"
+kv "new_truth_geometry" "${tx},${ty} ${tw}x${th}"
+kv "new_truth_decorated_bottom" "$final_bottom"
+kv "new_truth_overshoot" "$final_overshoot"
+kv "final_window_state" "$final_state"
+
+if [[ "$final_state" == *"MAXIMIZED"* || "$final_state" == *"FULLSCREEN"* || "$final_overshoot" -gt 0 ]]; then
+  kv "derived_issue" "ableton_remaximized_after_bounds_correction"
+  kv "rule_fired" "after correction window re-asserted maximized/fullscreen or still exceeds workarea"
+  kv "evidence" "final_window_state=$final_state new_truth_decorated_bottom=$final_bottom workarea_bottom=$workarea_bottom new_truth_overshoot=$final_overshoot orig_overshoot=$overshoot"
+  exit 0
+fi
+
+kv "derived_issue" "window_exceeds_workarea_corrected"
+kv "rule_fired" "ground-truth decorated_bottom > workarea_bottom, corrected post-map"
+kv "evidence" "orig_truth_overshoot=$overshoot new_truth_decorated_bottom=$final_bottom new_truth_overshoot=$final_overshoot frame_top=$fe_top"
+exit 0

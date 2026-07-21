@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+set -uo pipefail
+#
+# ableton-session-probe
+#
+# STRICTLY READ-ONLY snapshot of an already-running Ableton session for the
+# X11-vs-KDE-Wayland/XWayland A/B. It:
+#   - does NOT launch or kill Ableton
+#   - does NOT move/resize/focus/activate any window
+#   - does NOT mutate Wine / KWin / DXVK / env / window geometry
+# Launch separately with the normal `./bin/ableton` (DXVK logging ON) first.
+# Exits nonzero if DXVK_LOG_LEVEL=none is set (probe env or Ableton process env),
+# because that suppresses the swapchain evidence the A/B depends on.
+#
+# Note: the swapchain counts are measured over a fixed window (default 30s), so
+# the probe takes ~30s. Output is deterministic key=value lines only.
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+ABLETON_LOG="$ROOT_DIR/logs/ableton.log"
+WINDOW_SECONDS="${WAYDAW_PROBE_SECONDS:-30}"
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+kv() { printf '%s=%s\n' "$1" "${2:-unknown}"; }
+
+count_pattern() {
+  local pattern="$1"
+  local file="$2"
+
+  if [[ -f "$file" ]]; then
+    grep -cE "$pattern" "$file" 2>/dev/null || true
+  else
+    printf '0\n'
+  fi
+}
+
+ableton_pid() { pgrep -f 'Ableton Live 12 Suite.exe' 2>/dev/null | head -1; }
+
+# Write the current run's log segment (since the most recent launch marker) to $1.
+write_log_segment() {
+  local out="$1" ll
+  ll="$(grep -n 'effective environment before Ableton launch' "$ABLETON_LOG" 2>/dev/null | tail -1 | cut -d: -f1)"
+  if [[ -n "${ll:-}" && -f "$ABLETON_LOG" ]]; then
+    tail -n +"$ll" "$ABLETON_LOG" 2>/dev/null > "$out"
+  else
+    : > "$out"
+  fi
+}
+
+# Read-only interaction check: is an Ableton dialog / transient-for-main child
+# stacked above the main window? Uses only property reads (no activation).
+readonly_interaction_state() {
+  local main_wid="$1"
+  [[ -z "$main_wid" ]] && { printf 'no_window'; return; }
+  local main_dec; main_dec=$(( main_wid ))
+  local -a stk=(); local tok
+  while read -r tok; do
+    tok="${tok//[[:space:]]/}"
+    [[ "$tok" == 0x* ]] && stk+=("$tok")
+  done < <(xprop -root _NET_CLIENT_LIST_STACKING 2>/dev/null | sed -E 's/.*# //' | tr ',' '\n')
+  local i mainidx=-1
+  for i in "${!stk[@]}"; do [[ $(( ${stk[$i]} )) -eq "$main_dec" ]] && mainidx="$i"; done
+  [[ "$mainidx" -lt 0 ]] && { printf 'no_blocking_child_detected'; return; }
+  local j hid cls typ tf tfdec ms
+  for (( j=mainidx+1; j<${#stk[@]}; j++ )); do
+    hid="${stk[$j]}"
+    cls="$(xprop -id "$hid" WM_CLASS 2>/dev/null)"
+    grep -qi 'ableton live 12 suite' <<<"$cls" || continue
+    ms="$(xwininfo -id "$hid" 2>/dev/null | awk -F: '/Map State/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+    [[ "$ms" == "IsViewable" ]] || continue
+    typ="$(xprop -id "$hid" _NET_WM_WINDOW_TYPE 2>/dev/null)"
+    tf="$(xprop -id "$hid" WM_TRANSIENT_FOR 2>/dev/null | awk '{print $NF}')"
+    tfdec=0; [[ "$tf" == 0x* ]] && tfdec=$(( tf ))
+    if grep -q 'DIALOG' <<<"$typ" || [[ "$tfdec" -eq "$main_dec" ]]; then
+      printf 'blocked_by_child_or_modal'; return
+    fi
+  done
+  printf 'no_blocking_child_detected'
+}
+
+# --- GUARD: refuse to run if DXVK logging is suppressed ---
+suppressed=0
+[[ "${DXVK_LOG_LEVEL:-}" == "none" ]] && suppressed=1
+gpid="$(ableton_pid)"
+if [[ "$suppressed" -eq 0 && -n "${gpid:-}" && -r "/proc/$gpid/environ" ]]; then
+  tr '\0' '\n' < "/proc/$gpid/environ" 2>/dev/null | grep -q '^DXVK_LOG_LEVEL=none$' && suppressed=1
+fi
+if [[ "$suppressed" -eq 1 ]]; then
+  printf 'ERROR: DXVK_LOG_LEVEL=none suppresses swapchain evidence; rerun with default logging\n' >&2
+  exit 1
+fi
+
+# --- locate the main Ableton window (NORMAL, IsViewable, tallest) -- read-only ---
+main_wid=""
+if have_cmd wmctrl; then
+  while read -r id; do
+    [[ -z "$id" ]] && continue
+    typ="$(xprop -id "$id" _NET_WM_WINDOW_TYPE 2>/dev/null | sed -E 's/.*= //')"
+    ms="$(xwininfo -id "$id" 2>/dev/null | awk -F: '/Map State/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+    h="$(xwininfo -id "$id" 2>/dev/null | awk -F: '/Height:/{gsub(/ /,"",$2);print $2;exit}')"
+    if [[ "$typ" == *NORMAL* && "$ms" == "IsViewable" && "${h:-0}" -gt 500 && -z "$main_wid" ]]; then
+      main_wid="$id"
+    fi
+  done < <(wmctrl -lxG 2>/dev/null | grep -iF 'ableton live 12 suite' | grep -v xwaylandvideobridge | awk '{print $1}')
+fi
+
+# --- main window properties + ground-truth geometry ---
+wmclass="unknown"; netstate="unknown"; fe="unknown"; xy=""; xh=""; frame_bottom=0
+workarea_bottom=0; window_bottom=0; geometry_state="geometry_unavailable"
+if [[ -n "$main_wid" ]]; then
+  wmclass="$(xprop -id "$main_wid" WM_CLASS 2>/dev/null | sed -E 's/WM_CLASS\(STRING\) = //; s/"//g')"
+  netstate="$(xprop -id "$main_wid" _NET_WM_STATE 2>/dev/null | sed -E 's/.*= //')"
+  fe="$(xprop -id "$main_wid" _NET_FRAME_EXTENTS 2>/dev/null | sed -E 's/.*= //')"
+  xy="$(xwininfo -id "$main_wid" 2>/dev/null | awk -F: '/Absolute upper-left Y/{gsub(/ /,"",$2);print $2}')"
+  xh="$(xwininfo -id "$main_wid" 2>/dev/null | awk -F: '/Height:/{gsub(/ /,"",$2);print $2}')"
+  [[ "$fe" =~ ^[0-9]+,[[:space:]]*[0-9]+,[[:space:]]*[0-9]+,[[:space:]]*([0-9]+) ]] && frame_bottom="${BASH_REMATCH[1]}"
+  wline="$(wmctrl -d 2>/dev/null | awk '$2=="*"{print}')"
+  [[ -z "$wline" ]] && wline="$(wmctrl -d 2>/dev/null | head -1)"
+  [[ "$wline" =~ WA:\ [0-9-]+,([0-9-]+)\ [0-9]+x([0-9]+) ]] && workarea_bottom=$(( BASH_REMATCH[1] + BASH_REMATCH[2] ))
+  if [[ "$xy" =~ ^[0-9]+$ && "$xh" =~ ^[0-9]+$ && "$workarea_bottom" -gt 0 ]]; then
+    window_bottom=$(( xy + xh + frame_bottom ))
+    if [[ "$window_bottom" -le "$workarea_bottom" ]]; then geometry_state="fits_workarea"; else geometry_state="exceeds_workarea"; fi
+  fi
+fi
+
+interaction_state="$(readonly_interaction_state "$main_wid")"
+backend_effective="$("$ROOT_DIR/bin/diagnose-ableton-graphics-backend" 2>/dev/null | awk -F= '/^backend_effective=/{print $2; exit}')"
+
+# --- fixed-window swapchain churn (deterministic flicker proxy) ---
+seg0="$(mktemp)"; seg1="$(mktemp)"
+trap 'rm -f "$seg0" "$seg1"' EXIT
+write_log_segment "$seg0"
+vk0="$(count_pattern 'VK_SUBOPTIMAL_KHR' "$seg0")"
+rec0="$(count_pattern 'recreating swapchain' "$seg0")"
+pre0="$(count_pattern 'Presenter' "$seg0")"
+sleep "$WINDOW_SECONDS"
+write_log_segment "$seg1"
+vk1="$(count_pattern 'VK_SUBOPTIMAL_KHR' "$seg1")"
+rec1="$(count_pattern 'recreating swapchain' "$seg1")"
+pre1="$(count_pattern 'Presenter' "$seg1")"
+buf="$(grep -hoE 'Buffer size:  [0-9]+x[0-9]+' "$seg1" 2>/dev/null | grep -oE '[0-9]+x[0-9]+' | sort | uniq -c | awk '{print $2"(x"$1")"}' | paste -sd, -)"
+[[ -z "$buf" ]] && buf="not_logged"
+log_lines="$(wc -l < "$seg1" | awk '{print $1}')"
+
+apid="$(ableton_pid)"
+
+# --- emit exactly the minimum comparable schema ---
+kv "timestamp" "$(date '+%Y-%m-%d %H:%M:%S%z')"
+kv "XDG_SESSION_TYPE" "${XDG_SESSION_TYPE:-unknown}"
+kv "DISPLAY" "${DISPLAY:-<unset>}"
+kv "WAYLAND_DISPLAY" "${WAYLAND_DISPLAY:-<unset>}"
+kv "ableton_launched" "$([[ -n "${apid:-}" ]] && echo yes || echo no)"
+kv "ableton_pid" "${apid:-none}"
+kv "window_detected" "$([[ -n "$main_wid" ]] && echo yes || echo no)"
+kv "main_window_id" "${main_wid:-none}"
+kv "WM_CLASS" "$wmclass"
+kv "NET_WM_STATE" "$netstate"
+kv "NET_FRAME_EXTENTS" "$fe"
+kv "xwininfo_y" "${xy:-unknown}"
+kv "xwininfo_height" "${xh:-unknown}"
+kv "workarea_bottom" "$workarea_bottom"
+kv "window_bottom" "$window_bottom"
+kv "geometry_state" "$geometry_state"
+kv "interaction_state" "$interaction_state"
+kv "backend_effective" "${backend_effective:-unknown}"
+kv "VK_SUBOPTIMAL_KHR_count" "$(( vk1 - vk0 ))"
+kv "recreating_swapchain_count" "$(( rec1 - rec0 ))"
+kv "Presenter_count" "$(( pre1 - pre0 ))"
+kv "swapchain_buffer_size_values" "$buf"
+kv "log_line_count" "$log_lines"
+kv "subjective_flicker" "needs_user_observation"
+kv "subjective_responsiveness" "needs_user_observation"

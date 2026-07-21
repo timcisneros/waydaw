@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+kv() { printf '%s=%s\n' "$1" "${2:-}"; }
+
+xprop_value() {
+  local id="$1" prop="$2"
+  xprop -id "$id" "$prop" 2>/dev/null | sed 's/\r$//' || true
+}
+
+xwininfo_field() {
+  local id="$1" field="$2"
+  xwininfo -id "$id" 2>/dev/null | awk -F: -v f="$field" '$1 ~ f { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
+}
+
+wmctrl_field() {
+  local line="$1" n="$2"
+  awk -v n="$n" '{ print $n }' <<< "$line"
+}
+
+wmctrl_title() {
+  local line="$1"
+  awk '{ for (i=9; i<=NF; i++) printf "%s%s", (i==9 ? "" : " "), $i; printf "\n" }' <<< "$line"
+}
+
+prop_tail() {
+  local text="$1"
+  sed -E 's/^[^=]+=[[:space:]]*//; s/^"//; s/"$//' <<< "$text"
+}
+
+pid_from_window() {
+  local id="$1"
+  xprop -id "$id" _NET_WM_PID 2>/dev/null | awk '{ print $NF }' | grep -E '^[0-9]+$' || true
+}
+
+cmdline_for_pid() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 0
+  tr '\0' ' ' < "/proc/$pid/cmdline" | sed 's/[[:space:]]*$//'
+}
+
+exe_basename_for_pid() {
+  local pid="$1" argv0
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 0
+  IFS= read -r -d '' argv0 < "/proc/$pid/cmdline" || true
+  argv0="${argv0//\\//}"
+  printf '%s' "${argv0##*/}"
+}
+
+hex_to_dec() {
+  local id="${1#0x}"
+  printf '%d' "0x$id" 2>/dev/null || true
+}
+
+norm_hex() {
+  local id="${1%,}"
+  id="${id#0x}"
+  printf '0x%08x' "0x$id" 2>/dev/null || printf '%s' "$1"
+}
+
+stack_index_for() {
+  local target="$1" idx=0 raw id
+  raw="$(xprop -root _NET_CLIENT_LIST_STACKING 2>/dev/null | sed -E 's/^[^#]*(# )?//')" || true
+  [[ -n "$raw" ]] || return 0
+  for id in $raw; do
+    id="$(norm_hex "$id")"
+    if [[ "${id,,}" == "${target,,}" ]]; then
+      printf '%s' "$idx"
+      return 0
+    fi
+    idx=$((idx + 1))
+  done
+}
+
+is_candidate_line() {
+  grep -qiE 'ableton|webview|edge|msedge|wine|crash|kprior|dialog' <<< "$1"
+}
+
+declare -a IDS=()
+declare -A WM_LINE=()
+declare -A X=()
+declare -A Y=()
+declare -A W=()
+declare -A H=()
+declare -A TITLE=()
+declare -A WM_CLASS_VALUE=()
+declare -A WM_NAME_VALUE=()
+declare -A NET_WM_NAME_VALUE=()
+declare -A ROLE=()
+declare -A WTYPE=()
+declare -A TRANSIENT=()
+declare -A PID=()
+declare -A CMD=()
+declare -A EXE_BASENAME=()
+declare -A STATE=()
+declare -A MAP_STATE=()
+declare -A OVERRIDE_STATE=()
+declare -A PARENT=()
+declare -A STACK_INDEX=()
+
+printf '== tool_status ==\n'
+for t in wmctrl xwininfo xprop; do
+  if have_cmd "$t"; then kv "tool_$t" present; else kv "tool_$t" missing; fi
+done
+
+printf '\n== wmctrl_lxG_all ==\n'
+if have_cmd wmctrl; then
+  wmctrl -lxG 2>/dev/null || true
+else
+  printf 'wmctrl_unavailable\n'
+fi
+
+printf '\n== xwininfo_root_tree ==\n'
+if have_cmd xwininfo; then
+  xwininfo -root -tree 2>/dev/null || true
+else
+  printf 'xwininfo_unavailable\n'
+fi
+
+printf '\n== root_properties ==\n'
+if have_cmd xprop; then
+  xprop -root _NET_ACTIVE_WINDOW _NET_CLIENT_LIST _NET_CLIENT_LIST_STACKING 2>/dev/null || true
+fi
+
+if have_cmd wmctrl; then
+  while IFS= read -r line; do
+    is_candidate_line "$line" || continue
+    id="$(wmctrl_field "$line" 1)"
+    [[ -n "$id" ]] || continue
+    IDS+=("$id")
+    WM_LINE["$id"]="$line"
+    X["$id"]="$(wmctrl_field "$line" 3)"
+    Y["$id"]="$(wmctrl_field "$line" 4)"
+    W["$id"]="$(wmctrl_field "$line" 5)"
+    H["$id"]="$(wmctrl_field "$line" 6)"
+    TITLE["$id"]="$(wmctrl_title "$line")"
+  done < <(wmctrl -lxG 2>/dev/null || true)
+fi
+
+printf '\n== candidate_windows ==\n'
+for id in "${IDS[@]}"; do
+  WM_CLASS_VALUE["$id"]="$(prop_tail "$(xprop_value "$id" WM_CLASS)")"
+  WM_NAME_VALUE["$id"]="$(prop_tail "$(xprop_value "$id" WM_NAME)")"
+  NET_WM_NAME_VALUE["$id"]="$(prop_tail "$(xprop_value "$id" _NET_WM_NAME)")"
+  ROLE["$id"]="$(prop_tail "$(xprop_value "$id" WM_WINDOW_ROLE)")"
+  WTYPE["$id"]="$(prop_tail "$(xprop_value "$id" _NET_WM_WINDOW_TYPE)")"
+  TRANSIENT["$id"]="$(prop_tail "$(xprop_value "$id" WM_TRANSIENT_FOR)")"
+  STATE["$id"]="$(prop_tail "$(xprop_value "$id" _NET_WM_STATE)")"
+  PID["$id"]="$(pid_from_window "$id")"
+  CMD["$id"]="$(cmdline_for_pid "${PID[$id]}")"
+  EXE_BASENAME["$id"]="$(exe_basename_for_pid "${PID[$id]}")"
+  MAP_STATE["$id"]="$(xwininfo_field "$id" "Map State")"
+  OVERRIDE_STATE["$id"]="$(xwininfo_field "$id" "Override Redirect State")"
+  PARENT["$id"]="$(xwininfo -id "$id" 2>/dev/null | awk -F: '$1 ~ /Parent window id/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }')"
+  STACK_INDEX["$id"]="$(stack_index_for "$id")"
+
+  printf '\n[candidate_window %s]\n' "$id"
+  kv "wmctrl_line" "${WM_LINE[$id]}"
+  kv "window_id" "$id"
+  kv "window_id_dec" "$(hex_to_dec "$id")"
+  kv "wmctrl_x" "${X[$id]}"
+  kv "wmctrl_y" "${Y[$id]}"
+  kv "wmctrl_width" "${W[$id]}"
+  kv "wmctrl_height" "${H[$id]}"
+  kv "wmctrl_title" "${TITLE[$id]}"
+  kv "xwininfo_parent" "${PARENT[$id]}"
+  kv "xwininfo_map_state" "${MAP_STATE[$id]}"
+  kv "xwininfo_override_redirect" "${OVERRIDE_STATE[$id]}"
+  kv "stack_index" "${STACK_INDEX[$id]}"
+  kv "NET_WM_NAME" "${NET_WM_NAME_VALUE[$id]}"
+  kv "WM_NAME" "${WM_NAME_VALUE[$id]}"
+  kv "WM_CLASS" "${WM_CLASS_VALUE[$id]}"
+  kv "WM_WINDOW_ROLE" "${ROLE[$id]}"
+  kv "NET_WM_WINDOW_TYPE" "${WTYPE[$id]}"
+  kv "WM_TRANSIENT_FOR" "${TRANSIENT[$id]}"
+  kv "NET_WM_PID" "${PID[$id]}"
+  kv "process_executable_basename" "${EXE_BASENAME[$id]}"
+  kv "process_cmdline" "${CMD[$id]}"
+  printf 'xprop_full_begin\n'
+  xprop -id "$id" \
+    _NET_WM_NAME WM_NAME WM_CLASS WM_WINDOW_ROLE _NET_WM_WINDOW_TYPE \
+    WM_TRANSIENT_FOR _NET_WM_PID _NET_WM_STATE 2>/dev/null || true
+  printf 'xprop_full_end\n'
+done
+
+main_id=""
+main_area=0
+for id in "${IDS[@]}"; do
+  class="${WM_CLASS_VALUE[$id],,}"
+  [[ "$class" == *"ableton live 12 suite"* ]] || continue
+  [[ "${MAP_STATE[$id]}" == *IsViewable* || -z "${MAP_STATE[$id]}" ]] || continue
+  w="${W[$id]:-0}"; h="${H[$id]:-0}"
+  [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || continue
+  area=$((w * h))
+  if (( h > 500 && area > main_area )); then
+    main_area="$area"
+    main_id="$id"
+  fi
+done
+
+blocker_id=""
+blocker_score=-1
+for id in "${IDS[@]}"; do
+  [[ -n "$main_id" && "${id,,}" == "${main_id,,}" ]] && continue
+  class="${WM_CLASS_VALUE[$id],,}"
+  title="${TITLE[$id],,} ${WM_NAME_VALUE[$id],,} ${NET_WM_NAME_VALUE[$id],,}"
+  cmd="${CMD[$id],,}"
+  w="${W[$id]:-0}"; h="${H[$id]:-0}"
+  [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || continue
+  score=0
+  [[ "$class" == *ableton* ]] && score=$((score + 40))
+  [[ "$cmd" == *msedgewebview2* || "$class" == *webview* || "$title" == *webview* ]] && score=$((score + 35))
+  [[ "$cmd" == *kprior* || "$title" == *kprior* || "$title" == *crash* ]] && score=$((score + 35))
+  [[ "${WTYPE[$id]}" == *DIALOG* || "${WTYPE[$id]}" == *MODAL* ]] && score=$((score + 20))
+  [[ -n "$main_id" && "${TRANSIENT[$id],,}" == *"${main_id,,}"* ]] && score=$((score + 20))
+  (( w == 512 && h == 479 )) && score=$((score + 50))
+  (( h < 600 && w >= 300 )) && score=$((score + 5))
+  [[ -n "${STACK_INDEX[$id]}" ]] && score=$((score + STACK_INDEX[$id]))
+  if (( score > blocker_score )); then
+    blocker_score="$score"
+    blocker_id="$id"
+  fi
+done
+
+printf '\n== ownership_summary ==\n'
+kv "main_window_id" "${main_id:-unknown}"
+if [[ -n "$main_id" ]]; then
+  kv "main_window_pid" "${PID[$main_id]:-unknown}"
+else
+  kv "main_window_pid" unknown
+fi
+kv "blocker_window_id" "${blocker_id:-unknown}"
+if [[ -n "$blocker_id" ]]; then
+  kv "blocker_geometry" "${X[$blocker_id]:-unknown},${Y[$blocker_id]:-unknown} ${W[$blocker_id]:-unknown}x${H[$blocker_id]:-unknown}"
+  kv "blocker_wm_name" "${NET_WM_NAME_VALUE[$blocker_id]:-${WM_NAME_VALUE[$blocker_id]:-unknown}}"
+  kv "blocker_wm_class" "${WM_CLASS_VALUE[$blocker_id]:-unknown}"
+  kv "blocker_window_type" "${WTYPE[$blocker_id]:-unknown}"
+  kv "blocker_transient_for" "${TRANSIENT[$blocker_id]:-unknown}"
+  kv "blocker_pid" "${PID[$blocker_id]:-unknown}"
+  kv "blocker_process_cmdline" "${CMD[$blocker_id]:-unknown}"
+  blocker_lc="${WM_CLASS_VALUE[$blocker_id],,} ${WM_NAME_VALUE[$blocker_id],,} ${NET_WM_NAME_VALUE[$blocker_id],,}"
+  blocker_process_lc="${CMD[$blocker_id],,}"
+  blocker_exe_lc="${EXE_BASENAME[$blocker_id],,}"
+  if [[ "$blocker_lc" == *msedge* || "$blocker_lc" == *webview* || "$blocker_exe_lc" == "msedgewebview2.exe" ]]; then
+    kv "blocker_is_webview2" yes
+  else
+    kv "blocker_is_webview2" no
+  fi
+  [[ "$blocker_lc $blocker_process_lc" == *kprior* || "$blocker_lc $blocker_process_lc" == *crash* ]] && kv "blocker_is_kprior_crash" yes || kv "blocker_is_kprior_crash" no
+  [[ "$blocker_lc" == *ableton* && "$blocker_exe_lc" != "msedgewebview2.exe" ]] && kv "blocker_is_ableton_child" yes || kv "blocker_is_ableton_child" no
+else
+  kv "blocker_geometry" unknown
+  kv "blocker_wm_name" unknown
+  kv "blocker_wm_class" unknown
+  kv "blocker_window_type" unknown
+  kv "blocker_transient_for" unknown
+  kv "blocker_pid" unknown
+  kv "blocker_process_cmdline" unknown
+  kv "blocker_is_webview2" unknown
+  kv "blocker_is_kprior_crash" unknown
+  kv "blocker_is_ableton_child" unknown
+fi

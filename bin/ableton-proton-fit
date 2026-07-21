@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# WayDAW safe-fit for the running Proton-exp Ableton main window.
+#
+# "Safe-fit" is what maximize MEANS for this window (see
+# docs/ableton-proton-presentation-contract.md): full workarea width via a
+# REAL horizontal-only maximize, with the height left at the app's own
+# believed value. Never real vertical maximize (full workarea height is the
+# proven WM_WINDOWPOSCHANGED storm trigger), never the menu-less compact
+# mode (short heights).
+#
+# Why horizontal maximize and not a geometry write (measured 2026-07-08):
+# imposed geometry (KWin script writes, external resize requests) is adopted
+# by Wine WITHOUT re-laying-out the app — the app keeps painting its
+# believed height inside the bigger rect, leaving a permanent dead black
+# strip at the bottom (imposed 1030 painted only ~1006; imposing exactly the
+# believed 1006 painted fully). The app's height belief moves only through
+# Wine's messaged path: interactive drags and real maximize state changes.
+# Horizontal maximize is such a messaged change, is KWin-tracked (native
+# restore), touches only the measured-free width axis, and painted
+# edge-to-edge in validation. Height therefore stays the user's/app's own;
+# the sizing shim (cap WAYDAW_ABLETON_SIZING_CAP_H, default 1006, floor
+# WAYDAW_ABLETON_SIZING_MIN_H=820) keeps it in the safe band.
+#
+# If no Proton-exp Ableton main window exists this reports no-target and
+# exits 1 (it never launches Ableton). Touches no prefix and no persistent
+# KWin settings.
+#
+# Usage: ableton-proton-fit [--dry-run]
+set -uo pipefail
+
+CAP_H="${WAYDAW_ABLETON_SIZING_CAP_H:-1006}"
+
+DRY=0
+[[ "${1:-}" == "--dry-run" ]] && DRY=1
+
+for tool in xprop xwininfo xdotool wmctrl; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "fit ERROR: missing tool: $tool" >&2; exit 1; }
+done
+
+# ---- find the target: steam_proton + "Ableton Live 12 Suite" + normal ----
+# Same scope triple as the KWin controller; the auth window is a DIALOG and
+# must never be touched.
+target=""
+while read -r wid rest; do
+  cls="$(xprop -id "$wid" WM_CLASS 2>/dev/null)"
+  [[ "$cls" == *steam_proton* ]] || continue
+  name="$(xprop -id "$wid" _NET_WM_NAME WM_NAME 2>/dev/null)"
+  [[ "$name" == *"Ableton Live 12 Suite"* ]] || continue
+  wtype="$(xprop -id "$wid" _NET_WM_WINDOW_TYPE 2>/dev/null)"
+  [[ "$wtype" == *_NET_WM_WINDOW_TYPE_DIALOG* ]] && continue
+  target="$wid"
+  break
+done < <(wmctrl -l | awk '{print $1}')
+
+if [[ -z "$target" ]]; then
+  echo "fit: no target (no Proton-exp Ableton main window found; not launching)"
+  exit 1
+fi
+
+read -r wa_x wa_y wa_w wa_h < <(xprop -root _NET_WORKAREA \
+  | sed 's/.*= //' | tr -d ',' | awk '{print $1, $2, $3, $4}')
+if ! [[ "$wa_w" =~ ^[0-9]+$ && "$wa_h" =~ ^[0-9]+$ ]]; then
+  echo "fit ERROR: could not read _NET_WORKAREA" >&2
+  exit 1
+fi
+
+cur="$(xwininfo -id "$target" | awk '/Width:/{w=$2} /Height:/{h=$2} END{print w"x"h}')"
+echo "fit: target=$target current=$cur workarea=${wa_w}x${wa_h}+${wa_x}+${wa_y}"
+echo "fit: safe rect = horizontal maximize (width ${wa_w}), height kept (band cap_h=$CAP_H)"
+
+if [[ "$DRY" == 1 ]]; then
+  echo "fit: dry-run, no mutation"
+  exit 0
+fi
+
+# ---- apply: drop any vertical maximize, then real horizontal maximize ----
+wmctrl -i -r "$target" -b remove,maximized_vert 2>/dev/null
+wmctrl -i -r "$target" -b add,maximized_horz 2>/dev/null
+sleep 1
+
+after_w="$(xwininfo -id "$target" | awk '/Width:/{print $2}')"
+after_h="$(xwininfo -id "$target" | awk '/Height:/{print $2}')"
+state="$(xprop -id "$target" _NET_WM_STATE 2>/dev/null | sed 's/.*= //')"
+echo "fit: after=${after_w}x${after_h} net_wm_state=${state:-none}"
+
+if (( after_w < wa_w - 8 )); then
+  echo "fit ERROR: width $after_w did not reach workarea width $wa_w" >&2
+  exit 1
+fi
+if (( after_h > CAP_H + 8 )); then
+  echo "fit ERROR: height $after_h exceeds the safe cap $CAP_H" >&2
+  exit 1
+fi
+case "$state" in
+  *MAXIMIZED_VERT*)
+    echo "fit ERROR: window is vertically maximized (should not happen)" >&2
+    exit 1 ;;
+esac
+exit 0

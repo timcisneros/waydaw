@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RULE_ID="waydaw-ableton-live-12-geometry"
+LEGACY_RULE_ID="waydaw-ableton-live-12-no-frame"
+RULE_DESC="Waydaw Ableton Live 12 match only"
+KWIN_RULES_FILE="${KWIN_RULES_FILE:-$HOME/.config/kwinrulesrc}"
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+read_config() {
+  local group="$1"
+  local key="$2"
+
+  if have_cmd kreadconfig6; then
+    kreadconfig6 --file "$KWIN_RULES_FILE" --group "$group" --key "$key" 2>/dev/null || true
+  else
+    awk -v group="$group" -v key="$key" '
+      $0 == "[" group "]" { in_group = 1; next }
+      /^\[/ { in_group = 0 }
+      in_group && index($0, key "=") == 1 {
+        sub("^[^=]+=", "")
+        print
+        exit
+      }
+    ' "$KWIN_RULES_FILE" 2>/dev/null || true
+  fi
+}
+
+write_config() {
+  local group="$1"
+  local key="$2"
+  local value="$3"
+
+  if ! have_cmd kwriteconfig6; then
+    printf 'ERROR: kwriteconfig6 not found; cannot update KWin rules.\n' >&2
+    exit 1
+  fi
+
+  kwriteconfig6 --file "$KWIN_RULES_FILE" --group "$group" --key "$key" "$value"
+}
+
+delete_config() {
+  local group="$1"
+  local key="$2"
+
+  if ! have_cmd kwriteconfig6; then
+    printf 'ERROR: kwriteconfig6 not found; cannot update KWin rules.\n' >&2
+    exit 1
+  fi
+
+  kwriteconfig6 --file "$KWIN_RULES_FILE" --group "$group" --key "$key" --delete ""
+}
+
+append_rule_id() {
+  local rules
+  local new_rules
+  local item
+  local count=0
+
+  rules="$(read_config General rules)"
+  if [[ ",$rules," == *",$RULE_ID,"* ]]; then
+    new_rules="$rules"
+  elif [[ -n "$rules" ]]; then
+    new_rules="$rules,$RULE_ID"
+  else
+    new_rules="$RULE_ID"
+  fi
+
+  IFS=',' read -ra rule_items <<<"$new_rules"
+  for item in "${rule_items[@]}"; do
+    if [[ -n "$item" ]]; then
+      count=$((count + 1))
+    fi
+  done
+
+  write_config General rules "$new_rules"
+  write_config General count "$count"
+}
+
+mkdir -p "$(dirname "$KWIN_RULES_FILE")"
+
+write_config "$RULE_ID" Description "$RULE_DESC"
+write_config "$RULE_ID" clientmachine "localhost"
+write_config "$RULE_ID" types "1"
+write_config "$RULE_ID" wmclass "ableton live 12 suite.exe"
+write_config "$RULE_ID" wmclassmatch "1"
+delete_config "$RULE_ID" position
+delete_config "$RULE_ID" positionrule
+delete_config "$RULE_ID" size
+delete_config "$RULE_ID" sizerule
+delete_config "$RULE_ID" maximizehoriz
+delete_config "$RULE_ID" maximizehorizrule
+delete_config "$RULE_ID" maximizevert
+delete_config "$RULE_ID" maximizevertrule
+delete_config "$RULE_ID" fullscreen
+delete_config "$RULE_ID" fullscreenrule
+delete_config "$RULE_ID" noborder
+delete_config "$RULE_ID" noborderrule
+delete_config "$RULE_ID" placement
+delete_config "$RULE_ID" placementrule
+delete_config "$LEGACY_RULE_ID" noborder
+delete_config "$LEGACY_RULE_ID" noborderrule
+append_rule_id
+
+if have_cmd qdbus6; then
+  qdbus6 org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+elif have_cmd qdbus; then
+  qdbus org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+elif have_cmd dbus-send; then
+  dbus-send --session --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure >/dev/null 2>&1 || true
+fi
+
+printf 'Installed Ableton KWin geometry rule: %s\n' "$RULE_ID"
+printf 'KWin rules file: %s\n' "$KWIN_RULES_FILE"
+printf 'Match: wmclass=ableton live 12 suite.exe, wmclassmatch=1\n'
+printf 'Forced geometry: disabled\n'
+printf 'Forced maximize/fullscreen states: disabled\n'

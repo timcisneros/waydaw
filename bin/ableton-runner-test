@@ -1,0 +1,874 @@
+#!/usr/bin/env bash
+set -uo pipefail
+#
+# ableton-runner-test (V1)
+#
+# Deterministic Ableton compatibility harness. Runs Ableton under a SELECTED Wine
+# runner against a COPIED prefix, collects deterministic evidence, and writes a
+# result record. It NEVER mutates the working/source prefix.
+#
+# This is infrastructure for gathering lower-level COMPARATIVE data across Wine
+# runners — NOT a low-level Wine/DXVK/WebView2 patch. See
+# docs/ableton-runner-test-harness.md.
+#
+# Constraints enforced: never touch the source prefix; rsync only INTO the test
+# prefix; never set DXVK_LOG_LEVEL=none; no dxvk.conf; no Wine virtual desktop;
+# no KWin geometry changes; no DXVK DLL changes in the source prefix; no
+# permanent launcher edits.
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_DIR="$ROOT_DIR/logs"
+TESTS_DIR="$LOG_DIR/ableton-runner-tests"
+
+RUNNER=""
+LABEL=""
+SOURCE_PREFIX="$HOME/WinePrefixes/ableton12"
+TEST_PREFIX=""
+WEBVIEW2_MODE="default"
+CURSOR_GUARD="off"
+ENFORCE_DXVK=0
+CRASH_RECOVERY_BYPASS=0
+PREFERENCES_CFG_RESET=0
+DIALOG_VISUAL_CAPTURE=0
+MODE_PREPARE=0
+MODE_RUN=0
+MODE_PROBE=0
+MODE_CLEANUP=0
+PROBE_SECONDS="${WAYDAW_PROBE_SECONDS:-30}"
+DXVK_RESTORED_AFTER_RUNNER_PREFIX_UPDATE=no
+DXVK_HASHES_MATCH_SOURCE=not_checked
+DXVK_ENFORCEMENT_REPORT=""
+LAUNCH_WINEDLLOVERRIDES="<unset>"
+CRASH_RECOVERY_BYPASS_REPORT=""
+CRASH_RECOVERY_BYPASS_BACKUP_DIR=""
+CRASH_RECOVERY_BYPASS_MOVED_COUNT=0
+CRASH_RECOVERY_BYPASS_RESTORE_COMMANDS_RECORDED=no
+PREFERENCES_CFG_RESET_REPORT=""
+PREFERENCES_CFG_ORIGINAL_PATH=not_used
+PREFERENCES_CFG_BACKUP_PATH=not_used
+PREFERENCES_CFG_MOVED=no
+PREFERENCES_CFG_RESTORE_COMMAND_RECORDED=no
+PREFERENCES_CFG_ORIGINAL_SHA256=not_checked
+PREFERENCES_CFG_GENERATED_AFTER_LAUNCH=no
+PREFERENCES_CFG_GENERATED_SHA256=missing
+LAUNCH_FILE_RELATIVE=""
+LAUNCH_FILE_RESOLVED=""
+LAUNCH_FILE_EXISTS=no
+DIALOG_CAPTURE_TARGET_WINDOW_ID=unknown
+DIALOG_CAPTURE_TARGET_GEOMETRY=unknown
+DIALOG_CAPTURE_FILE=not_used
+DIALOG_CAPTURE_COMMAND=not_used
+DIALOG_CAPTURE_TOOL=not_used
+DIALOG_CAPTURE_SUCCESS=no
+
+DXVK_SOURCE_SYSTEM32_D3D11_SHA256=""
+DXVK_SOURCE_SYSTEM32_DXGI_SHA256=""
+DXVK_TEST_SYSTEM32_D3D11_SHA256=""
+DXVK_TEST_SYSTEM32_DXGI_SHA256=""
+DXVK_SOURCE_SYSWOW64_D3D11_SHA256=""
+DXVK_SOURCE_SYSWOW64_DXGI_SHA256=""
+DXVK_TEST_SYSWOW64_D3D11_SHA256=""
+DXVK_TEST_SYSWOW64_DXGI_SHA256=""
+DXVK_TEST_BEFORE_SYSTEM32_D3D11_SHA256=""
+DXVK_TEST_BEFORE_SYSTEM32_DXGI_SHA256=""
+DXVK_TEST_BEFORE_SYSWOW64_D3D11_SHA256=""
+DXVK_TEST_BEFORE_SYSWOW64_DXGI_SHA256=""
+
+say()  { printf '%s\n' "$*"; }
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+guard_no_builtin_d3d_overrides() {
+  local overrides="${WINEDLLOVERRIDES-}"
+  [[ -n "$overrides" ]] || return 0
+
+  local lower="${overrides,,}"
+  lower="${lower//[[:space:]]/}"
+  local entry dlls dll mode
+  local -a entries dll_entries
+  IFS=';' read -ra entries <<< "$lower"
+  for entry in "${entries[@]}"; do
+    [[ "$entry" == *=* ]] || continue
+    dlls="${entry%%=*}"
+    mode="${entry#*=}"
+    IFS=',' read -ra dll_entries <<< "$dlls"
+    for dll in "${dll_entries[@]}"; do
+      case "$dll" in
+        d3d11|dxgi)
+          if [[ "$mode" == *b* ]]; then
+            fail "refusing builtin $dll override in WINEDLLOVERRIDES='$overrides'; compatibility matrix must keep prefix DXVK DLLs active"
+          fi
+          ;;
+      esac
+    done
+  done
+}
+
+usage() {
+  cat <<'EOF'
+ableton-runner-test — copied-prefix Ableton compatibility harness (V1)
+
+USAGE:
+  bin/ableton-runner-test --label <label> [--runner <path>] [mode] [options]
+
+MODES (choose one):
+  --prepare-only           Copy + verify the test prefix and runner; do NOT launch.
+  --run                    Prepare (if needed), launch Ableton under the runner,
+                           wait for the main window, then collect evidence.
+  --probe                  Collect evidence from an ALREADY-running session (no launch).
+  --cleanup-test-prefix    Remove the TEST prefix only (never the source). Explicit.
+
+OPTIONS:
+  --runner <path>          Runner root or files dir containing bin/wine
+                           (e.g. .local-runners/GE-Proton10-34 or .../files).
+  --label <label>          Test label (required). Used in default test-prefix + run dir.
+  --source-prefix <path>   Default: $HOME/WinePrefixes/ableton12  (NEVER mutated)
+  --test-prefix <path>     Default: $HOME/WinePrefixes/ableton12-<label>-test
+  --webview2-mode <mode>   default | disable-gpu | disable-gpu-no-sandbox |
+                           force-device-scale-0-5 | isolated-user-data.
+                           Default: default.
+  --cursor-guard <mode>    off | on. Default: off. On starts the X11 cursor guard
+                           against the detected Ableton window after launch.
+  --enforce-dxvk           Runner-comparison safety mode. Before launch, run the
+                           runner prefix update, restore source-prefix DXVK DLLs
+                           into the TEST prefix only, verify hashes, and launch
+                           with WINEDLLOVERRIDES=d3d11,dxgi=n.
+  --crash-recovery-bypass  Copied-prefix-only diagnostic. Before launch, move
+                           Ableton crash/recovery startup metadata aside inside
+                           the TEST prefix and record exact restore commands.
+  --preferences-cfg-reset  Copied-prefix-only diagnostic. Before launch, move
+                           Preferences.cfg to a label-specific backup and record
+                           the exact restore command.
+  --launch-file-relative <path>
+                           Copied-prefix-only diagnostic. Resolve this relative
+                           path under the TEST prefix and pass it to Ableton as
+                           an explicit file argument.
+  --dialog-visual-capture  After window ownership collection, capture only the
+                           identified blocker window into the run directory.
+                           Does not focus, move, resize, click, or close it.
+  -h, --help               This help.
+
+SAFETY:
+  * The source/working prefix is never written to (rsync source only).
+  * Refuses to run if test-prefix resolves to the same path as source-prefix.
+  * Refuses to launch if the runner wine binary cannot be found.
+  * Refuses builtin d3d11/dxgi overrides. --enforce-dxvk uses native override
+    d3d11,dxgi=n only after copied-prefix DXVK hashes match the source prefix.
+  * Cleanup removes ONLY the test prefix, and only with --cleanup-test-prefix.
+
+OUTPUT:
+  logs/ableton-runner-tests/<timestamp>-<label>/{result.env,processes.txt,
+  windows.txt,session-probe.txt,ableton-log-tail.txt,webview2-summary.txt,
+  cursor-guard.txt,dxvk-enforcement.txt,restore-or-cleanup.txt}  + one line appended to
+  logs/ableton-runner-tests/index.jsonl
+
+This is comparative test infrastructure, NOT a Wine/DXVK/WebView2 patch.
+EOF
+}
+
+# ---- arg parse ----
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --runner)        RUNNER="${2:-}"; shift 2 ;;
+    --label)         LABEL="${2:-}"; shift 2 ;;
+    --source-prefix) SOURCE_PREFIX="${2:-}"; shift 2 ;;
+    --test-prefix)   TEST_PREFIX="${2:-}"; shift 2 ;;
+    --webview2-mode) WEBVIEW2_MODE="${2:-}"; shift 2 ;;
+    --cursor-guard)  CURSOR_GUARD="${2:-}"; shift 2 ;;
+    --enforce-dxvk)  ENFORCE_DXVK=1; shift ;;
+    --crash-recovery-bypass) CRASH_RECOVERY_BYPASS=1; shift ;;
+    --preferences-cfg-reset) PREFERENCES_CFG_RESET=1; shift ;;
+    --launch-file-relative) LAUNCH_FILE_RELATIVE="${2:-}"; shift 2 ;;
+    --dialog-visual-capture) DIALOG_VISUAL_CAPTURE=1; shift ;;
+    --prepare-only)  MODE_PREPARE=1; shift ;;
+    --run)           MODE_RUN=1; shift ;;
+    --probe)         MODE_PROBE=1; shift ;;
+    --cleanup-test-prefix) MODE_CLEANUP=1; shift ;;
+    -h|--help)       usage; exit 0 ;;
+    *) fail "unknown argument: $1 (see --help)" ;;
+  esac
+done
+
+[[ -n "$LABEL" ]] || fail "--label is required"
+[[ -n "$TEST_PREFIX" ]] || TEST_PREFIX="$HOME/WinePrefixes/ableton12-${LABEL}-test"
+case "$WEBVIEW2_MODE" in
+  default|disable-gpu|disable-gpu-no-sandbox|force-device-scale-0-5|isolated-user-data) ;;
+  *) fail "unsupported --webview2-mode '$WEBVIEW2_MODE'" ;;
+esac
+case "$CURSOR_GUARD" in
+  off|on) ;;
+  *) fail "unsupported --cursor-guard '$CURSOR_GUARD'" ;;
+esac
+
+if [[ $((MODE_PREPARE + MODE_RUN + MODE_PROBE + MODE_CLEANUP)) -ne 1 ]]; then
+  fail "choose exactly one mode: --prepare-only | --run | --probe | --cleanup-test-prefix"
+fi
+if [[ "$MODE_RUN" == 1 ]]; then
+  guard_no_builtin_d3d_overrides
+fi
+
+norm() { realpath -m -- "$1" 2>/dev/null || printf '%s' "$1"; }
+SOURCE_NORM="$(norm "$SOURCE_PREFIX")"
+TEST_NORM="$(norm "$TEST_PREFIX")"
+
+# Hard safety: the test prefix must never equal the source/working prefix.
+[[ "$TEST_NORM" == "$SOURCE_NORM" ]] && fail "refusing: test-prefix == source-prefix ($TEST_NORM)"
+case "$TEST_NORM" in
+  "$HOME/WinePrefixes/ableton12") fail "refusing: test-prefix is the working prefix" ;;
+esac
+
+# ---- runner resolution ----
+RUNNER_BIN=""
+resolve_runner_bin() {
+  [[ -n "$RUNNER" ]] || return 1
+  local cand
+  for cand in "$RUNNER/bin" "$RUNNER/files/bin" "$RUNNER"; do
+    if [[ -x "$cand/wine" ]]; then RUNNER_BIN="$cand"; return 0; fi
+  done
+  return 1
+}
+
+find_ableton_exe() {
+  local pfx="$1" drive_c="$1/drive_c" c
+  for c in \
+    "$drive_c/ProgramData/Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe" \
+    "$drive_c/Program Files/Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe"; do
+    [[ -f "$c" ]] && { printf '%s' "$c"; return 0; }
+  done
+  find "$drive_c" -type f -iname 'Ableton Live 12*.exe' 2>/dev/null | head -1
+}
+
+ableton_log_txt() {
+  local pfx="$1" d
+  d="$(find "$pfx/drive_c/users/$USER/AppData/Roaming/Ableton" -maxdepth 1 -type d -iname 'Live 12*' 2>/dev/null | head -1)"
+  [[ -n "$d" ]] && printf '%s/Preferences/Log.txt' "$d"
+}
+
+apply_crash_recovery_bypass() {
+  [[ "$CRASH_RECOVERY_BYPASS" == 1 ]] || return 0
+
+  local pref_dir crash_dir backup_dir manifest src rel dest
+  pref_dir="$TEST_PREFIX/drive_c/users/timcis/AppData/Roaming/Ableton/Live 12.4.2/Preferences"
+  crash_dir="$pref_dir/Crash"
+  backup_dir="$pref_dir/.waydaw-crash-recovery-bypass-backup-${LABEL}"
+  manifest="$backup_dir/manifest.txt"
+
+  CRASH_RECOVERY_BYPASS_BACKUP_DIR="$backup_dir"
+  CRASH_RECOVERY_BYPASS_REPORT="$manifest"
+  mkdir -p "$backup_dir"
+  {
+    printf 'crash_recovery_bypass_enabled=yes\n'
+    printf 'label=%s\n' "$LABEL"
+    printf 'test_prefix=%s\n' "$TEST_PREFIX"
+    printf 'working_prefix_touched=no\n'
+    printf 'bypass_backup_dir=%s\n' "$backup_dir"
+    printf 'restore_commands_begin\n'
+  } > "$manifest"
+
+  move_one() {
+    src="$1"
+    [[ -f "$src" ]] || return 0
+    rel="${src#"$pref_dir/"}"
+    dest="$backup_dir/$rel"
+    mkdir -p "$(dirname "$dest")"
+    printf 'restore_command: mv -f %q %q\n' "$dest" "$src" | tee -a "$manifest"
+    printf 'moved_file: %s -> %s\n' "$src" "$dest" >> "$manifest"
+    mv "$src" "$dest"
+    CRASH_RECOVERY_BYPASS_MOVED_COUNT=$((CRASH_RECOVERY_BYPASS_MOVED_COUNT + 1))
+  }
+
+  say "[crash-recovery-bypass] restore commands are printed before each rename and recorded in: $manifest"
+  move_one "$pref_dir/CrashRecoveryInfo.cfg"
+  move_one "$pref_dir/CrashDetection.cfg"
+  if [[ -d "$crash_dir" ]]; then
+    while IFS= read -r -d '' src; do
+      move_one "$src"
+    done < <(find "$crash_dir" -maxdepth 1 -type f -name '*CrashRecoveryInfo.cfg' -print0 2>/dev/null)
+  fi
+
+  {
+    printf 'restore_commands_end\n'
+    printf 'moved_files_count=%s\n' "$CRASH_RECOVERY_BYPASS_MOVED_COUNT"
+  } >> "$manifest"
+  CRASH_RECOVERY_BYPASS_RESTORE_COMMANDS_RECORDED=yes
+  say "[crash-recovery-bypass] moved_files_count=$CRASH_RECOVERY_BYPASS_MOVED_COUNT"
+}
+
+apply_preferences_cfg_reset() {
+  [[ "$PREFERENCES_CFG_RESET" == 1 ]] || return 0
+
+  local pref_dir original backup_dir backup manifest prefix_norm original_norm backup_norm restore_command
+  pref_dir="$TEST_PREFIX/drive_c/users/timcis/AppData/Roaming/Ableton/Live 12.4.2/Preferences"
+  original="$pref_dir/Preferences.cfg"
+  backup_dir="$pref_dir/.waydaw-preferences-cfg-reset-backup-${LABEL}"
+  backup="$backup_dir/Preferences.cfg"
+  manifest="$backup_dir/manifest.txt"
+  prefix_norm="$(realpath -m -- "$TEST_PREFIX")" || fail "failed to resolve test prefix: $TEST_PREFIX"
+  original_norm="$(realpath -m -- "$original")" || fail "failed to resolve Preferences.cfg path: $original"
+  backup_norm="$(realpath -m -- "$backup")" || fail "failed to resolve Preferences.cfg backup path: $backup"
+  case "$original_norm" in "$prefix_norm"/*) ;; *) fail "refusing Preferences.cfg reset outside test prefix: $original_norm" ;; esac
+  case "$backup_norm" in "$prefix_norm"/*) ;; *) fail "refusing Preferences.cfg backup outside test prefix: $backup_norm" ;; esac
+  [[ -f "$original_norm" ]] || fail "--preferences-cfg-reset source file missing in copied prefix: $original_norm"
+  [[ ! -e "$backup_norm" ]] || fail "--preferences-cfg-reset backup already exists: $backup_norm"
+
+  PREFERENCES_CFG_ORIGINAL_PATH="$original_norm"
+  PREFERENCES_CFG_BACKUP_PATH="$backup_norm"
+  PREFERENCES_CFG_ORIGINAL_SHA256="$(sha256_file "$original_norm")"
+  PREFERENCES_CFG_RESET_REPORT="$manifest"
+  printf -v restore_command 'mv -f %q %q' "$backup_norm" "$original_norm"
+
+  say "[preferences-cfg-reset] restore_command: $restore_command"
+  mkdir -p "$backup_dir"
+  {
+    printf 'preferences_cfg_reset_enabled=yes\n'
+    printf 'label=%s\n' "$LABEL"
+    printf 'test_prefix=%s\n' "$TEST_PREFIX"
+    printf 'working_prefix_touched=no\n'
+    printf 'preferences_cfg_original_path=%s\n' "$original_norm"
+    printf 'preferences_cfg_backup_path=%s\n' "$backup_norm"
+    printf 'preferences_cfg_original_sha256=%s\n' "$PREFERENCES_CFG_ORIGINAL_SHA256"
+    printf 'restore_command=%s\n' "$restore_command"
+    printf 'preferences_cfg_restore_command_recorded=yes\n'
+  } > "$manifest"
+  PREFERENCES_CFG_RESTORE_COMMAND_RECORDED=yes
+
+  mv "$original_norm" "$backup_norm"
+  PREFERENCES_CFG_MOVED=yes
+  printf 'preferences_cfg_moved=yes\n' >> "$manifest"
+}
+
+resolve_launch_file() {
+  [[ -n "$LAUNCH_FILE_RELATIVE" ]] || return 0
+
+  case "$LAUNCH_FILE_RELATIVE" in
+    /*) fail "--launch-file-relative must be relative to the test prefix, got absolute path: $LAUNCH_FILE_RELATIVE" ;;
+  esac
+
+  local candidate resolved prefix_norm
+  candidate="$TEST_PREFIX/$LAUNCH_FILE_RELATIVE"
+  resolved="$(realpath -m -- "$candidate")" || fail "failed to resolve launch file path: $candidate"
+  prefix_norm="$(realpath -m -- "$TEST_PREFIX")" || fail "failed to resolve test prefix: $TEST_PREFIX"
+  case "$resolved" in
+    "$prefix_norm"/*) ;;
+    *) fail "refusing launch file outside test prefix: $resolved" ;;
+  esac
+  [[ -f "$resolved" ]] || fail "launch file does not exist in test prefix: $resolved"
+
+  LAUNCH_FILE_RESOLVED="$resolved"
+  LAUNCH_FILE_EXISTS=yes
+  say "[launch-file] relative=$LAUNCH_FILE_RELATIVE"
+  say "[launch-file] resolved=$LAUNCH_FILE_RESOLVED"
+}
+
+sha256_file() {
+  local f="$1"
+  [[ -f "$f" ]] || { printf 'missing'; return 0; }
+  sha256sum "$f" 2>/dev/null | awk '{print $1}'
+}
+
+dll_signature() {
+  local f="$1"
+  [[ -f "$f" ]] || { printf 'missing'; return 0; }
+  local text
+  text="$(strings -n 4 "$f" 2>/dev/null || true)"
+  if grep -qi 'dxvk' <<< "$text"; then
+    printf 'DXVK'
+  elif grep -qiE 'Wine builtin DLL|wine builtin|wined3d|The Wine Project' <<< "$text"; then
+    printf 'Wine builtin DLL'
+  else
+    printf 'indeterminate'
+  fi
+}
+
+record_dxvk_hashes() {
+  DXVK_SOURCE_SYSTEM32_D3D11_SHA256="$(sha256_file "$SOURCE_PREFIX/drive_c/windows/system32/d3d11.dll")"
+  DXVK_SOURCE_SYSTEM32_DXGI_SHA256="$(sha256_file "$SOURCE_PREFIX/drive_c/windows/system32/dxgi.dll")"
+  DXVK_TEST_SYSTEM32_D3D11_SHA256="$(sha256_file "$TEST_PREFIX/drive_c/windows/system32/d3d11.dll")"
+  DXVK_TEST_SYSTEM32_DXGI_SHA256="$(sha256_file "$TEST_PREFIX/drive_c/windows/system32/dxgi.dll")"
+  DXVK_SOURCE_SYSWOW64_D3D11_SHA256="$(sha256_file "$SOURCE_PREFIX/drive_c/windows/syswow64/d3d11.dll")"
+  DXVK_SOURCE_SYSWOW64_DXGI_SHA256="$(sha256_file "$SOURCE_PREFIX/drive_c/windows/syswow64/dxgi.dll")"
+  DXVK_TEST_SYSWOW64_D3D11_SHA256="$(sha256_file "$TEST_PREFIX/drive_c/windows/syswow64/d3d11.dll")"
+  DXVK_TEST_SYSWOW64_DXGI_SHA256="$(sha256_file "$TEST_PREFIX/drive_c/windows/syswow64/dxgi.dll")"
+}
+
+copy_dxvk_dll_if_present() {
+  local rel="$1" src dst
+  src="$SOURCE_PREFIX/$rel"
+  dst="$TEST_PREFIX/$rel"
+  [[ -f "$src" ]] || return 0
+  mkdir -p "$(dirname "$dst")"
+  cp -f "$src" "$dst"
+}
+
+verify_source_dxvk_signatures() {
+  local rel sig bad=0
+  for rel in \
+    "drive_c/windows/system32/d3d11.dll" \
+    "drive_c/windows/system32/dxgi.dll"; do
+    [[ -f "$SOURCE_PREFIX/$rel" ]] || fail "--enforce-dxvk source prefix is missing required DXVK DLL: $rel"
+    sig="$(dll_signature "$SOURCE_PREFIX/$rel")"
+    [[ "$sig" == DXVK ]] || bad=1
+  done
+  [[ "$bad" == 0 ]] || fail "--enforce-dxvk source prefix system32 d3d11/dxgi signatures are not DXVK"
+}
+
+dxvk_hashes_match_source() {
+  local rel src dst
+  for rel in \
+    "drive_c/windows/system32/d3d11.dll" \
+    "drive_c/windows/system32/dxgi.dll" \
+    "drive_c/windows/syswow64/d3d11.dll" \
+    "drive_c/windows/syswow64/dxgi.dll"; do
+    src="$SOURCE_PREFIX/$rel"; dst="$TEST_PREFIX/$rel"
+    [[ -f "$src" ]] || continue
+    [[ -f "$dst" ]] || return 1
+    [[ "$(sha256_file "$src")" == "$(sha256_file "$dst")" ]] || return 1
+  done
+  return 0
+}
+
+write_dxvk_enforcement_report() {
+  local out="$1"
+  {
+    printf 'dxvk_enforced=%s\n' "$([[ "$ENFORCE_DXVK" == 1 ]] && echo yes || echo no)"
+    printf 'dxvk_source_system32_d3d11_sha256=%s\n' "${DXVK_SOURCE_SYSTEM32_D3D11_SHA256:-unknown}"
+    printf 'dxvk_source_system32_dxgi_sha256=%s\n' "${DXVK_SOURCE_SYSTEM32_DXGI_SHA256:-unknown}"
+    printf 'dxvk_test_system32_d3d11_sha256=%s\n' "${DXVK_TEST_SYSTEM32_D3D11_SHA256:-unknown}"
+    printf 'dxvk_test_system32_dxgi_sha256=%s\n' "${DXVK_TEST_SYSTEM32_DXGI_SHA256:-unknown}"
+    printf 'dxvk_source_syswow64_d3d11_sha256=%s\n' "${DXVK_SOURCE_SYSWOW64_D3D11_SHA256:-unknown}"
+    printf 'dxvk_source_syswow64_dxgi_sha256=%s\n' "${DXVK_SOURCE_SYSWOW64_DXGI_SHA256:-unknown}"
+    printf 'dxvk_test_before_system32_d3d11_sha256=%s\n' "${DXVK_TEST_BEFORE_SYSTEM32_D3D11_SHA256:-not_recorded}"
+    printf 'dxvk_test_before_system32_dxgi_sha256=%s\n' "${DXVK_TEST_BEFORE_SYSTEM32_DXGI_SHA256:-not_recorded}"
+    printf 'dxvk_test_before_syswow64_d3d11_sha256=%s\n' "${DXVK_TEST_BEFORE_SYSWOW64_D3D11_SHA256:-not_recorded}"
+    printf 'dxvk_test_before_syswow64_dxgi_sha256=%s\n' "${DXVK_TEST_BEFORE_SYSWOW64_DXGI_SHA256:-not_recorded}"
+    printf 'dxvk_test_syswow64_d3d11_sha256=%s\n' "${DXVK_TEST_SYSWOW64_D3D11_SHA256:-unknown}"
+    printf 'dxvk_test_syswow64_dxgi_sha256=%s\n' "${DXVK_TEST_SYSWOW64_DXGI_SHA256:-unknown}"
+    printf 'dxvk_restored_after_runner_prefix_update=%s\n' "$DXVK_RESTORED_AFTER_RUNNER_PREFIX_UPDATE"
+    printf 'dxvk_hashes_match_source=%s\n' "$DXVK_HASHES_MATCH_SOURCE"
+    printf 'launch_winedlloverrides=%s\n' "$LAUNCH_WINEDLLOVERRIDES"
+    if [[ -d "$TEST_PREFIX/drive_c/windows/system32" ]]; then
+      printf 'test_system32_d3d11_signature=%s\n' "$(dll_signature "$TEST_PREFIX/drive_c/windows/system32/d3d11.dll")"
+      printf 'test_system32_dxgi_signature=%s\n' "$(dll_signature "$TEST_PREFIX/drive_c/windows/system32/dxgi.dll")"
+    fi
+    if [[ -d "$TEST_PREFIX/drive_c/windows/syswow64" ]]; then
+      printf 'test_syswow64_d3d11_signature=%s\n' "$(dll_signature "$TEST_PREFIX/drive_c/windows/syswow64/d3d11.dll")"
+      printf 'test_syswow64_dxgi_signature=%s\n' "$(dll_signature "$TEST_PREFIX/drive_c/windows/syswow64/dxgi.dll")"
+    fi
+  } > "$out"
+}
+
+enforce_dxvk_before_launch() {
+  [[ "$ENFORCE_DXVK" == 1 ]] || { record_dxvk_hashes; return 0; }
+  resolve_runner_bin || fail "runner wine not found under --runner '$RUNNER'"
+  verify_source_dxvk_signatures
+
+  say "[dxvk] --enforce-dxvk: runner prefix update via wineboot -u..."
+  env -u WAYLAND_DISPLAY WINEPREFIX="$TEST_PREFIX" PATH="$RUNNER_BIN:$PATH" wineboot -u >/dev/null 2>&1 || fail "wineboot -u failed during --enforce-dxvk"
+
+  local before_match=no
+  dxvk_hashes_match_source && before_match=yes
+  DXVK_TEST_BEFORE_SYSTEM32_D3D11_SHA256="$(sha256_file "$TEST_PREFIX/drive_c/windows/system32/d3d11.dll")"
+  DXVK_TEST_BEFORE_SYSTEM32_DXGI_SHA256="$(sha256_file "$TEST_PREFIX/drive_c/windows/system32/dxgi.dll")"
+  DXVK_TEST_BEFORE_SYSWOW64_D3D11_SHA256="$(sha256_file "$TEST_PREFIX/drive_c/windows/syswow64/d3d11.dll")"
+  DXVK_TEST_BEFORE_SYSWOW64_DXGI_SHA256="$(sha256_file "$TEST_PREFIX/drive_c/windows/syswow64/dxgi.dll")"
+
+  say "[dxvk] restoring source-prefix DXVK DLLs into TEST prefix only..."
+  copy_dxvk_dll_if_present "drive_c/windows/system32/d3d11.dll"
+  copy_dxvk_dll_if_present "drive_c/windows/system32/dxgi.dll"
+  copy_dxvk_dll_if_present "drive_c/windows/syswow64/d3d11.dll"
+  copy_dxvk_dll_if_present "drive_c/windows/syswow64/dxgi.dll"
+  [[ "$before_match" == yes ]] && DXVK_RESTORED_AFTER_RUNNER_PREFIX_UPDATE=no || DXVK_RESTORED_AFTER_RUNNER_PREFIX_UPDATE=yes
+
+  record_dxvk_hashes
+  if dxvk_hashes_match_source; then
+    DXVK_HASHES_MATCH_SOURCE=yes
+  else
+    DXVK_HASHES_MATCH_SOURCE=no
+    fail "--enforce-dxvk refused launch: copied-prefix DXVK hashes do not match source prefix after restoration"
+  fi
+}
+
+apply_webview2_mode() {
+  case "$WEBVIEW2_MODE" in
+    default)
+      unset WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+      unset WEBVIEW2_USER_DATA_FOLDER
+      unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER
+      ;;
+    disable-gpu)
+      export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--disable-gpu'
+      unset WEBVIEW2_USER_DATA_FOLDER
+      unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER
+      ;;
+    disable-gpu-no-sandbox)
+      export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--disable-gpu --no-sandbox --disable-gpu-sandbox'
+      unset WEBVIEW2_USER_DATA_FOLDER
+      unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER
+      ;;
+    force-device-scale-0-5)
+      export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--force-device-scale-factor=0.5'
+      unset WEBVIEW2_USER_DATA_FOLDER
+      unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER
+      ;;
+    isolated-user-data)
+      unset WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+      export WEBVIEW2_USER_DATA_FOLDER="${XDG_RUNTIME_DIR:-/tmp}/waydaw-ableton-webview2-user-data-${USER:-user}-${LABEL}"
+      unset WEBVIEW2_BROWSER_EXECUTABLE_FOLDER
+      ;;
+  esac
+}
+
+# ---- prepare ----
+do_prepare() {
+  resolve_runner_bin || fail "runner wine not found under --runner '$RUNNER' (looked in bin/, files/bin/, .)"
+  [[ -d "$SOURCE_PREFIX" ]] || fail "source prefix missing: $SOURCE_PREFIX"
+  say "[prepare] runner_bin=$RUNNER_BIN"
+  say "[prepare] verifying runner wine..."
+  env PATH="$RUNNER_BIN:$PATH" which wine || fail "wine not on runner PATH"
+  RUNNER_WINE_VERSION="$(env PATH="$RUNNER_BIN:$PATH" wine --version 2>&1 | head -1)"
+  say "[prepare] runner_wine_version=$RUNNER_WINE_VERSION"
+  env PATH="$RUNNER_BIN:$PATH" wineserver --version 2>&1 | head -1 || true
+  say "[prepare] rsync $SOURCE_PREFIX/ -> $TEST_PREFIX/ (source is read-only here)"
+  rsync -a --delete "$SOURCE_PREFIX/" "$TEST_PREFIX/" || fail "rsync failed"
+  local exe; exe="$(find_ableton_exe "$TEST_PREFIX")"
+  [[ -n "$exe" ]] || fail "Ableton exe not found in test prefix after copy"
+  say "[prepare] ableton_exe=$exe"
+  say "[prepare] OK: test prefix ready ($TEST_PREFIX)"
+}
+
+# ---- launch ----
+do_launch() {
+  resolve_runner_bin || fail "runner wine not found under --runner '$RUNNER'"
+  local exe; exe="$(find_ableton_exe "$TEST_PREFIX")"
+  [[ -n "$exe" ]] || fail "Ableton exe not found in test prefix; run --prepare-only first"
+  RUNNER_WINE_VERSION="$(env PATH="$RUNNER_BIN:$PATH" wine --version 2>&1 | head -1)"
+
+  "$ROOT_DIR/bin/kill-session" >/dev/null 2>&1 || true
+  # also stop any wineserver for THIS test prefix via the runner
+  env -u WAYLAND_DISPLAY WINEPREFIX="$TEST_PREFIX" PATH="$RUNNER_BIN:$PATH" wineserver -k >/dev/null 2>&1 || true
+  sleep 1
+
+  # marker so bin/ableton-session-probe can segment logs/ableton.log
+  guard_no_builtin_d3d_overrides
+  enforce_dxvk_before_launch
+  apply_crash_recovery_bypass
+  apply_preferences_cfg_reset
+  resolve_launch_file
+  apply_webview2_mode
+  { printf '[%s] effective environment before Ableton launch\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'WINEPREFIX=%s\nrunner_label=%s\nrunner_wine_version=%s\nwebview2_mode=%s\ncursor_guard=%s\ndxvk_enforced=%s\ndxvk_hashes_match_source=%s\ncrash_recovery_bypass_enabled=%s\nbypass_backup_dir=%s\nmoved_files_count=%s\nrestore_commands_recorded=%s\npreferences_cfg_reset_enabled=%s\npreferences_cfg_original_path=%s\npreferences_cfg_backup_path=%s\npreferences_cfg_moved=%s\npreferences_cfg_restore_command_recorded=%s\npreferences_cfg_original_sha256=%s\nlaunch_file_enabled=%s\nlaunch_file_relative=%s\nlaunch_file_resolved=%s\nlaunch_file_exists=%s\n' \
+      "$TEST_PREFIX" "$LABEL" "$RUNNER_WINE_VERSION" "$WEBVIEW2_MODE" "$CURSOR_GUARD" \
+      "$([[ "$ENFORCE_DXVK" == 1 ]] && echo yes || echo no)" "$DXVK_HASHES_MATCH_SOURCE" \
+      "$([[ "$CRASH_RECOVERY_BYPASS" == 1 ]] && echo yes || echo no)" \
+      "${CRASH_RECOVERY_BYPASS_BACKUP_DIR:-not_used}" "$CRASH_RECOVERY_BYPASS_MOVED_COUNT" \
+      "$CRASH_RECOVERY_BYPASS_RESTORE_COMMANDS_RECORDED" \
+      "$([[ "$PREFERENCES_CFG_RESET" == 1 ]] && echo yes || echo no)" \
+      "$PREFERENCES_CFG_ORIGINAL_PATH" "$PREFERENCES_CFG_BACKUP_PATH" "$PREFERENCES_CFG_MOVED" \
+      "$PREFERENCES_CFG_RESTORE_COMMAND_RECORDED" "$PREFERENCES_CFG_ORIGINAL_SHA256" \
+      "$([[ -n "$LAUNCH_FILE_RELATIVE" ]] && echo yes || echo no)" \
+      "${LAUNCH_FILE_RELATIVE:-not_used}" "${LAUNCH_FILE_RESOLVED:-not_used}" "$LAUNCH_FILE_EXISTS"
+    "$ROOT_DIR/bin/ableton-webview2-mode" --print-env "$WEBVIEW2_MODE"
+    if [[ "$ENFORCE_DXVK" == 1 ]]; then printf 'export WINEDLLOVERRIDES=d3d11,dxgi=n\n'; fi
+  } >> "$LOG_DIR/ableton.log"
+
+  say "[run] launching Ableton under runner ($LABEL) + test prefix..."
+  local -a launch_env
+  launch_env=(env -u WAYLAND_DISPLAY
+    WINEPREFIX="$TEST_PREFIX"
+    PATH="$RUNNER_BIN:$PATH")
+  if [[ "$ENFORCE_DXVK" == 1 ]]; then
+    LAUNCH_WINEDLLOVERRIDES="d3d11,dxgi=n"
+    launch_env+=(WINEDLLOVERRIDES="$LAUNCH_WINEDLLOVERRIDES")
+  fi
+  case "$WEBVIEW2_MODE" in
+    disable-gpu|disable-gpu-no-sandbox|force-device-scale-0-5)
+      launch_env+=(WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="$WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+      ;;
+    isolated-user-data)
+      launch_env+=(WEBVIEW2_USER_DATA_FOLDER="$WEBVIEW2_USER_DATA_FOLDER")
+      ;;
+  esac
+  if [[ -n "$LAUNCH_FILE_RESOLVED" ]]; then
+    "${launch_env[@]}" wine "$exe" "$LAUNCH_FILE_RESOLVED" >> "$LOG_DIR/ableton.log" 2>&1 &
+  else
+    "${launch_env[@]}" wine "$exe" >> "$LOG_DIR/ableton.log" 2>&1 &
+  fi
+  local i line cursor_log
+  WINDOW_DETECTED=no
+  for i in $(seq 1 120); do
+    line="$(wmctrl -lxG 2>/dev/null | grep -iF 'ableton live 12 suite' | grep -v xwaylandvideobridge | awk '$6>500')"
+    if [[ -n "$line" ]]; then WINDOW_DETECTED=yes; say "[run] main window up after ${i}s"; break; fi
+    sleep 1
+  done
+  if [[ "$CURSOR_GUARD" == on ]]; then
+    cursor_log="$LOG_DIR/ableton-cursor-guard-${LABEL}.log"
+    say "[run] starting cursor guard: $cursor_log"
+    "$ROOT_DIR/bin/ableton-cursor-guard" --watch --force-visible --log "$cursor_log" >/dev/null 2>&1 &
+    CURSOR_GUARD_PID="$!"
+  fi
+  [[ "$WINDOW_DETECTED" == yes ]] || say "[run] WARNING: no tall main window after 120s"
+  sleep 5
+}
+
+# ---- collect evidence ----
+do_collect() {
+  mkdir -p "$TESTS_DIR"
+  local ts rundir
+  ts="$(date +%Y%m%d-%H%M%S)"
+  rundir="$TESTS_DIR/${ts}-${LABEL}"
+  mkdir -p "$rundir"
+  say "[collect] run dir: $rundir"
+
+  ps -eo pid,ppid,stat,args 2>/dev/null | grep -iE 'Ableton Live 12 Suite\.exe|msedgewebview2|wineserver' \
+    | grep -viE 'zsh|grep' > "$rundir/processes.txt" || true
+  wmctrl -lxG 2>/dev/null | grep -iE 'ableton|webview|edge' | grep -v xwaylandvideobridge > "$rundir/windows.txt" || true
+  "$ROOT_DIR/bin/ableton-window-ownership-probe" > "$rundir/window-ownership.txt" 2>&1 || true
+  if [[ "$DIALOG_VISUAL_CAPTURE" == 1 ]]; then
+    DIALOG_CAPTURE_TARGET_WINDOW_ID="$(awk -F= '$1=="blocker_window_id"{print $2; exit}' "$rundir/window-ownership.txt")"
+    DIALOG_CAPTURE_TARGET_GEOMETRY="$(awk -F= '$1=="blocker_geometry"{print $2; exit}' "$rundir/window-ownership.txt")"
+    DIALOG_CAPTURE_FILE="$rundir/blocker-window.png"
+    DIALOG_CAPTURE_TOOL=import
+    printf -v DIALOG_CAPTURE_COMMAND 'import -window %q %q' \
+      "$DIALOG_CAPTURE_TARGET_WINDOW_ID" "$DIALOG_CAPTURE_FILE"
+    if ! command -v import >/dev/null 2>&1; then
+      DIALOG_CAPTURE_TOOL=missing
+    elif [[ -z "$DIALOG_CAPTURE_TARGET_WINDOW_ID" || "$DIALOG_CAPTURE_TARGET_WINDOW_ID" == unknown ]]; then
+      DIALOG_CAPTURE_TOOL=import
+    elif import -window "$DIALOG_CAPTURE_TARGET_WINDOW_ID" "$DIALOG_CAPTURE_FILE" >/dev/null 2>&1 \
+      && [[ -s "$DIALOG_CAPTURE_FILE" ]]; then
+      DIALOG_CAPTURE_SUCCESS=yes
+    fi
+    {
+      printf 'dialog_visual_capture_enabled=yes\n'
+      printf 'capture_target_window_id=%s\n' "$DIALOG_CAPTURE_TARGET_WINDOW_ID"
+      printf 'capture_target_geometry=%s\n' "$DIALOG_CAPTURE_TARGET_GEOMETRY"
+      printf 'capture_file=%s\n' "$DIALOG_CAPTURE_FILE"
+      printf 'capture_command=%s\n' "$DIALOG_CAPTURE_COMMAND"
+      printf 'capture_tool=%s\n' "$DIALOG_CAPTURE_TOOL"
+      printf 'capture_success=%s\n' "$DIALOG_CAPTURE_SUCCESS"
+    } > "$rundir/dialog-capture.txt"
+  else
+    {
+      printf 'dialog_visual_capture_enabled=no\n'
+      printf 'capture_target_window_id=not_used\n'
+      printf 'capture_target_geometry=not_used\n'
+      printf 'capture_file=not_used\n'
+      printf 'capture_command=not_used\n'
+      printf 'capture_tool=not_used\n'
+      printf 'capture_success=no\n'
+    } > "$rundir/dialog-capture.txt"
+  fi
+  if [[ -f "$LOG_DIR/ableton-cursor-guard-${LABEL}.log" ]]; then
+    tail -n 80 "$LOG_DIR/ableton-cursor-guard-${LABEL}.log" > "$rundir/cursor-guard.txt"
+  else
+    "$ROOT_DIR/bin/ableton-cursor-guard" --probe-only > "$rundir/cursor-guard.txt" 2>&1 || true
+  fi
+  write_dxvk_enforcement_report "$rundir/dxvk-enforcement.txt"
+  if [[ -n "${CRASH_RECOVERY_BYPASS_REPORT:-}" && -f "$CRASH_RECOVERY_BYPASS_REPORT" ]]; then
+    cp -f "$CRASH_RECOVERY_BYPASS_REPORT" "$rundir/crash-recovery-bypass.txt"
+  else
+    {
+      printf 'crash_recovery_bypass_enabled=%s\n' "$([[ "$CRASH_RECOVERY_BYPASS" == 1 ]] && echo yes || echo no)"
+      printf 'bypass_backup_dir=%s\n' "${CRASH_RECOVERY_BYPASS_BACKUP_DIR:-not_used}"
+      printf 'moved_files_count=%s\n' "$CRASH_RECOVERY_BYPASS_MOVED_COUNT"
+      printf 'restore_commands_recorded=%s\n' "$CRASH_RECOVERY_BYPASS_RESTORE_COMMANDS_RECORDED"
+    } > "$rundir/crash-recovery-bypass.txt"
+  fi
+  if [[ -n "${PREFERENCES_CFG_RESET_REPORT:-}" && -f "$PREFERENCES_CFG_RESET_REPORT" ]]; then
+    cp -f "$PREFERENCES_CFG_RESET_REPORT" "$rundir/preferences-cfg-reset.txt"
+  else
+    {
+      printf 'preferences_cfg_reset_enabled=%s\n' "$([[ "$PREFERENCES_CFG_RESET" == 1 ]] && echo yes || echo no)"
+      printf 'preferences_cfg_original_path=%s\n' "$PREFERENCES_CFG_ORIGINAL_PATH"
+      printf 'preferences_cfg_backup_path=%s\n' "$PREFERENCES_CFG_BACKUP_PATH"
+      printf 'preferences_cfg_moved=%s\n' "$PREFERENCES_CFG_MOVED"
+      printf 'preferences_cfg_restore_command_recorded=%s\n' "$PREFERENCES_CFG_RESTORE_COMMAND_RECORDED"
+      printf 'preferences_cfg_original_sha256=%s\n' "$PREFERENCES_CFG_ORIGINAL_SHA256"
+    } > "$rundir/preferences-cfg-reset.txt"
+  fi
+
+  local ablaunched=no winid
+  winid="$(wmctrl -lxG 2>/dev/null | grep -iF 'ableton live 12 suite' | grep -v xwaylandvideobridge | awk '$6>500{print $1; exit}')"
+  ps -eo args 2>/dev/null | grep -qE "$TEST_PREFIX/.*Ableton Live 12 Suite\.exe" && ablaunched=yes
+  [[ -n "${WINDOW_DETECTED:-}" ]] || WINDOW_DETECTED="$([[ -n "$winid" ]] && echo yes || echo no)"
+
+  say "[collect] running session probe (~${PROBE_SECONDS}s)..."
+  WAYDAW_PROBE_SECONDS="$PROBE_SECONDS" "$ROOT_DIR/bin/ableton-session-probe" > "$rundir/session-probe.txt" 2>&1 || true
+
+  if [[ "$PREFERENCES_CFG_RESET" == 1 ]]; then
+    if [[ -f "$PREFERENCES_CFG_ORIGINAL_PATH" ]]; then
+      PREFERENCES_CFG_GENERATED_AFTER_LAUNCH=yes
+      PREFERENCES_CFG_GENERATED_SHA256="$(sha256_file "$PREFERENCES_CFG_ORIGINAL_PATH")"
+    fi
+    {
+      printf 'preferences_cfg_generated_after_launch=%s\n' "$PREFERENCES_CFG_GENERATED_AFTER_LAUNCH"
+      printf 'preferences_cfg_generated_sha256=%s\n' "$PREFERENCES_CFG_GENERATED_SHA256"
+    } >> "$rundir/preferences-cfg-reset.txt"
+  fi
+
+  # log tail (this run's segment)
+  local ll
+  ll="$(grep -n 'effective environment before Ableton launch' "$LOG_DIR/ableton.log" 2>/dev/null | tail -1 | cut -d: -f1)"
+  if [[ -n "${ll:-}" ]]; then tail -n +"$ll" "$LOG_DIR/ableton.log" 2>/dev/null | tail -n 300 > "$rundir/ableton-log-tail.txt"; fi
+
+  # webview2 summary from the TEST prefix Ableton Log.txt
+  local logtxt mc gpu kprior
+  logtxt="$(ableton_log_txt "$TEST_PREFIX")"
+  mc="$(ps -eo args 2>/dev/null | grep -i 'msedgewebview2' | grep -viE 'zsh|grep' | wc -l | awk '{print $1}')"
+  {
+    printf 'msedgewebview2_process_count=%s\n' "$mc"
+    if [[ -n "${logtxt:-}" && -f "$logtxt" ]]; then
+      printf 'ableton_log_txt=%s\n' "$logtxt"
+      printf '%s\n' '--- recent WebView2 / crash lines ---'
+      grep -iE 'WebView2|GPU process|browser process|Found WebView2|prior crash|Failed to create controller' "$logtxt" 2>/dev/null | tail -12
+    else
+      printf 'ableton_log_txt=not_found\n'
+    fi
+  } > "$rundir/webview2-summary.txt"
+  gpu="$([[ -n "${logtxt:-}" && -f "$logtxt" ]] && grep -cE 'GPU process exited|browser process exited' "$logtxt" 2>/dev/null || echo 0)"
+  kprior="$([[ -n "${logtxt:-}" && -f "$logtxt" ]] && { grep -qiE 'KPriorCrash|Detected a prior crash' "$logtxt" && echo yes || echo no; } || echo unknown)"
+  local webview2_crash; webview2_crash="$([[ "${gpu:-0}" -gt 0 ]] && echo yes || echo no)"
+
+  # pull deterministic fields from the probe
+  pv() { awk -F= -v k="$1" '$1==k{print $2; exit}' "$rundir/session-probe.txt"; }
+  ov() { awk -F= -v k="$1" '$1==k{print $2; exit}' "$rundir/window-ownership.txt"; }
+  local backend vk rec pres
+  backend="$(pv backend_effective)"; vk="$(pv VK_SUBOPTIMAL_KHR_count)"
+  rec="$(pv recreating_swapchain_count)"; pres="$(pv Presenter_count)"
+  if [[ "$ENFORCE_DXVK" == 1 ]]; then
+    record_dxvk_hashes
+    if dxvk_hashes_match_source; then DXVK_HASHES_MATCH_SOURCE=yes; else DXVK_HASHES_MATCH_SOURCE=no; fi
+    write_dxvk_enforcement_report "$rundir/dxvk-enforcement.txt"
+    if grep -q 'Wine builtin DLL' "$rundir/dxvk-enforcement.txt" 2>/dev/null; then
+      backend="invalid_builtin_dll_for_dxvk_comparison"
+    elif [[ "$DXVK_HASHES_MATCH_SOURCE" == yes && "${rec:-0}" != unknown && "${rec:-0}" -gt 0 ]]; then
+      backend="dxvk"
+    fi
+  fi
+
+  # restore / cleanup note
+  {
+    printf 'working_prefix_touched=no  (harness never writes to source: %s)\n' "$SOURCE_PREFIX"
+    printf 'test_prefix=%s\n' "$TEST_PREFIX"
+    printf 'cleanup_test_prefix_command=\n'
+    printf '  env -u WAYLAND_DISPLAY WINEPREFIX=%q PATH=%q:$PATH wineserver -k 2>/dev/null || true\n' "$TEST_PREFIX" "${RUNNER_BIN:-<runner-bin>}"
+    printf '  bin/ableton-runner-test --label %q --cleanup-test-prefix\n' "$LABEL"
+    printf '  (or: rm -rf %q   — test prefix only, NEVER the source)\n' "$TEST_PREFIX"
+    if [[ "${CURSOR_GUARD_PID:-}" != "" ]]; then
+      printf 'cursor_guard_pid=%s\n' "$CURSOR_GUARD_PID"
+      printf 'cursor_guard_restore_command=kill %q  # guard trap undefines the scoped X11 cursor\n' "$CURSOR_GUARD_PID"
+    else
+      printf 'cursor_guard_pid=not_started_by_this_run\n'
+    fi
+  } > "$rundir/restore-or-cleanup.txt"
+
+  # result.env
+  {
+    printf 'runner_label=%s\n' "$LABEL"
+    printf 'runner_path=%s\n' "${RUNNER:-unknown}"
+    printf 'runner_wine_path=%s\n' "${RUNNER_BIN:-unknown}/wine"
+    printf 'runner_wine_version=%s\n' "${RUNNER_WINE_VERSION:-unknown}"
+    printf 'source_prefix=%s\n' "$SOURCE_PREFIX"
+    printf 'test_prefix=%s\n' "$TEST_PREFIX"
+    printf 'webview2_mode=%s\n' "$WEBVIEW2_MODE"
+    printf 'cursor_guard=%s\n' "$CURSOR_GUARD"
+    printf 'cursor_guard_pid=%s\n' "${CURSOR_GUARD_PID:-not_started_by_this_run}"
+    printf 'dxvk_enforced=%s\n' "$([[ "$ENFORCE_DXVK" == 1 ]] && echo yes || echo no)"
+    printf 'dxvk_source_system32_d3d11_sha256=%s\n' "${DXVK_SOURCE_SYSTEM32_D3D11_SHA256:-unknown}"
+    printf 'dxvk_source_system32_dxgi_sha256=%s\n' "${DXVK_SOURCE_SYSTEM32_DXGI_SHA256:-unknown}"
+    printf 'dxvk_test_system32_d3d11_sha256=%s\n' "${DXVK_TEST_SYSTEM32_D3D11_SHA256:-unknown}"
+    printf 'dxvk_test_system32_dxgi_sha256=%s\n' "${DXVK_TEST_SYSTEM32_DXGI_SHA256:-unknown}"
+    printf 'dxvk_source_syswow64_d3d11_sha256=%s\n' "${DXVK_SOURCE_SYSWOW64_D3D11_SHA256:-unknown}"
+    printf 'dxvk_source_syswow64_dxgi_sha256=%s\n' "${DXVK_SOURCE_SYSWOW64_DXGI_SHA256:-unknown}"
+    printf 'dxvk_test_syswow64_d3d11_sha256=%s\n' "${DXVK_TEST_SYSWOW64_D3D11_SHA256:-unknown}"
+    printf 'dxvk_test_syswow64_dxgi_sha256=%s\n' "${DXVK_TEST_SYSWOW64_DXGI_SHA256:-unknown}"
+    printf 'dxvk_restored_after_runner_prefix_update=%s\n' "$DXVK_RESTORED_AFTER_RUNNER_PREFIX_UPDATE"
+    printf 'dxvk_hashes_match_source=%s\n' "$DXVK_HASHES_MATCH_SOURCE"
+    printf 'launch_winedlloverrides=%s\n' "$LAUNCH_WINEDLLOVERRIDES"
+    printf 'crash_recovery_bypass_enabled=%s\n' "$([[ "$CRASH_RECOVERY_BYPASS" == 1 ]] && echo yes || echo no)"
+    printf 'bypass_backup_dir=%s\n' "${CRASH_RECOVERY_BYPASS_BACKUP_DIR:-not_used}"
+    printf 'moved_files_count=%s\n' "$CRASH_RECOVERY_BYPASS_MOVED_COUNT"
+    printf 'restore_commands_recorded=%s\n' "$CRASH_RECOVERY_BYPASS_RESTORE_COMMANDS_RECORDED"
+    printf 'preferences_cfg_reset_enabled=%s\n' "$([[ "$PREFERENCES_CFG_RESET" == 1 ]] && echo yes || echo no)"
+    printf 'preferences_cfg_original_path=%s\n' "$PREFERENCES_CFG_ORIGINAL_PATH"
+    printf 'preferences_cfg_backup_path=%s\n' "$PREFERENCES_CFG_BACKUP_PATH"
+    printf 'preferences_cfg_moved=%s\n' "$PREFERENCES_CFG_MOVED"
+    printf 'preferences_cfg_restore_command_recorded=%s\n' "$PREFERENCES_CFG_RESTORE_COMMAND_RECORDED"
+    printf 'preferences_cfg_original_sha256=%s\n' "$PREFERENCES_CFG_ORIGINAL_SHA256"
+    printf 'preferences_cfg_generated_after_launch=%s\n' "$PREFERENCES_CFG_GENERATED_AFTER_LAUNCH"
+    printf 'preferences_cfg_generated_sha256=%s\n' "$PREFERENCES_CFG_GENERATED_SHA256"
+    printf 'launch_file_enabled=%s\n' "$([[ -n "$LAUNCH_FILE_RELATIVE" ]] && echo yes || echo no)"
+    printf 'launch_file_relative=%s\n' "${LAUNCH_FILE_RELATIVE:-not_used}"
+    printf 'launch_file_resolved=%s\n' "${LAUNCH_FILE_RESOLVED:-not_used}"
+    printf 'launch_file_exists=%s\n' "$LAUNCH_FILE_EXISTS"
+    printf 'dialog_visual_capture_enabled=%s\n' "$([[ "$DIALOG_VISUAL_CAPTURE" == 1 ]] && echo yes || echo no)"
+    printf 'capture_target_window_id=%s\n' "$DIALOG_CAPTURE_TARGET_WINDOW_ID"
+    printf 'capture_target_geometry=%s\n' "$DIALOG_CAPTURE_TARGET_GEOMETRY"
+    printf 'capture_file=%s\n' "$DIALOG_CAPTURE_FILE"
+    printf 'capture_command=%s\n' "$DIALOG_CAPTURE_COMMAND"
+    printf 'capture_tool=%s\n' "$DIALOG_CAPTURE_TOOL"
+    printf 'capture_success=%s\n' "$DIALOG_CAPTURE_SUCCESS"
+    printf 'working_prefix_touched=no\n'
+    printf 'ableton_launched=%s\n' "$ablaunched"
+    printf 'window_detected=%s\n' "${WINDOW_DETECTED:-no}"
+    printf 'backend_effective=%s\n' "${backend:-unknown}"
+    printf 'VK_SUBOPTIMAL_KHR_count=%s\n' "${vk:-unknown}"
+    printf 'recreating_swapchain_count=%s\n' "${rec:-unknown}"
+    printf 'Presenter_count=%s\n' "${pres:-unknown}"
+    printf 'webview2_process_count=%s\n' "$mc"
+    printf 'webview2_crash=%s\n' "$webview2_crash"
+    printf 'webview2_gpu_or_browser_exit_lines=%s\n' "${gpu:-0}"
+    printf 'kprior_crash=%s\n' "$kprior"
+    printf 'blocked_by_child_or_modal=%s\n' "$([[ "$(pv interaction_state)" == blocked_by_child_or_modal ]] && echo yes || echo no)"
+    printf 'blocker_window_id=%s\n' "$(ov blocker_window_id)"
+    printf 'blocker_geometry=%s\n' "$(ov blocker_geometry)"
+    printf 'blocker_wm_name=%s\n' "$(ov blocker_wm_name)"
+    printf 'blocker_wm_class=%s\n' "$(ov blocker_wm_class)"
+    printf 'blocker_window_type=%s\n' "$(ov blocker_window_type)"
+    printf 'blocker_transient_for=%s\n' "$(ov blocker_transient_for)"
+    printf 'blocker_pid=%s\n' "$(ov blocker_pid)"
+    printf 'blocker_process_cmdline=%s\n' "$(ov blocker_process_cmdline)"
+    printf 'blocker_is_webview2=%s\n' "$(ov blocker_is_webview2)"
+    printf 'blocker_is_kprior_crash=%s\n' "$(ov blocker_is_kprior_crash)"
+    printf 'blocker_is_ableton_child=%s\n' "$(ov blocker_is_ableton_child)"
+    printf 'main_window_id=%s\n' "$(ov main_window_id)"
+    printf 'main_window_pid=%s\n' "$(ov main_window_pid)"
+    printf 'main_editor_interactable=needs_user_observation\n'
+    printf 'mouse_disappears_over_main_editor=needs_user_observation\n'
+    printf 'crash_on_interaction=needs_user_observation\n'
+    printf 'flicker=needs_user_observation\n'
+    printf 'responsiveness=needs_user_observation\n'
+    printf 'run_dir=%s\n' "$rundir"
+  } > "$rundir/result.env"
+
+  printf '{"ts":"%s","label":"%s","runner_wine_version":"%s","webview2_mode":"%s","cursor_guard":"%s","dxvk_enforced":"%s","dxvk_hashes_match_source":"%s","launch_winedlloverrides":"%s","ableton_launched":"%s","window_detected":"%s","backend_effective":"%s","recreating_swapchain_count":"%s","webview2_process_count":"%s","webview2_crash":"%s","kprior_crash":"%s","run_dir":"%s"}\n' \
+    "$ts" "$LABEL" "${RUNNER_WINE_VERSION:-unknown}" "$WEBVIEW2_MODE" "$CURSOR_GUARD" "$([[ "$ENFORCE_DXVK" == 1 ]] && echo yes || echo no)" "$DXVK_HASHES_MATCH_SOURCE" "$LAUNCH_WINEDLLOVERRIDES" "$ablaunched" "${WINDOW_DETECTED:-no}" "${backend:-unknown}" "${rec:-unknown}" "$mc" "$webview2_crash" "$kprior" "$rundir" \
+    >> "$TESTS_DIR/index.jsonl"
+
+  say ""
+  say "===== result.env ====="
+  cat "$rundir/result.env"
+  say ""
+  say "[collect] Ableton left running for user visual observation."
+  say "[collect] mouse/interactivity fields require user observation."
+}
+
+# ---- cleanup ----
+do_cleanup() {
+  [[ -d "$TEST_PREFIX" ]] || { say "[cleanup] test prefix not present: $TEST_PREFIX"; return 0; }
+  if [[ -n "${RUNNER:-}" ]] && resolve_runner_bin; then
+    env -u WAYLAND_DISPLAY WINEPREFIX="$TEST_PREFIX" PATH="$RUNNER_BIN:$PATH" wineserver -k >/dev/null 2>&1 || true
+  fi
+  say "[cleanup] removing TEST prefix ONLY: $TEST_PREFIX"
+  rm -rf "$TEST_PREFIX"
+  say "[cleanup] done. Source prefix untouched: $SOURCE_PREFIX"
+}
+
+if   [[ "$MODE_CLEANUP" == 1 ]]; then do_cleanup
+elif [[ "$MODE_PREPARE" == 1 ]]; then do_prepare
+elif [[ "$MODE_PROBE"   == 1 ]]; then do_collect
+elif [[ "$MODE_RUN"     == 1 ]]; then
+  # prepare if the test prefix has no exe yet
+  if [[ -z "$(find_ableton_exe "$TEST_PREFIX" 2>/dev/null)" ]]; then do_prepare; fi
+  do_launch
+  do_collect
+fi

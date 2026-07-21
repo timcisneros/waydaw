@@ -1,3 +1,11 @@
 docs/*
+!docs/ableton-wine-current-findings.md
+!docs/ableton-x11-ab-test.md
+!docs/ableton-runner-test-harness.md
+!docs/ableton-custom-compat-layer.md
+!docs/ableton-runner-candidate-plan.md
+!docs/ableton-dxvk-loader-audit.md
+!docs/ableton-system-wine-baseline-next.md
 logs/*
+.local-runners/
 kxstudio-repos_11.2.0_all.deb

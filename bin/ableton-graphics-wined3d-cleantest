@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Controlled, REVERSIBLE clean-wined3d test.
+#
+# Moves the prefix DXVK/builtin d3d11+dxgi DLLs aside to a timestamped backup,
+# launches Ableton with WAYDAW_ABLETON_GRAPHICS=wined3d, measures whether DXVK is
+# still active, then AUTOMATICALLY restores the DLLs (trap on EXIT). A fallback
+# restore command is printed before anything is moved.
+#
+# Does NOT delete anything. Does NOT touch KWin geometry / Wine virtual desktop /
+# graphics config permanently. XWayland stays forced (bin/ableton uses env -u
+# WAYLAND_DISPLAY).
+#
+# NOTE: intentionally NOT using `set -e` so a failed step still runs the restore.
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+ABLETON_LOG="$LOG_DIR/ableton.log"
+WIN="$WINEPREFIX/drive_c/windows"
+TS="$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="$WINEPREFIX/_waydaw_dxvk_backup_$TS"
+
+rels=(system32/d3d11.dll system32/dxgi.dll syswow64/d3d11.dll syswow64/dxgi.dll)
+moved=()
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+kv() { printf '%s=%s\n' "$1" "${2:-unknown}"; }
+
+restore() {
+  printf '\n[restore]\n'
+  local rel restored=0 failed=0
+  for rel in "${moved[@]}"; do
+    if [[ -f "$BACKUP_DIR/$rel" ]]; then
+      mkdir -p "$(dirname "$WIN/$rel")"
+      if mv -f "$BACKUP_DIR/$rel" "$WIN/$rel"; then
+        restored=$((restored+1))
+      else
+        failed=$((failed+1)); printf 'RESTORE_FAILED=%s\n' "$rel"
+      fi
+    fi
+  done
+  for rel in "${rels[@]}"; do
+    kv "restored_present_$rel" "$([[ -f "$WIN/$rel" ]] && echo true || echo false)"
+  done
+  kv "restored_count" "$restored"
+  kv "restore_failed_count" "$failed"
+  # Remove backup dir only if now empty.
+  rmdir "$BACKUP_DIR"/system32 "$BACKUP_DIR"/syswow64 "$BACKUP_DIR" 2>/dev/null || true
+  if [[ -d "$BACKUP_DIR" ]]; then
+    kv "backup_dir_remaining" "$BACKUP_DIR (NOT empty; inspect manually)"
+  else
+    kv "backup_dir_remaining" "removed_clean"
+  fi
+}
+trap restore EXIT INT TERM
+
+printf '[pre_state]\n'
+kv "WINEPREFIX" "$WINEPREFIX"
+kv "backup_dir" "$BACKUP_DIR"
+for rel in "${rels[@]}"; do
+  f="$WIN/$rel"
+  if [[ -f "$f" ]]; then
+    kv "target_${rel}_present" "true"
+    kv "target_${rel}_size" "$(stat -c '%s' "$f" 2>/dev/null)"
+    kv "target_${rel}_sha256" "$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+    kv "target_${rel}_dxvk_strings" "$(strings -n4 "$f" 2>/dev/null | grep -m1 -iE 'dxvk' >/dev/null && echo yes || echo no)"
+  else
+    kv "target_${rel}_present" "false"
+  fi
+done
+
+# Fallback restore command (printed BEFORE moving anything).
+printf '\n[fallback_restore_command]\n'
+printf 'for f in %s; do mv -f "%s/$f" "%s/$f"; done\n' "${rels[*]}" "$BACKUP_DIR" "$WIN"
+
+# Move present targets aside.
+printf '\n[move_aside]\n'
+"$ROOT_DIR/bin/kill-session" >/dev/null 2>&1 || true
+sleep 1
+for rel in "${rels[@]}"; do
+  f="$WIN/$rel"
+  if [[ -f "$f" ]]; then
+    mkdir -p "$(dirname "$BACKUP_DIR/$rel")"
+    if mv -f "$f" "$BACKUP_DIR/$rel"; then
+      moved+=("$rel")
+      kv "moved_$rel" "ok"
+    else
+      kv "moved_$rel" "FAILED"
+    fi
+  fi
+done
+kv "moved_count" "${#moved[@]}"
+for rel in "${rels[@]}"; do
+  kv "after_move_present_$rel" "$([[ -f "$WIN/$rel" ]] && echo true || echo false)"
+done
+
+# Launch wined3d.
+printf '\n[launch_wined3d]\n'
+WAYDAW_ABLETON_GRAPHICS=wined3d "$ROOT_DIR/bin/ableton" > "$LOG_DIR/ableton-cleanwined3d-launch.log" 2>&1 &
+launch_pid=$!
+kv "launch_pid" "$launch_pid"
+
+launched=false
+for i in $(seq 1 60); do
+  if wmctrl -lxG 2>/dev/null | grep -iF 'ableton live 12 suite' | grep -v xwaylandvideobridge >/dev/null; then
+    launched=true; kv "window_appeared_after_s" "$i"; break
+  fi
+  sleep 1
+done
+
+if [[ "$launched" != true ]]; then
+  kv "launch_result" "NO_WINDOW_AFTER_60s"
+  kv "ableton_proc" "$(pgrep -af 'Ableton Live 12 Suite.exe' | grep -v 'zsh -c' | grep -v pgrep | head -1 || echo none)"
+  printf -- '--- launch log tail ---\n'
+  tail -n 40 "$LOG_DIR/ableton-cleanwined3d-launch.log" 2>/dev/null
+  kv "derived_issue" "wined3d_launch_failed_without_dxvk"
+  kv "rule_fired" "no Ableton window within 60s after moving DXVK dlls aside"
+  kv "recommended_next_fix" "restore performed automatically; wined3d-only may be non-viable for this build"
+  "$ROOT_DIR/bin/kill-session" >/dev/null 2>&1 || true
+  exit 0
+fi
+kv "launch_result" "window_visible"
+
+# Let it run/settle and accumulate presentation lines.
+sleep 35
+
+# Measure this run only (segment at most recent launch marker).
+printf '\n[measure]\n'
+last_launch="$(grep -n 'effective environment before Ableton launch' "$ABLETON_LOG" 2>/dev/null | tail -1 | cut -d: -f1 || true)"
+if [[ -n "${last_launch:-}" ]]; then
+  tmp="$(mktemp)"; tail -n +"$last_launch" "$ABLETON_LOG" > "$tmp"
+  kv "log_segment" "from_line_${last_launch}"
+  kv "DXVK_lines" "$(grep -c 'DXVK' "$tmp" 2>/dev/null || echo 0)"
+  kv "VK_SUBOPTIMAL_KHR_count" "$(grep -c 'VK_SUBOPTIMAL_KHR' "$tmp" 2>/dev/null || echo 0)"
+  kv "recreating_swapchain_count" "$(grep -c 'recreating swapchain' "$tmp" 2>/dev/null || echo 0)"
+  kv "Presenter_count" "$(grep -c 'Presenter' "$tmp" 2>/dev/null || echo 0)"
+  kv "swapchain_lines" "$(grep -ci 'swapchain' "$tmp" 2>/dev/null || echo 0)"
+  rm -f "$tmp"
+else
+  kv "log_segment" "no_marker"
+fi
+
+printf '\n[graphics_backend_probe]\n'
+WAYDAW_ABLETON_GRAPHICS=wined3d "$ROOT_DIR/bin/diagnose-ableton-graphics-backend" 2>/dev/null | grep -E 'backend_effective=|DXVK_active_this_run=|derived_issue='
+
+printf '\n[interaction_probe]\n'
+"$ROOT_DIR/bin/diagnose-ableton-interaction" 2>/dev/null | grep -E 'interaction_state=|interaction_rule_fired='
+
+# Derive result.
+printf '\n[result]\n'
+rec="$(grep -n 'effective environment before Ableton launch' "$ABLETON_LOG" 2>/dev/null | tail -1 | cut -d: -f1 || true)"
+recreate=0
+[[ -n "$rec" ]] && recreate="$(tail -n +"$rec" "$ABLETON_LOG" | grep -c 'recreating swapchain' || echo 0)"
+kv "backend_requested" "wined3d"
+if [[ "$recreate" -eq 0 ]]; then
+  kv "DXVK_active" "false"
+  kv "backend_effective" "wined3d"
+  kv "derived_issue" "dxvk_eliminated_by_moving_prefix_dlls"
+  kv "rule_fired" "recreating_swapchain_count == 0 after DXVK dlls moved aside"
+  kv "evidence" "recreating_swapchain=$recreate (was ~3986 with DXVK)"
+  kv "recommended_next_fix" "if flicker/perf acceptable, implement a real wined3d mode that hides DXVK dlls at launch (manual, reversible); confirm subjective performance with user before permanent"
+else
+  kv "DXVK_active" "true"
+  kv "backend_effective" "dxvk_still"
+  kv "derived_issue" "dxvk_active_even_without_prefix_dlls"
+  kv "rule_fired" "recreating_swapchain_count > 0 despite prefix DXVK dlls moved aside"
+  kv "evidence" "recreating_swapchain=$recreate; DXVK likely from host wine build or another override layer"
+  kv "recommended_next_fix" "inspect host wine d3d11/dxgi provenance; this is not fixable by prefix dll changes alone"
+fi
+
+"$ROOT_DIR/bin/kill-session" >/dev/null 2>&1 || true
+# trap restore runs on exit
+exit 0

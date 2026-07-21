@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_PREFIX="${SOURCE_PREFIX:-$HOME/WinePrefixes/ableton12}"
+RUNNER="${RUNNER:-.local-runners/kron4ek-wine-11.11-staging-tkg}"
+LABEL="${LABEL:-candidate2-kron4ek-wine-11-11}"
+LOG_ROOT="$ROOT_DIR/logs/ableton-dxvk-loader-probes"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+
+say() { printf '%s\n' "$*"; }
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+ableton-dxvk-loader-probe - loader-only DXVK probe for copied Ableton prefixes
+
+USAGE:
+  bin/ableton-dxvk-loader-probe [--runner <path>] [--label <label>]
+
+DEFAULT:
+  --runner .local-runners/kron4ek-wine-11.11-staging-tkg
+
+SAFETY:
+  * Does not launch Ableton.
+  * Does not touch the working/source prefix.
+  * Creates copied test prefixes only.
+  * Runs runner prefix update, restores source-prefix system32 DXVK DLLs into the
+    copied prefix, verifies hashes, then probes loader behavior with rundll32.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --runner) RUNNER="${2:-}"; shift 2 ;;
+    --label) LABEL="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1 (see --help)" ;;
+  esac
+done
+
+RUNNER_BIN=""
+resolve_runner_bin() {
+  local cand
+  for cand in "$RUNNER/bin" "$RUNNER/files/bin" "$RUNNER"; do
+    if [[ -x "$cand/wine" ]]; then RUNNER_BIN="$cand"; return 0; fi
+  done
+  return 1
+}
+
+sha256_file() {
+  local f="$1"
+  [[ -f "$f" ]] || { printf 'missing'; return 0; }
+  sha256sum "$f" 2>/dev/null | awk '{print $1}'
+}
+
+dll_signature() {
+  local f="$1" text
+  [[ -f "$f" ]] || { printf 'missing'; return 0; }
+  text="$(strings -n 4 "$f" 2>/dev/null || true)"
+  if grep -qi 'dxvk' <<< "$text"; then
+    printf 'DXVK'
+  elif grep -qiE 'Wine builtin DLL|wine builtin|wined3d|The Wine Project' <<< "$text"; then
+    printf 'Wine builtin DLL'
+  else
+    printf 'indeterminate'
+  fi
+}
+
+copy_system32_dxvk() {
+  local test_prefix="$1" rel src dst
+  for rel in "drive_c/windows/system32/d3d11.dll" "drive_c/windows/system32/dxgi.dll"; do
+    src="$SOURCE_PREFIX/$rel"
+    dst="$test_prefix/$rel"
+    [[ -f "$src" ]] || fail "source DLL missing: $src"
+    mkdir -p "$(dirname "$dst")"
+    cp -f "$src" "$dst" || fail "copy failed: $src -> $dst"
+  done
+}
+
+hashes_match_source() {
+  local test_prefix="$1" rel
+  for rel in "drive_c/windows/system32/d3d11.dll" "drive_c/windows/system32/dxgi.dll"; do
+    [[ "$(sha256_file "$SOURCE_PREFIX/$rel")" == "$(sha256_file "$test_prefix/$rel")" ]] || return 1
+  done
+  return 0
+}
+
+grep_yes_no() {
+  local pattern="$1" file="$2"
+  grep -qiE "$pattern" "$file" 2>/dev/null && printf 'yes' || printf 'no'
+}
+
+loader_loaded_native() {
+  local dll="$1" file="$2"
+  if grep -qiE "Loaded L\"C:\\\\windows\\\\system32\\\\${dll}\\.dll\".*: native" "$file" 2>/dev/null; then
+    printf 'yes'
+  else
+    printf 'no'
+  fi
+}
+
+loader_mapped_prefix_dll() {
+  local dll="$1" file="$2"
+  if grep -qiE "map_image_into_view mapping PE file L\".*${dll}\\.dll\"" "$file" 2>/dev/null; then
+    printf 'yes'
+  else
+    printf 'no'
+  fi
+}
+
+loader_builtin_fallback() {
+  local dll="$1" file="$2"
+  if grep -qiE "Loaded L\"C:\\\\windows\\\\system32\\\\${dll}\\.dll\".*: builtin|${dll}\\.dll.*: builtin|wined3d\\.dll.*: builtin" "$file" 2>/dev/null; then
+    printf 'yes'
+  else
+    printf 'no'
+  fi
+}
+
+loader_lines() {
+  local file="$1"
+  grep -iE 'd3d11|dxgi|loaddll|module|builtin|native|not found|failed|error|err:' "$file" 2>/dev/null \
+    | tail -40 \
+    | sed 's/[[:cntrl:]]//g' \
+    | tr '\n' '|' \
+    | sed 's/|$//'
+}
+
+run_mode() {
+  local mode="$1" overrides="$2"
+  local test_prefix="$HOME/WinePrefixes/ableton12-loader-probe-${LABEL}-${mode}-${STAMP}"
+  local rundir="$LOG_ROOT/${STAMP}-${LABEL}-${mode}"
+  local log="$rundir/winedebug-loader.log"
+  local result="$rundir/result.env"
+  local wine_version exit_code d3d11_exit dxgi_exit d3d11_sig dxgi_sig cmd_text
+
+  [[ -e "$test_prefix" ]] && fail "refusing: test prefix already exists: $test_prefix"
+  mkdir -p "$rundir"
+
+  say "[probe:$mode] copying source prefix -> $test_prefix"
+  rsync -a "$SOURCE_PREFIX/" "$test_prefix/" || fail "rsync failed"
+
+  say "[probe:$mode] runner prefix update"
+  env -u WAYLAND_DISPLAY WINEPREFIX="$test_prefix" PATH="$RUNNER_BIN:$PATH" wineboot -u >> "$log" 2>&1 || true
+
+  copy_system32_dxvk "$test_prefix"
+  if hashes_match_source "$test_prefix"; then
+    hash_match=yes
+  else
+    hash_match=no
+  fi
+  d3d11_sig="$(dll_signature "$test_prefix/drive_c/windows/system32/d3d11.dll")"
+  dxgi_sig="$(dll_signature "$test_prefix/drive_c/windows/system32/dxgi.dll")"
+  wine_version="$(env PATH="$RUNNER_BIN:$PATH" wine --version 2>&1 | head -1)"
+
+  cmd_text="WINEDEBUG=+loaddll,+module WINEDLLOVERRIDES=$overrides wine rundll32.exe d3d11.dll,DllRegisterServer ; wine rundll32.exe dxgi.dll,DllRegisterServer"
+  say "[probe:$mode] loader probe: $overrides"
+  {
+    printf '\n--- loader probe d3d11 (%s) ---\n' "$overrides"
+    env -u WAYLAND_DISPLAY WINEPREFIX="$test_prefix" PATH="$RUNNER_BIN:$PATH" \
+      WINEDEBUG="+loaddll,+module" WINEDLLOVERRIDES="$overrides" \
+      wine rundll32.exe d3d11.dll,DllRegisterServer
+    d3d11_exit="$?"
+    printf 'd3d11_exit=%s\n' "$d3d11_exit"
+    printf '\n--- loader probe dxgi (%s) ---\n' "$overrides"
+    env -u WAYLAND_DISPLAY WINEPREFIX="$test_prefix" PATH="$RUNNER_BIN:$PATH" \
+      WINEDEBUG="+loaddll,+module" WINEDLLOVERRIDES="$overrides" \
+      wine rundll32.exe dxgi.dll,DllRegisterServer
+    dxgi_exit="$?"
+    printf 'dxgi_exit=%s\n' "$dxgi_exit"
+  } >> "$log" 2>&1
+  if [[ "$d3d11_exit" == "0" && "$dxgi_exit" == "0" ]]; then
+    exit_code=0
+  else
+    exit_code="d3d11:${d3d11_exit},dxgi:${dxgi_exit}"
+  fi
+
+  env -u WAYLAND_DISPLAY WINEPREFIX="$test_prefix" PATH="$RUNNER_BIN:$PATH" wineserver -k >> "$log" 2>&1 || true
+
+  {
+    printf 'runner=%s\n' "$RUNNER"
+    printf 'wine_version=%s\n' "$wine_version"
+    printf 'test_prefix=%s\n' "$test_prefix"
+    printf 'override_mode=%s\n' "$mode"
+    printf 'launch_command=%s\n' "$cmd_text"
+    printf 'dxvk_hashes_match_source=%s\n' "$hash_match"
+    printf 'd3d11_signature=%s\n' "$d3d11_sig"
+    printf 'dxgi_signature=%s\n' "$dxgi_sig"
+    printf 'wine_exit_code=%s\n' "$exit_code"
+    printf 'loader_found_d3d11=%s\n' "$(grep_yes_no 'd3d11' "$log")"
+    printf 'loader_found_dxgi=%s\n' "$(grep_yes_no 'dxgi' "$log")"
+    printf 'loader_loaded_native_d3d11=%s\n' "$(loader_loaded_native d3d11 "$log")"
+    printf 'loader_loaded_native_dxgi=%s\n' "$(loader_loaded_native dxgi "$log")"
+    printf 'loader_mapped_prefix_d3d11=%s\n' "$(loader_mapped_prefix_dll d3d11 "$log")"
+    printf 'loader_mapped_prefix_dxgi=%s\n' "$(loader_mapped_prefix_dll dxgi "$log")"
+    printf 'loader_fell_back_builtin_d3d11=%s\n' "$(loader_builtin_fallback d3d11 "$log")"
+    printf 'loader_fell_back_builtin_dxgi=%s\n' "$(loader_builtin_fallback dxgi "$log")"
+    printf 'loader_loaded_wined3d=%s\n' "$(grep_yes_no 'wined3d\.dll' "$log")"
+    printf 'loader_error_lines=%s\n' "$(loader_lines "$log")"
+    printf 'working_prefix_touched=no\n'
+    printf 'run_dir=%s\n' "$rundir"
+  } > "$result"
+
+  say "[probe:$mode] result: $result"
+  cat "$result"
+}
+
+resolve_runner_bin || fail "runner wine not found under '$RUNNER'"
+[[ -d "$SOURCE_PREFIX" ]] || fail "source prefix missing: $SOURCE_PREFIX"
+mkdir -p "$LOG_ROOT"
+
+run_mode native_only "d3d11,dxgi=n"
+run_mode native_then_builtin "d3d11,dxgi=n,b"

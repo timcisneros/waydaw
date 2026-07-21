@@ -142,14 +142,14 @@ out="$(WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-proton 2>/dev/null)"
 check "dry-run discloses shim enablement"     "$out" "sizing_shim=would_enable"
 check "dry-run discloses shim source dll"     "$out" "sizing_shim_dll=$SHIM_DLL"
 check "dry-run discloses shim install target" "$out" "sizing_shim_target=$SHIM_TARGET"
-check "dry-run discloses shim cap height"     "$out" "sizing_shim_cap_h=1040"
+check "dry-run discloses shim cap height"     "$out" "sizing_shim_cap_h=1006"
 check "dry-run discloses shim min floor"      "$out" "sizing_shim_min_h=820"
 out_capoverride="$(WAYDAW_ABLETON_SIZING_CAP_H=1024 WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-proton 2>/dev/null)"
 check "shim cap height is overridable"        "$out_capoverride" "sizing_shim_cap_h=1024"
 check "cap override leaves min floor default" "$out_capoverride" "sizing_shim_min_h=820"
 out_minoverride="$(WAYDAW_ABLETON_SIZING_MIN_H=840 WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-proton 2>/dev/null)"
 check "shim min floor is overridable"         "$out_minoverride" "sizing_shim_min_h=840"
-check "min override leaves cap default"       "$out_minoverride" "sizing_shim_cap_h=1040"
+check "min override leaves cap default"       "$out_minoverride" "sizing_shim_cap_h=1006"
 check "dry-run command carries shim override" "$out" "WINEDLLOVERRIDES=version"
 target_after="none"; [[ -f "$SHIM_TARGET" ]] && target_after="$(sha256sum "$SHIM_TARGET" | awk '{print $1}')"
 [[ "$target_after" == "$target_before" ]] && ok "dry-run does not install/modify the shim in the prefix" \
@@ -162,6 +162,19 @@ ncheck "default launcher has no shim override" "$out_default" "version=n,b"
 [[ -f "$WORKING_PREFIX/drive_c/ProgramData/Ableton/Live 12 Suite/Program/version.dll" ]] \
   && bad "working prefix contains a version.dll shim (must never happen)" \
   || ok "working prefix has no shim DLL"
+
+printf '== 10. safe-fit command (dry-run only; never launches) ==\n'
+[[ -x ./bin/ableton-proton-fit ]] && ok "fit command exists and is executable" || bad "fit command missing/not executable"
+fit_out="$(./bin/ableton-proton-fit --dry-run 2>&1)"; fit_rc=$?
+if [[ "$fit_out" == *"no target"* ]]; then
+  ok "fit reports no-target without a session"
+  [[ "$fit_rc" -ne 0 ]] && ok "fit exits nonzero without a target" || bad "fit exited 0 without a target"
+else
+  # A live Ableton window exists: dry-run must disclose the rect, not mutate.
+  check "fit dry-run discloses safe rect"      "$fit_out" "safe rect ="
+  check "fit dry-run does not mutate"          "$fit_out" "dry-run, no mutation"
+  check "fit derives cap from shim value"      "$fit_out" "cap_h=${WAYDAW_ABLETON_SIZING_CAP_H:-1006}"
+fi
 
 printf '\n== summary ==\npass=%s fail=%s\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -13,16 +13,31 @@
 # FITS under the screen is granted verbatim -> no maximize -> no divergence ->
 # no storm (validated: 1000 -> calm, pumping, interactive).
 #
+# ALSO clears a saved maximized state (2026-07-08): a MainWindow placement
+# saved with showCmd 3 (SW_SHOWMAXIMIZED) makes Ableton create the next
+# session's window WS_MAXIMIZE. The KWin controller translates the maximize
+# safely, but Wine's NC/window mapping in maximized-born sessions stays
+# poisoned: painted height cannot rise above the birth layout (~1006), so
+# tall drags and safe-fit leave a permanent dead strip at the bottom
+# (measured: painted ends ~row 1007 in a 1030-tall window; the same drags
+# paint fully in sessions born unmaximized). Clearing showCmd 3 -> 1
+# (SW_SHOWNORMAL) at launch normalization births every session in the
+# known-good mapping state. This belongs HERE, in birth-state
+# normalization, not in shim height completion: the poison is decided at
+# window creation, before any clamp can run.
+#
 # Scope: copied Proton-exp test prefix ONLY. Refuses the working prefix. Binary
 # edit is in-place, idempotent, and backs up once per run. Reversible.
 #
-# Usage: ableton-proton-normalize-placement <Preferences.cfg> [max_height]
+# Usage: ableton-proton-normalize-placement <Preferences.cfg> [max_height] [--dry-run]
 set -uo pipefail
 
 CFG="${1:-}"
 MAX_H="${2:-1000}"
+DRY=0
+[[ "${3:-}" == "--dry-run" ]] && DRY=1
 if [[ -z "$CFG" ]]; then
-  echo "usage: $(basename "$0") <Preferences.cfg> [max_height]" >&2; exit 2
+  echo "usage: $(basename "$0") <Preferences.cfg> [max_height] [--dry-run]" >&2; exit 2
 fi
 if [[ ! -f "$CFG" ]]; then
   echo "normalize-placement: no file (skip): $CFG" >&2; exit 0
@@ -33,42 +48,86 @@ case "$CFG" in
     echo "normalize-placement ERROR: refusing to edit working prefix: $CFG" >&2; exit 1 ;;
 esac
 
-python3 - "$CFG" "$MAX_H" <<'PY'
+python3 - "$CFG" "$MAX_H" "$DRY" <<'PY'
 import struct, sys
-path, max_h = sys.argv[1], int(sys.argv[2])
+path, max_h, dry = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
 d = bytearray(open(path, 'rb').read())
 
 def i32(o): return struct.unpack_from('<i', d, o)[0]
 
 # A WindowPlacement value is serialized as consecutive int32s:
-#   Type, Pos.x, Pos.y, Size.w, Size.h, <bool flags...>
-# Scan for a plausible placement record whose height exceeds the screen-fit
-# cap and clamp only the height. Only the MainWindow placement is ever born
-# taller than the screen, so this uniquely targets it; other placements
-# (PictureInPicture / SecondWindow) have small/zero heights and are untouched.
-changed = []
+#   showCmd, Pos.x, Pos.y, Size.w, Size.h, <bool flags...>
+# showCmd 1 = SW_SHOWNORMAL, 2 = SW_SHOWMINIMIZED, 3 = SW_SHOWMAXIMIZED
+# (verified 2026-07-08 by diffing a maximized-saved cfg — MainWindow record
+# showCmd 3 — against a plain-seed cfg — same record showCmd 1).
+# The FIRST byte after Size.h is a separate maximized bool: measured 1 in
+# the maximized-saved MainWindow record, 0 in the plain-seed one, and a
+# session born from a cfg with showCmd already cleared to 1 but this byte
+# still 1 STILL created its window maximized — so this byte, not showCmd,
+# is the operative flag (both are cleared for consistency).
+#
+# Three normalizations:
+#  - normalize Size.h TO max_h (both directions) on MAIN-window-sized
+#    records (w >= 1200). Clamping down is screen-fit / storm prevention.
+#    Raising UP matters because Ableton's painted layout height pins at the
+#    BIRTH height while unauthorized and never re-layouts taller (measured
+#    2026-07-08 across maximized-born and clean-born sessions: painted rows
+#    always end at the birth height; drags/fit above it leave a permanent
+#    unpainted strip). Born at the band top, the strip is unreachable.
+#    Narrow records (< 1200 wide: secondary/utility placements) only get
+#    the downward clamp, never the raise.
+#  - clear showCmd 3 -> 1 on any plausible record;
+#  - clear the maximized bool byte (offset +20) 1 -> 0.
+# Maximized-born sessions additionally misbehave (stale atoms, guard churn,
+# higher CPU); clearing the saved maximized state births every session in
+# the known-good state. showCmd 2 (minimized) is left alone.
+MAIN_MIN_W = 1200
+h_changed = []
+m_changed = []
+b_changed = []
 o = 0
 end = len(d) - 24
 while o <= end:
     t = i32(o)
     if t in (1, 2, 3):
         x, y, w, h = i32(o+4), i32(o+8), i32(o+12), i32(o+16)
-        if (0 <= x <= 8000 and 0 <= y <= 8000 and
-                200 <= w <= 8000 and max_h < h <= 8000):
-            struct.pack_into('<i', d, o+16, max_h)
-            changed.append((o+16, h, max_h))
+        plausible = (0 <= x <= 8000 and 0 <= y <= 8000 and
+                     200 <= w <= 8000 and 200 <= h <= 8000)
+        if plausible:
+            mb = d[o+20]
+            print(f"normalize-placement: placement @offset {o} showCmd={t} size={w}x{h} maximized_bool={mb}")
+            if h > max_h or (h < max_h and w >= MAIN_MIN_W):
+                if not dry:
+                    struct.pack_into('<i', d, o+16, max_h)
+                h_changed.append((o+16, h, max_h))
+            if t == 3:
+                if not dry:
+                    struct.pack_into('<i', d, o, 1)
+                m_changed.append(o)
+            if mb == 1:
+                if not dry:
+                    d[o+20] = 0
+                b_changed.append(o+20)
             o += 20
             continue
     o += 1
 
-if changed:
+verb = "would normalize" if dry else "normalized"
+mverb = "would clear" if dry else "cleared"
+for off, old, new in h_changed:
+    print(f"normalize-placement: {verb} placement height {old} -> {new} @offset {off}")
+for off in m_changed:
+    print(f"normalize-placement: {mverb} saved maximized state (showCmd 3 -> 1) @offset {off}")
+for off in b_changed:
+    print(f"normalize-placement: {mverb} saved maximized bool (1 -> 0) @offset {off}")
+if not h_changed and not m_changed and not b_changed:
+    print(f"normalize-placement: no placement height > {max_h} and no saved maximized state; nothing to do (idempotent)")
+elif dry:
+    print("normalize-placement: dry-run, no mutation")
+else:
     bak = path + '.bak-normalize'
     import os
     if not os.path.exists(bak):
         open(bak, 'wb').write(open(path, 'rb').read())
     open(path, 'wb').write(d)
-    for off, old, new in changed:
-        print(f"normalize-placement: clamped placement height {old} -> {new} @offset {off}")
-else:
-    print(f"normalize-placement: no placement height > {max_h}; nothing to do (idempotent)")
 PY

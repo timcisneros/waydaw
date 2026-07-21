@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/env
+source "$ROOT_DIR/config/env"
+
+LOG_DIR="$ROOT_DIR/logs"
+LOG_FILE="$LOG_DIR/ableton-window-geometry-watch.log"
+KWIN_RULES_FILE="${KWIN_RULES_FILE:-$HOME/.config/kwinrulesrc}"
+RULE_ID="${WAYDAW_ABLETON_KWIN_RULE_ID:-waydaw-ableton-live-12-geometry}"
+mkdir -p "$LOG_DIR"
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+kv() { printf '%s=%s\n' "$1" "${2:-unknown}"; }
+normalize_id() { [[ "$1" == 0x* ]] && printf '%s\n' "$1" || printf '0x%x\n' "$1" 2>/dev/null || printf '%s\n' "$1"; }
+
+read_config() {
+  local group="$1" key="$2"
+  if have_cmd kreadconfig6; then
+    kreadconfig6 --file "$KWIN_RULES_FILE" --group "$group" --key "$key" 2>/dev/null || true
+  else
+    awk -v group="$group" -v key="$key" '
+      $0 == "[" group "]" { in_group = 1; next }
+      /^\[/ { in_group = 0 }
+      in_group && index($0, key "=") == 1 { sub("^[^=]+=", ""); print; exit }
+    ' "$KWIN_RULES_FILE" 2>/dev/null || true
+  fi
+}
+
+screen_x=0; screen_y=0; screen_width=0; screen_height=0
+workarea_x=0; workarea_y=0; workarea_width=0; workarea_height=0
+
+collect_screen_geometry() {
+  local line
+  if have_cmd wmctrl; then
+    line="$(wmctrl -d 2>/dev/null | awk '$2 == "*" { print; exit }')"
+    [[ "$line" =~ DG:\ ([0-9]+)x([0-9]+) ]] && screen_width="${BASH_REMATCH[1]}" && screen_height="${BASH_REMATCH[2]}"
+    [[ "$line" =~ WA:\ ([0-9-]+),([0-9-]+)\ ([0-9]+)x([0-9]+) ]] && workarea_x="${BASH_REMATCH[1]}" && workarea_y="${BASH_REMATCH[2]}" && workarea_width="${BASH_REMATCH[3]}" && workarea_height="${BASH_REMATCH[4]}"
+  fi
+  if [[ "$screen_width" -eq 0 ]] && have_cmd xrandr; then
+    line="$(xrandr --query 2>/dev/null | awk '/ connected / { print; exit }')"
+    [[ "$line" =~ ([0-9]+)x([0-9]+)\+([0-9-]+)\+([0-9-]+) ]] && screen_width="${BASH_REMATCH[1]}" && screen_height="${BASH_REMATCH[2]}" && screen_x="${BASH_REMATCH[3]}" && screen_y="${BASH_REMATCH[4]}"
+  fi
+  if [[ "$screen_width" -eq 0 ]] && have_cmd xdpyinfo; then
+    line="$(xdpyinfo 2>/dev/null | awk '/dimensions:/ { print; exit }')"
+    [[ "$line" =~ dimensions:[[:space:]]+([0-9]+)x([0-9]+) ]] && screen_width="${BASH_REMATCH[1]}" && screen_height="${BASH_REMATCH[2]}"
+  fi
+  if [[ "$workarea_width" -eq 0 ]]; then
+    workarea_width="$screen_width"
+  fi
+  if [[ "$workarea_height" -eq 0 ]]; then
+    workarea_height="$screen_height"
+  fi
+}
+
+candidate_ids() {
+  set +o pipefail
+  {
+    have_cmd wmctrl && wmctrl -lxG 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /Ableton|Live 12|wine/ { print $1 }'
+    if have_cmd xdotool; then
+      xdotool search --name Ableton 2>/dev/null | while read -r id; do normalize_id "$id"; done
+      xdotool search --class Ableton 2>/dev/null | while read -r id; do normalize_id "$id"; done
+      xdotool search --name "Live 12" 2>/dev/null | while read -r id; do normalize_id "$id"; done
+    fi
+    if have_cmd xprop; then
+      xprop -root _NET_CLIENT_LIST _NET_CLIENT_LIST_STACKING 2>/dev/null |
+        tr ',' '\n' |
+        awk '/0x[0-9a-fA-F]+/ { for (i=1; i<=NF; i++) if ($i ~ /^0x[0-9a-fA-F]+$/) print $i }' |
+        while read -r id; do
+          props="$(xprop -id "$id" WM_CLASS WM_NAME _NET_WM_NAME 2>/dev/null || true)"
+          if grep -Eiq 'Ableton|Live 12|wine' <<<"$props"; then
+            printf '%s\n' "$id"
+          fi
+        done
+    fi
+  } | awk 'NF && !seen[$0]++'
+  set -o pipefail
+}
+
+xprop_line() {
+  local id="$1" prop="$2"
+  have_cmd xprop || return 1
+  xprop -id "$id" "$prop" 2>/dev/null | sed 's/\r$//' || true
+}
+
+wmctrl_line() {
+  local id="$1"
+  have_cmd wmctrl || return 1
+  wmctrl -lxG 2>/dev/null | awk -v id="$id" '$1 == id { print; exit }'
+}
+
+derive_issue() {
+  local candidate_count="$1" wmclass="$2" bottom="$3" screen_bottom="$4" workarea_bottom="$5" actual_size="$6" frame_top="$7" y="$8" client_y="$9"
+  local expected_wmclass expected_size
+  expected_wmclass="$(read_config "$RULE_ID" wmclass)"
+  expected_size="$(read_config "$RULE_ID" size)"
+  if [[ "$candidate_count" -eq 0 ]]; then
+    kv "derived_issue" "no_ableton_window_found"; kv "rule_fired" "no candidate window matched Ableton/Live/Wine discovery patterns"; kv "evidence" "candidate_count=0 missing_discovery_tools=$(missing_discovery_tools)"
+  elif [[ -z "$expected_wmclass" ]]; then
+    kv "derived_issue" "kwin_rule_not_installed"; kv "rule_fired" "expected Waydaw Ableton KWin rule group missing"; kv "evidence" "rule_id=$RULE_ID present=false"
+  elif [[ -n "$wmclass" && "$wmclass" != *"$expected_wmclass"* ]]; then
+    kv "derived_issue" "kwin_rule_not_matching_window_class"; kv "rule_fired" "actual_wmclass != expected_wmclass"; kv "evidence" "actual_wmclass=$wmclass expected_wmclass=$expected_wmclass"
+  elif [[ "$actual_size" == "0,0" && "$(missing_discovery_tools)" != "none" ]]; then
+    kv "derived_issue" "window_geometry_unavailable"; kv "rule_fired" "geometry tool output unavailable for candidate window"; kv "evidence" "actual_size=$actual_size missing_discovery_tools=$(missing_discovery_tools)"
+  elif [[ "$workarea_bottom" -gt 0 && "$bottom" -gt "$workarea_bottom" ]]; then
+    kv "derived_issue" "window_exceeds_workarea"; kv "rule_fired" "window_bottom > workarea_bottom"; kv "evidence" "window_bottom=$bottom workarea_bottom=$workarea_bottom"
+  elif [[ "$screen_bottom" -gt 0 && "$bottom" -gt "$screen_bottom" ]]; then
+    kv "derived_issue" "window_exceeds_screen"; kv "rule_fired" "window_bottom > screen_bottom"; kv "evidence" "window_bottom=$bottom screen_bottom=$screen_bottom"
+  elif [[ -n "$expected_size" && "$actual_size" != "$expected_size" ]]; then
+    kv "derived_issue" "kwin_rule_present_but_geometry_ignored"; kv "rule_fired" "actual_size != expected_rule_size"; kv "evidence" "actual=$actual_size expected=$expected_size"
+  elif [[ "$frame_top" -gt 0 && "$client_y" -gt "$y" ]]; then
+    kv "derived_issue" "frame_extents_cover_client_top"; kv "rule_fired" "frame_top > 0 and decorated window overlaps/offsets client region"; kv "evidence" "frame_top=$frame_top window_y=$y estimated_client_y=$client_y"
+  else
+    kv "derived_issue" "no_geometry_failure_detected"; kv "rule_fired" "all deterministic geometry checks passed"; kv "evidence" "window_bounds_within_workarea=true wmclass_matches_rule=true"
+  fi
+}
+
+missing_discovery_tools() {
+  local tools=()
+  have_cmd wmctrl || tools+=("wmctrl")
+  have_cmd xdotool || tools+=("xdotool")
+  have_cmd xwininfo || tools+=("xwininfo")
+  if [[ "${#tools[@]}" -eq 0 ]]; then
+    printf 'none'
+  else
+    local IFS=,
+    printf '%s' "${tools[*]}"
+  fi
+}
+
+sample_window() {
+  local sample="$1" id="$2" count="$3" line title wmclass state extents
+  local kde_frame_strut gtk_frame_extents allowed_actions wtype map_state override_state
+  local x=0 y=0 width=0 height=0 right bottom frame_left=0 frame_right=0 frame_top=0 frame_bottom=0 client_y
+  line="$(wmctrl_line "$id" || true)"
+  if [[ -n "$line" ]]; then
+    x="$(awk '{print $3}' <<<"$line")"; y="$(awk '{print $4}' <<<"$line")"; width="$(awk '{print $5}' <<<"$line")"; height="$(awk '{print $6}' <<<"$line")"
+    title="$(awk '{ for (i=9; i<=NF; i++) printf "%s%s", (i==9 ? "" : " "), $i; print "" }' <<<"$line")"
+  else
+    title="unknown"
+  fi
+  wmclass="$(xprop_line "$id" WM_CLASS | sed -E 's/WM_CLASS\(STRING\) = //; s/"//g' || true)"
+  state="$(xprop_line "$id" _NET_WM_STATE || true)"
+  extents="$(xprop_line "$id" _NET_FRAME_EXTENTS | sed -E 's/.*= //' || true)"
+  kde_frame_strut="$(xprop_line "$id" _KDE_NET_WM_FRAME_STRUT || true)"
+  gtk_frame_extents="$(xprop_line "$id" _GTK_FRAME_EXTENTS || true)"
+  allowed_actions="$(xprop_line "$id" _NET_WM_ALLOWED_ACTIONS || true)"
+  wtype="$(xprop_line "$id" _NET_WM_WINDOW_TYPE || true)"
+  if have_cmd xwininfo; then
+    map_state="$(xwininfo -id "$id" 2>/dev/null | awk -F: '$1 ~ /Map State/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }')"
+    override_state="$(xwininfo -id "$id" 2>/dev/null | awk -F: '$1 ~ /Override Redirect State/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }')"
+  else
+    map_state="unknown"
+    override_state="unknown"
+  fi
+  if [[ "$extents" =~ ^([0-9]+),[[:space:]]*([0-9]+),[[:space:]]*([0-9]+),[[:space:]]*([0-9]+) ]]; then
+    frame_left="${BASH_REMATCH[1]}"; frame_right="${BASH_REMATCH[2]}"; frame_top="${BASH_REMATCH[3]}"; frame_bottom="${BASH_REMATCH[4]}"
+  fi
+  right=$((x + width)); bottom=$((y + height)); client_y=$((y + frame_top))
+  kv "timestamp" "$(date '+%Y-%m-%d %H:%M:%S%z')"
+  kv "sample_number" "$sample"
+  kv "candidate_window_id" "$id"
+  kv "title" "$title"
+  kv "WM_CLASS" "$wmclass"
+  kv "x" "$x"; kv "y" "$y"; kv "width" "$width"; kv "height" "$height"
+  kv "window_right" "$right"; kv "window_bottom" "$bottom"
+  kv "frame_extents" "${extents:-0, 0, 0, 0}"
+  kv "_NET_FRAME_EXTENTS" "${extents:-0, 0, 0, 0}"
+  kv "_KDE_NET_WM_FRAME_STRUT" "$kde_frame_strut"
+  kv "_GTK_FRAME_EXTENTS" "$gtk_frame_extents"
+  kv "_NET_WM_ALLOWED_ACTIONS" "$allowed_actions"
+  kv "_NET_WM_WINDOW_TYPE" "$wtype"
+  kv "xwininfo Map State" "$map_state"
+  kv "xwininfo Override Redirect State" "$override_state"
+  kv "workarea" "$workarea_x,$workarea_y ${workarea_width}x${workarea_height}"
+  kv "exceeds_workarea_bottom" "$([[ "$bottom" -gt $((workarea_y + workarea_height)) && "$workarea_height" -gt 0 ]] && printf true || printf false)"
+  kv "exceeds_screen_bottom" "$([[ "$bottom" -gt $((screen_y + screen_height)) && "$screen_height" -gt 0 ]] && printf true || printf false)"
+  kv "_NET_WM_STATE" "$state"
+  derive_issue "$count" "$wmclass" "$bottom" "$((screen_y + screen_height))" "$((workarea_y + workarea_height))" "$width,$height" "$frame_top" "$y" "$client_y"
+}
+
+main() {
+  local sample ids count id key x y w h state prev dx=0 dy=0 dw=0 dh=0 state_changed=false moved=false resized=false
+  local total_resizes=0 total_moves=0 distinct_ids_file max_width=0 max_height=0 max_bottom=0 ever_workarea=false ever_screen=false most_recent_issue="no_ableton_window_found"
+  local start_ts end_ts vk_count final_issue final_rule final_evidence extents derived_block
+  local total_state_changes=0 total_frame_extent_changes=0 frame_extents_appeared_late=false
+  declare -A prev_x prev_y prev_w prev_h prev_state prev_extents
+  distinct_ids_file="$(mktemp)"
+  start_ts="$(date +%s)"
+  {
+    kv "watch_start" "$(date '+%Y-%m-%d %H:%M:%S%z')"
+    for sample in $(seq 1 45); do
+      collect_screen_geometry
+      printf '\n[SAMPLE %s]\n' "$sample"
+      ids="$(candidate_ids || true)"
+      count="$(printf '%s\n' "$ids" | awk 'NF { c++ } END { print c+0 }')"
+      if [[ "$count" -eq 0 ]]; then
+        kv "timestamp" "$(date '+%Y-%m-%d %H:%M:%S%z')"
+        kv "sample_number" "$sample"
+        derive_issue 0 "" 0 "$((screen_y + screen_height))" "$((workarea_y + workarea_height))" "" 0 0 0
+        most_recent_issue="no_ableton_window_found"
+      else
+        while IFS= read -r id; do
+          [[ -z "$id" ]] && continue
+          printf '%s\n' "$id" >>"$distinct_ids_file"
+          sample_window "$sample" "$id" "$count"
+          line="$(wmctrl_line "$id" || true)"
+          x="$(awk '{print $3}' <<<"$line")"; y="$(awk '{print $4}' <<<"$line")"; w="$(awk '{print $5}' <<<"$line")"; h="$(awk '{print $6}' <<<"$line")"
+          [[ -z "$x" ]] && x=0
+          [[ -z "$y" ]] && y=0
+          [[ -z "$w" ]] && w=0
+          [[ -z "$h" ]] && h=0
+          state="$(xprop_line "$id" _NET_WM_STATE || true)"
+          extents="$(xprop_line "$id" _NET_FRAME_EXTENTS | sed -E 's/.*= //' || true)"
+          key="${id}"
+          if [[ -n "${prev_x[$key]+set}" ]]; then
+            dx=$((x - prev_x[$key])); dy=$((y - prev_y[$key])); dw=$((w - prev_w[$key])); dh=$((h - prev_h[$key]))
+            [[ "$dw" -ne 0 || "$dh" -ne 0 ]] && resized=true || resized=false
+            [[ "$dx" -ne 0 || "$dy" -ne 0 ]] && moved=true || moved=false
+            [[ "$state" != "${prev_state[$key]}" ]] && state_changed=true || state_changed=false
+            [[ "$extents" != "${prev_extents[$key]}" ]] && frame_extents_changed=true || frame_extents_changed=false
+            [[ "$resized" == true ]] && total_resizes=$((total_resizes + 1))
+            [[ "$moved" == true ]] && total_moves=$((total_moves + 1))
+            [[ "$state_changed" == true ]] && total_state_changes=$((total_state_changes + 1))
+            if [[ "$frame_extents_changed" == true ]]; then
+              total_frame_extent_changes=$((total_frame_extent_changes + 1))
+              [[ -z "${prev_extents[$key]}" && -n "$extents" ]] && frame_extents_appeared_late=true
+            fi
+          else
+            dx=0; dy=0; dw=0; dh=0; resized=false; moved=false; state_changed=false; frame_extents_changed=false
+          fi
+          prev_x[$key]="$x"; prev_y[$key]="$y"; prev_w[$key]="$w"; prev_h[$key]="$h"; prev_state[$key]="$state"; prev_extents[$key]="$extents"
+          kv "dx" "$dx"; kv "dy" "$dy"; kv "dwidth" "$dw"; kv "dheight" "$dh"
+          kv "state_changed" "$state_changed"; kv "resized_since_previous_sample" "$resized"; kv "moved_since_previous_sample" "$moved"
+          kv "frame_extents_changed" "$frame_extents_changed"
+          [[ "$w" -gt "$max_width" ]] && max_width="$w"
+          [[ "$h" -gt "$max_height" ]] && max_height="$h"
+          [[ $((y + h)) -gt "$max_bottom" ]] && max_bottom=$((y + h))
+          [[ $((y + h)) -gt $((workarea_y + workarea_height)) && "$workarea_height" -gt 0 ]] && ever_workarea=true
+          [[ $((y + h)) -gt $((screen_y + screen_height)) && "$screen_height" -gt 0 ]] && ever_screen=true
+          derived_block="$(derive_issue "$count" "$(xprop_line "$id" WM_CLASS | sed -E 's/WM_CLASS\(STRING\) = //; s/"//g' || true)" "$((y + h))" "$((screen_y + screen_height))" "$((workarea_y + workarea_height))" "$w,$h" 0 "$y" "$y")"
+          most_recent_issue="$(awk -F= '$1=="derived_issue"{print $2; exit}' <<<"$derived_block")"
+        done <<<"$ids"
+      fi
+      sleep 1
+    done
+    end_ts="$(date +%s)"
+    vk_count="$(grep -h 'VK_SUBOPTIMAL_KHR' "$LOG_DIR/ableton.log" "$LOG_DIR/ableton-launch-geometry.log" 2>/dev/null | wc -l | awk '{print $1}')"
+    if [[ "$vk_count" -gt 0 && "$total_resizes" -gt 0 ]]; then
+      final_issue="dxvk_swapchain_resize_loop_correlated"; final_rule="recent VK_SUBOPTIMAL_KHR lines > 0 and number_of_resizes > 0"; final_evidence="vk_suboptimal_count=$vk_count number_of_resizes=$total_resizes"
+    elif [[ "$total_resizes" -gt 3 ]]; then
+      final_issue="window_resize_loop_detected"; final_rule="number_of_resizes > 3"; final_evidence="number_of_resizes=$total_resizes"
+    elif [[ "$ever_workarea" == true ]]; then
+      final_issue="window_exceeded_workarea_during_watch"; final_rule="ever_exceeded_workarea=true"; final_evidence="max_bottom=$max_bottom workarea_bottom=$((workarea_y + workarea_height))"
+    elif [[ "$(sort -u "$distinct_ids_file" | awk 'NF { c++ } END { print c+0 }')" -eq 0 ]]; then
+      final_issue="no_ableton_window_found_during_watch"; final_rule="number_of_distinct_window_ids == 0"; final_evidence="number_of_distinct_window_ids=0"
+    else
+      final_issue="$most_recent_issue"; final_rule="watch completed without resize loop or workarea exceedance"; final_evidence="number_of_resizes=$total_resizes ever_exceeded_workarea=$ever_workarea"
+    fi
+    printf '\n[SUMMARY]\n'
+    kv "number_of_samples" "45"
+    kv "number_of_distinct_window_ids" "$(sort -u "$distinct_ids_file" | awk 'NF { c++ } END { print c+0 }')"
+    kv "number_of_resizes" "$total_resizes"
+    kv "number_of_moves" "$total_moves"
+    kv "number_of_state_changes" "$total_state_changes"
+    kv "number_of_frame_extent_changes" "$total_frame_extent_changes"
+    kv "frame_extents_appeared_late" "$frame_extents_appeared_late"
+    kv "max_width" "$max_width"
+    kv "max_height" "$max_height"
+    kv "max_bottom" "$max_bottom"
+    kv "ever_exceeded_workarea" "$ever_workarea"
+    kv "ever_exceeded_screen" "$ever_screen"
+    kv "most_recent_derived_issue" "$most_recent_issue"
+    kv "final_derived_issue" "$final_issue"
+    kv "rule_fired" "$final_rule"
+    kv "evidence" "$final_evidence"
+    kv "watch_elapsed_seconds" "$((end_ts - start_ts))"
+  } | tee -a "$LOG_FILE"
+  rm -f "$distinct_ids_file"
+}
+
+main
