@@ -640,3 +640,17 @@ For bad Ableton user preferences, backup and reset them:
 ```
 
 The reset command never deletes preferences. It moves the existing roaming Ableton directory to a timestamped backup and creates a fresh empty directory in its place.
+
+## Copied-prefix runtime safety
+
+The Proton path records its runner and native DXVK baseline in
+`config/validated-runtime.sh`. Runner selection and inspection are read-only;
+real launch prepares only the copied prefix and rejects working-prefix overlaps
+or escaping directory symlinks. Preparation verifies all three native DXVK DLLs
+and atomically normalizes preferences while preserving the first backup.
+A required KWin controller failure blocks launch. Recovery uses only the matching
+prefix-scoped wineserver and verifies shutdown before unloading the controller.
+
+Run `./bin/verify-proton-runner-mode` for isolated Python regressions and
+`node tests/test_kwin_controller.cjs` for KWin compatibility checks. These checks
+use fixture services and do not launch installed applications.

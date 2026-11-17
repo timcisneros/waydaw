@@ -2,12 +2,15 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Inspection must be selected before sourcing any runner configuration.
+if [[ "${1:-}" == --print-launch-config ]]; then
+  export WAYDAW_ABLETON_DRY_RUN=1
+fi
 # shellcheck source=../config/env
 source "$ROOT_DIR/config/env"
 
 LOG_DIR="$ROOT_DIR/logs"
 LOG_FILE="$LOG_DIR/ableton.log"
-mkdir -p "$LOG_DIR"
 
 diagnostic_no_registry="${WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY:-0}"
 dry_run="${WAYDAW_ABLETON_DRY_RUN:-0}"
@@ -149,7 +152,8 @@ install_sizing_shim() {
   if cmp -s "$sizing_shim_dll" "$target" 2>/dev/null; then
     printf 'WAYDAW: sizing shim already installed: %s\n' "$target"
   else
-    cp -f "$sizing_shim_dll" "$target" || return 1
+    rm -f -- "$target" || return 1
+    cp -- "$sizing_shim_dll" "$target" || return 1
     printf 'WAYDAW: sizing shim installed: %s\n' "$target"
   fi
 }
@@ -204,7 +208,7 @@ configure_ableton_graphics() {
       ;;
     dxvk)
       if [[ "$diagnostic_no_registry" == 1 ]]; then
-        ableton_winedlloverrides=""
+        ableton_winedlloverrides="d3d11,dxgi,d3d10core=n"
       else
         ableton_winedlloverrides="${WINEDLLOVERRIDES:-}"
       fi
@@ -343,13 +347,17 @@ if [[ ! -d "$WINEPREFIX" ]]; then
 fi
 
 ableton_exe="$(find_ableton_exe)"
+if [[ "${WAYDAW_ABLETON_RUNNER:-}" == proton-exp && -n "$ableton_exe" ]]; then
+  ableton_exe="$(realpath -e -- "$ableton_exe")"
+  [[ "$ableton_exe/" == "$WINEPREFIX/"* ]] || { printf 'ERROR: Ableton executable escapes the copied prefix.\n' >&2; exit 1; }
+fi
 if [[ -z "$ableton_exe" ]]; then
   printf 'ERROR: Ableton Live 12 executable not found in %s\n' "$WINEPREFIX" >&2
   printf 'Expected an installed Live 12 executable under drive_c/ProgramData or drive_c/Program Files.\n' >&2
   exit 1
 fi
 
-warn_if_ableton_updates_present | tee -a "$LOG_FILE"
+warn_if_ableton_updates_present
 if ! configure_ableton_graphics; then
   exit 1
 fi
@@ -362,6 +370,18 @@ fi
 if [[ "$dry_run" == 1 ]]; then
   print_dry_run "$@"
   exit 0
+fi
+
+mkdir -p "$LOG_DIR"
+if [[ "${WAYDAW_ABLETON_RUNNER:-}" == proton-exp ]]; then
+  if [[ "${WAYDAW_PREFIX_PREPARED:-0}" != 1 ]]; then
+    waydaw_prepare_proton_prefix || exit 1
+  fi
+  waydaw_verify_dxvk || exit 1
+fi
+if [[ -e "$WINEPREFIX/drive_c/ProgramData/Ableton/.Live 12 Suite_updated" ]]; then
+  printf 'ERROR: Ableton updater swap marker present; launch blocked.\n' >&2
+  exit 1
 fi
 
 if [[ "$diagnostic_no_registry" != 1 && "$window_driver" == x11 ]]; then
@@ -389,15 +409,14 @@ if [[ "$print_only" -eq 1 ]]; then
 fi
 
 # KWin decoration controller: real-launch only (dry-run and
-# --print-launch-config exit above). Idempotent — the controller no-ops if
-# already loaded. On failure we launch anyway but say so LOUDLY: the session
-# would run without titlebar-flicker protection.
+# --print-launch-config exit above). A required controller must load before
+# Wine starts; otherwise the supported presentation guarantees do not hold.
 if [[ "$kwin_controller_enabled" == 1 && "$window_driver" == x11 ]]; then
   if "$ROOT_DIR/bin/ableton-kwin-decoration-controller" --load 2>&1 | tee -a "$LOG_FILE"; then
     printf 'WAYDAW: KWin decoration controller active (unloaded by bin/ableton-proton-cleanup)\n' | tee -a "$LOG_FILE"
   else
-    printf 'WAYDAW WARNING: KWin decoration controller FAILED to load — titlebar flicker protection is NOT active this session.\n' | tee -a "$LOG_FILE" >&2
-    printf 'WAYDAW WARNING: load manually with bin/ableton-kwin-decoration-controller --load, or check org.kde.KWin scripting.\n' | tee -a "$LOG_FILE" >&2
+    printf 'ERROR: required KWin decoration controller failed; launch blocked.\n' | tee -a "$LOG_FILE" >&2
+    exit 1
   fi
 fi
 
@@ -419,15 +438,12 @@ launch_env+=(WINEPREFIX="$WINEPREFIX")
 if [[ -n "${launch_winedlloverrides:-}" ]]; then
   # Explicit overrides (graphics and/or sizing shim). Setting the variable
   # outright gives the same host-value isolation the no-registry unset did.
-  "${launch_env[@]}" WINEDLLOVERRIDES="$launch_winedlloverrides" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
-  wine_status="${PIPESTATUS[0]}"
-elif [[ "$diagnostic_no_registry" == 1 ]]; then
-  "${launch_env[@]}" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
-  wine_status="${PIPESTATUS[0]}"
-else
-  "${launch_env[@]}" wine "$ableton_exe" "$@" 2>&1 | tee -a "$LOG_FILE"
-  wine_status="${PIPESTATUS[0]}"
+  launch_env+=("WINEDLLOVERRIDES=$launch_winedlloverrides")
 fi
+# Wait for Wine itself. Background Windows helpers can retain stdout after
+# Live exits; a foreground tee pipeline would hide that exit from supervision.
+"${launch_env[@]}" wine "$ableton_exe" "$@" > >(tee -a "$LOG_FILE") 2>&1
+wine_status=$?
 set -e
 
 printf '[%s] Ableton wine exit code: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$wine_status" | tee -a "$LOG_FILE"

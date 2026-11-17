@@ -27,7 +27,7 @@
 # window creation, before any clamp can run.
 #
 # Scope: copied Proton-exp test prefix ONLY. Refuses the working prefix. Binary
-# edit is in-place, idempotent, and backs up once per run. Reversible.
+# edit is atomic and idempotent, preserving the first backup. Reversible.
 #
 # Usage: ableton-proton-normalize-placement <Preferences.cfg> [max_height] [--dry-run]
 set -uo pipefail
@@ -42,16 +42,28 @@ fi
 if [[ ! -f "$CFG" ]]; then
   echo "normalize-placement: no file (skip): $CFG" >&2; exit 0
 fi
-# Guard: never touch anything under the working prefix.
-case "$CFG" in
-  "$HOME/WinePrefixes/ableton12/"*)
-    echo "normalize-placement ERROR: refusing to edit working prefix: $CFG" >&2; exit 1 ;;
-esac
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/config/prefix-safety.sh"
+prefix="$(waydaw_copied_prefix)" || exit 1
 
-python3 - "$CFG" "$MAX_H" "$DRY" <<'PY'
-import struct, sys
-path, max_h, dry = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
-d = bytearray(open(path, 'rb').read())
+python3 - "$CFG" "$MAX_H" "$DRY" "$prefix" <<'PY'
+import os
+from pathlib import Path
+import stat
+import struct
+import sys
+import tempfile
+
+path, max_h, dry = Path(sys.argv[1]).resolve(strict=True), int(sys.argv[2]), sys.argv[3] == "1"
+prefix = Path(sys.argv[4]).resolve()
+if prefix not in path.parents:
+    raise SystemExit('normalize-placement ERROR: Preferences.cfg escapes the copied prefix.')
+with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as source:
+    attributes = os.fstat(source.fileno())
+    if not stat.S_ISREG(attributes.st_mode):
+        raise SystemExit('normalize-placement ERROR: Preferences.cfg must be a regular file.')
+    original = source.read()
+d = bytearray(original)
 
 def i32(o): return struct.unpack_from('<i', d, o)[0]
 
@@ -125,9 +137,52 @@ if not h_changed and not m_changed and not b_changed:
 elif dry:
     print("normalize-placement: dry-run, no mutation")
 else:
-    bak = path + '.bak-normalize'
-    import os
-    if not os.path.exists(bak):
-        open(bak, 'wb').write(open(path, 'rb').read())
-    open(path, 'wb').write(d)
+    backup = path.with_name(path.name + '.bak-normalize')
+
+    def backup_exists():
+        try:
+            attributes = backup.lstat()
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(attributes.st_mode):
+            raise SystemExit('normalize-placement ERROR: backup must be a regular file, never a symlink.')
+        return True
+
+    def stage(data, mode):
+        fd, name = tempfile.mkstemp(prefix='.Preferences.cfg-', dir=path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                os.fchmod(output.fileno(), mode)
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+            return temporary
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    if not backup_exists():
+        temporary = stage(original, 0o600)
+        try:
+            # An atomic, exclusive publication cannot follow or overwrite an
+            # existing backup symlink, including one with a missing target.
+            try:
+                os.link(temporary, backup)
+            except FileExistsError:
+                backup_exists()
+        finally:
+            temporary.unlink(missing_ok=True)
+    temporary = stage(d, stat.S_IMODE(attributes.st_mode))
+    try:
+        # Replace the directory entry: readers and hard-linked source files
+        # retain the complete original until the new preferences are ready.
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 PY

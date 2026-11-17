@@ -330,7 +330,11 @@ function manage(w) {
     managed.add(w);
     // Caption arrives late on Proton windows; re-evaluate on every change.
     w.captionChanged.connect(() => pin(w, "captionChanged"));
-    w.noBorderChanged.connect(() => pin(w, "noBorderChanged"));
+    // This signal is not exposed on every KWin window type/version. The
+    // frame-geometry handler below also observes decoration changes.
+    if (w.noBorderChanged && typeof w.noBorderChanged.connect === "function") {
+        w.noBorderChanged.connect(() => pin(w, "noBorderChanged"));
+    }
     // Measured (2026-07-06): KWin's X11 Motif-hint handler drops the
     // decoration WITHOUT emitting noBorderChanged, so that signal alone
     // sleeps through the churn. The decoration drop always changes the frame
@@ -362,7 +366,6 @@ function manage(w) {
     } else if (isTarget(w)) {
         console.warn(TAG, "interactiveMoveResizeFinished unavailable; floor/nudge rely on frameGeometryChanged only");
     }
-    w.closed.connect(() => { managed.delete(w); lastUnmax.delete(w); lastFloor.delete(w); resizeSeen.delete(w); fitApplied.delete(w); });
     if (isTarget(w)) {
         console.info(TAG, "target matched:", w.internalId, "caption=", w.caption);
         pin(w, "initial");
@@ -374,6 +377,13 @@ function manage(w) {
 
 workspace.windowList().forEach(manage);
 workspace.windowAdded.connect(manage);
+workspace.windowRemoved.connect((w) => {
+    managed.delete(w);
+    lastUnmax.delete(w);
+    lastFloor.delete(w);
+    resizeSeen.delete(w);
+    fitApplied.delete(w);
+});
 console.info(TAG, "loaded; watching for steam_proton + 'Ableton Live 12 Suite' normal windows"
              + " (manual height cap: workarea - " + MANUAL_CAP_MARGIN
              + ", manual height floor: <" + MANUAL_FLOOR_MIN + " -> " + MANUAL_FLOOR_RESTORE

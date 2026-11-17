@@ -17,9 +17,8 @@
 #   * Proton mode forces the diagnostic no-registry launch path so bin/ableton
 #     does NOT issue `wine reg` writes; those trigger a Proton prefix-update
 #     that overwrites the prefix's DXVK d3d11/dxgi with Wine builtins. Skipping
-#     them keeps the debug DXVK DLLs intact through launch (matches the
-#     validated 2026-07-04 progress runs).
-#   * DXVK is force-enabled and, defensively, the debug-DXVK DLL hashes are
+#     them keeps the pinned native DXVK DLLs intact through launch.
+#   * DXVK is force-enabled and, defensively, the pinned DXVK DLL hashes are
 #     re-asserted into the test prefix (restored read-only from the working
 #     prefix) in case a prior boot drifted them.
 
@@ -27,11 +26,8 @@ _waydaw_runner="${WAYDAW_ABLETON_RUNNER:-}"
 
 if [[ -n "$_waydaw_runner" && "$_waydaw_runner" != system ]]; then
   _waydaw_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  # Known-good debug DXVK (2.7) DLL hashes — the mandatory backend for this
-  # prefix. The working prefix is the authoritative read-only source.
-  _dxvk_d3d11_sha=557c1f50e7ff73bcd24968a02352519df89d8b3fe037d47580091ffafe1940dd
-  _dxvk_dxgi_sha=f31cd64b547c59441956b17e2a013791dcb62abb1e671fb31d49ff4d6c2b3fd7
-
+  source "$_waydaw_root/config/validated-runtime.sh"
+  source "$_waydaw_root/config/prefix-safety.sh"
   case "$_waydaw_runner" in
     proton-exp)
       _rbin="$_waydaw_root/.local-runners/kron4ek-proton-exp-11.0/bin"
@@ -42,13 +38,8 @@ if [[ -n "$_waydaw_runner" && "$_waydaw_runner" != system ]]; then
 
       _working_prefix="$WINEPREFIX"
       # Proton mode targets the copied test prefix only.
-      WINEPREFIX="${WAYDAW_ABLETON_RUNNER_PREFIX:-$HOME/WinePrefixes/ableton12-winebase-protonexp-test}"
+      WINEPREFIX="$(waydaw_copied_prefix)" || return 1
       export WINEPREFIX
-      if [[ "$WINEPREFIX" == "$_working_prefix" ]]; then
-        printf 'WAYDAW runner ERROR: proton-exp refuses to target the working prefix (%s).\n' "$_working_prefix" >&2
-        printf 'Set WAYDAW_ABLETON_RUNNER_PREFIX to a copied test prefix.\n' >&2
-        return 1
-      fi
       if [[ ! -d "$WINEPREFIX" ]]; then
         printf 'WAYDAW runner ERROR: proton-exp test prefix does not exist: %s\n' "$WINEPREFIX" >&2
         return 1
@@ -58,70 +49,6 @@ if [[ -n "$_waydaw_runner" && "$_waydaw_runner" != system ]]; then
       # Keep DXVK on and skip registry writes (see design notes above).
       export WAYDAW_ABLETON_GRAPHICS="${WAYDAW_ABLETON_GRAPHICS:-dxvk}"
       export WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY="${WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY:-1}"
-
-      # Defensive DXVK re-assert into the test prefix (working prefix read-only).
-      _tsys="$WINEPREFIX/drive_c/windows/system32"
-      _wsys="$_working_prefix/drive_c/windows/system32"
-      _waydaw_sha() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
-      for _pair in "d3d11.dll:$_dxvk_d3d11_sha" "dxgi.dll:$_dxvk_dxgi_sha"; do
-        _f="${_pair%%:*}"; _want="${_pair#*:}"
-        if [[ "$(_waydaw_sha "$_tsys/$_f")" != "$_want" ]]; then
-          if [[ "$(_waydaw_sha "$_wsys/$_f")" == "$_want" ]]; then
-            cp -f "$_wsys/$_f" "$_tsys/$_f" \
-              && printf 'WAYDAW runner: re-asserted debug DXVK %s into test prefix\n' "$_f" >&2
-          else
-            printf 'WAYDAW runner WARN: DXVK %s drifted and working-prefix source hash mismatch; not restored\n' "$_f" >&2
-          fi
-        fi
-      done
-      unset -f _waydaw_sha 2>/dev/null
-
-      # Window-placement seed (copied prefix only). Proton runs Ableton as the
-      # Windows user "steamuser", which has NO Preferences.cfg, so Ableton opens
-      # with its default fullscreen (maximized both) window that Wine renders
-      # frameless. Seed steamuser's Preferences.cfg from the prefix's own
-      # "timcis" profile (the working-prefix-derived prefs, which open a normal
-      # maximized-vertical decorated window). Only when steamuser has none, so
-      # Ableton's own later saves win. See docs/ableton-proton-window-presentation.md.
-      _abl="AppData/Roaming/Ableton"
-      _su_pref="$(ls -d "$WINEPREFIX"/drive_c/users/steamuser/"$_abl"/Live\ */Preferences 2>/dev/null | head -1)"
-      _tc_pref="$(ls -d "$WINEPREFIX"/drive_c/users/timcis/"$_abl"/Live\ */Preferences 2>/dev/null | head -1)"
-      if [[ -n "$_su_pref" && -n "$_tc_pref" \
-            && ! -f "$_su_pref/Preferences.cfg" && -f "$_tc_pref/Preferences.cfg" ]]; then
-        cp -f "$_tc_pref/Preferences.cfg" "$_su_pref/Preferences.cfg" \
-          && printf 'WAYDAW runner: seeded steamuser Ableton Preferences.cfg (decorated window placement)\n' >&2
-      fi
-      # Normalize the seeded/saved MainWindow placement to the band-top birth
-      # height (default 1026 -> born X client ~1032 = workarea 1080 - guard-3
-      # margin 20 - titlebar 28; the +6 is the measured cfg->client delta).
-      # DOWNWARD clamp: the stock seed height (1096) exceeds the 1080px
-      # screen, so the window is coerced to vertical-maximize; Wine then
-      # loops forever reconciling its 1096 client belief against the WM's
-      # 1052 grant, starving the UI-thread message pump (no input, no close)
-      # while unauthorized. A height that fits under the screen is granted
-      # verbatim -> no maximize -> no storm. UPWARD raise (2026-07-08):
-      # Ableton's painted layout height pins at the BIRTH height while
-      # unauthorized and never re-layouts taller, so any height above birth
-      # shows a permanent unpainted strip; born at the band top the strip is
-      # unreachable. Also clears a saved maximized state (showCmd + bool) —
-      # maximized-born sessions misbehave (stale atoms, guard churn). Runs
-      # every launch (idempotent) so Ableton-saved drift is corrected too.
-      # See docs/ableton-proton-exp-message-pump-starvation.md and
-      # docs/ableton-proton-presentation-contract.md.
-      if [[ -n "$_su_pref" && -f "$_su_pref/Preferences.cfg" ]]; then
-        if [[ "${WAYDAW_ABLETON_DRY_RUN:-0}" == 1 ]]; then
-          printf 'WAYDAW runner: [dry-run] would clamp MainWindow placement height to <= %s in %s (no mutation)\n' \
-            "${WAYDAW_ABLETON_MAX_WINDOW_HEIGHT:-1026}" "$_su_pref/Preferences.cfg" >&2
-          # Read-only detection pass: discloses saved placement heights and
-          # any saved maximized state (showCmd 3) a real launch would clear.
-          "$_waydaw_root/bin/ableton-proton-normalize-placement" \
-            "$_su_pref/Preferences.cfg" "${WAYDAW_ABLETON_MAX_WINDOW_HEIGHT:-1026}" --dry-run >&2 || true
-        else
-          "$_waydaw_root/bin/ableton-proton-normalize-placement" \
-            "$_su_pref/Preferences.cfg" "${WAYDAW_ABLETON_MAX_WINDOW_HEIGHT:-1026}" >&2 || true
-        fi
-      fi
-      unset _abl _su_pref _tc_pref
 
       # KWin decoration controller (titlebar-flicker protection). Only FLAGGED
       # here — actually loaded by bin/ableton at real launch time (never on
@@ -148,7 +75,75 @@ if [[ -n "$_waydaw_runner" && "$_waydaw_runner" != system ]]; then
       return 1
       ;;
   esac
-  unset _rbin _working_prefix _tsys _wsys _pair _f _want
+  unset _rbin _working_prefix
 fi
 
-unset _waydaw_runner _waydaw_root _dxvk_d3d11_sha _dxvk_dxgi_sha
+unset _waydaw_runner _waydaw_root
+
+# Verification is separate from preparation: Wine startup (including Bome)
+# may update prefix DLLs after preparation. Never repair a live Bome session.
+waydaw_require_native_dxvk() {
+  if head -c 128 -- "$1" 2>/dev/null | LC_ALL=C grep -aFq 'Wine builtin DLL'; then
+    printf 'ERROR: DXVK %s has a Wine builtin marker; upstream native DXVK is required.\n' "$1" >&2
+    return 1
+  fi
+}
+
+waydaw_verify_dxvk() {
+  local pair file expected actual
+  for pair in "d3d11.dll:$WAYDAW_D3D11_SHA256" "dxgi.dll:$WAYDAW_DXGI_SHA256" "d3d10core.dll:$WAYDAW_D3D10CORE_SHA256"; do
+    file="${pair%%:*}"; expected="${pair#*:}"
+    actual="$(sha256sum "$WINEPREFIX/drive_c/windows/system32/$file" 2>/dev/null | awk '{print $1}')" || actual=""
+    if [[ "$actual" != "$expected" ]]; then
+      printf 'ERROR: DXVK verification failed for %s after prefix preparation; launch blocked.\n' "$file" >&2
+      return 1
+    fi
+    waydaw_require_native_dxvk "$WINEPREFIX/drive_c/windows/system32/$file" || return 1
+  done
+}
+
+# Sourcing config/env only selects a runner. Preparation is explicit and runs
+# after inspection exits and after the supervisor has acquired its lock.
+waydaw_prepare_proton_prefix() {
+  [[ "${WAYDAW_ABLETON_RUNNER:-}" == proton-exp ]] || return 0
+  local prefix system source_system pair file expected actual source_hash preferences seed
+  prefix="$(waydaw_copied_prefix)" || return 1
+  system="$prefix/drive_c/windows/system32"
+  source_system="$HOME/WinePrefixes/ableton12/drive_c/windows/system32"
+  for pair in "d3d11.dll:$WAYDAW_D3D11_SHA256" "dxgi.dll:$WAYDAW_DXGI_SHA256" "d3d10core.dll:$WAYDAW_D3D10CORE_SHA256"; do
+    file="${pair%%:*}"; expected="${pair#*:}"
+    actual="$(sha256sum "$system/$file" 2>/dev/null | awk '{print $1}')" || actual=""
+    if [[ "$actual" == "$expected" && ! -L "$system/$file" ]]; then
+      waydaw_require_native_dxvk "$system/$file" || return 1
+      continue
+    fi
+    source_hash="$(sha256sum "$source_system/$file" 2>/dev/null | awk '{print $1}')" || source_hash=""
+    if [[ "$source_hash" != "$expected" ]]; then
+      printf 'ERROR: required DXVK %s is missing or changed; no verified restore source.\n' "$file" >&2
+      return 1
+    fi
+    waydaw_require_native_dxvk "$source_system/$file" || return 1
+    # Never follow a copied-prefix DLL symlink into the working prefix.
+    rm -f -- "$system/$file" || return 1
+    cp -- "$source_system/$file" "$system/$file" || return 1
+    printf 'WAYDAW: restored verified DXVK %s in copied prefix\n' "$file"
+  done
+  # Use the current Linux user's copied profile rather than a hard-coded name.
+  preferences="$(find "$prefix/drive_c/users/steamuser/AppData/Roaming/Ableton" -path '*/Preferences' -type d 2>/dev/null | sort | tail -1)" || preferences=""
+  seed="$(find "$prefix/drive_c/users/${USER:-$(id -un)}/AppData/Roaming/Ableton" -path '*/Preferences/Preferences.cfg' -type f 2>/dev/null | sort | tail -1)" || seed=""
+  if [[ -n "$preferences" ]]; then
+    local resolved_preferences
+    resolved_preferences="$(realpath -m -- "$preferences/Preferences.cfg")" || return 1
+    [[ "$resolved_preferences/" == "$prefix/"* ]] || {
+      printf 'ERROR: Preferences.cfg escapes the copied prefix.\n' >&2
+      return 1
+    }
+  fi
+  if [[ -n "$preferences" && ! -e "$preferences/Preferences.cfg" && -n "$seed" ]]; then
+    cp -- "$seed" "$preferences/Preferences.cfg" || return 1
+  fi
+  if [[ -n "$preferences" && -f "$preferences/Preferences.cfg" ]]; then
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/ableton-proton-normalize-placement" \
+      "$preferences/Preferences.cfg" "${WAYDAW_ABLETON_MAX_WINDOW_HEIGHT:-1026}" || return 1
+  fi
+}

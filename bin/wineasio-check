@@ -3,7 +3,7 @@ set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../config/env
-source "$ROOT_DIR/config/env"
+source "$ROOT_DIR/config/env" || exit 1
 
 LOG_DIR="$ROOT_DIR/logs"
 LOG_FILE="$LOG_DIR/wineasio-check.log"
@@ -13,7 +13,6 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 found=0
 total=0
-critical_missing=0
 asio_registry_found=0
 dll_found=0
 pw_jack_found=0
@@ -29,6 +28,16 @@ have_cmd() {
 }
 
 find_wine64() {
+  if [[ "${WAYDAW_ABLETON_RUNNER:-}" == proton-exp ]]; then
+    # This runner uses a single wine executable for 64-bit Windows programs.
+    # Falling through to the host wine64 would update the selected prefix
+    # with a different Wine build.
+    local selected="$ROOT_DIR/.local-runners/kron4ek-proton-exp-11.0/bin/wine"
+    [[ -x "$selected" ]] || return 1
+    printf '%s\n' "$selected"
+    return 0
+  fi
+
   if command -v wine64 >/dev/null 2>&1; then
     command -v wine64
     return 0
@@ -93,7 +102,6 @@ check_wineasio_dll() {
   fi
 
   printf 'MISSING: wineasio DLL not found in WINEPREFIX, /usr/lib, or /usr/lib64\n'
-  critical_missing=1
   return 1
 }
 
@@ -109,7 +117,6 @@ check_wineasio_prefix_64_dll() {
   fi
 
   printf 'MISSING: wineasio64.dll not found inside prefix windows directory\n'
-  critical_missing=1
   return 1
 }
 
@@ -118,7 +125,6 @@ check_wineasio_asio_registry() {
 
   if [[ -z "$wine64_cmd" ]]; then
     printf 'MISSING: native 64-bit Wine command unavailable; cannot query 64-bit ASIO registry\n'
-    critical_missing=1
     return 1
   fi
 
@@ -137,7 +143,6 @@ check_wineasio_asio_registry() {
   fi
 
   printf 'MISSING: native 64-bit WineASIO ASIO registration in HKLM/HKCU Software\\ASIO\n'
-  critical_missing=1
   return 1
 }
 
@@ -147,7 +152,6 @@ check_wineasio_inproc_64() {
 
   if [[ -z "$wine64_cmd" ]]; then
     printf 'MISSING: native 64-bit Wine command unavailable; cannot query WineASIO CLSID InProcServer32\n'
-    critical_missing=1
     return 1
   fi
 
@@ -163,7 +167,6 @@ check_wineasio_inproc_64() {
   if printf '%s\n' "$output" | grep -qi 'wineasio32\.dll'; then
     printf 'NOT READY: WineASIO CLSID InProcServer32 points to wineasio32.dll, not wineasio64.dll\n'
     printf '%s\n' "$output"
-    critical_missing=1
     return 1
   fi
 
@@ -171,7 +174,6 @@ check_wineasio_inproc_64() {
   if [[ -n "$output" ]]; then
     printf '%s\n' "$output"
   fi
-  critical_missing=1
   return 1
 }
 

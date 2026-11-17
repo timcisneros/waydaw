@@ -19,7 +19,7 @@ mkdir -p "$OUT_DIR"
 "$CC" -shared -O2 -Wall -Wextra \
   -o "$OUT_DIR/version.dll" \
   "$SRC_DIR/version-shim.c" "$SRC_DIR/version.def" \
-  -luser32 -lkernel32 -static-libgcc
+  -luser32 -lkernel32 -static-libgcc -Wl,--no-insert-timestamp
 
 echo "built: $OUT_DIR/version.dll"
 sha256sum "$OUT_DIR/version.dll"

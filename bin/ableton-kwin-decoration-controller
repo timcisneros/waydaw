@@ -58,9 +58,8 @@ case "$cmd" in
     else
       echo "not loaded (nothing to unload): $PLUGIN_NAME"
     fi
-    if [[ "$(is_loaded)" == "true" ]]; then
-      echo "ERROR: still loaded after unload" >&2; exit 1
-    fi
+    st="$(is_loaded)"
+    [[ "$st" == false ]] || { echo "ERROR: controller unload could not be verified (loaded=${st:-unknown})" >&2; exit 1; }
     ;;
   --status)
     st="$(is_loaded)"

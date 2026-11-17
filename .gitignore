@@ -6,6 +6,10 @@ docs/*
 !docs/ableton-runner-candidate-plan.md
 !docs/ableton-dxvk-loader-audit.md
 !docs/ableton-system-wine-baseline-next.md
+!docs/production-readiness.md
+tests/__pycache__/
+config/__pycache__/
+.local-tools/waydaw-launch/
 logs/*
 .local-runners/
 kxstudio-repos_11.2.0_all.deb
