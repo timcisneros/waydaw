@@ -10,6 +10,7 @@ source "$ROOT_DIR/config/prefix-safety.sh"
 source "$ROOT_DIR/config/validated-runtime.sh"
 source "$ROOT_DIR/config/session-lifecycle.sh"
 source "$ROOT_DIR/config/bome.sh"
+source "$ROOT_DIR/config/authorization.sh"
 prefix="$(waydaw_copied_prefix)" || exit 1
 runner="$ROOT_DIR/.local-runners/kron4ek-proton-exp-11.0/bin"
 runtime_dir="${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}}/waydaw"
@@ -34,7 +35,7 @@ done
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 stop_workers() {
   local name result=0
-  for name in ableton bome bridge; do
+  for name in authorization ableton bome bridge; do
     waydaw_stop_worker "$runtime_dir/$name.state" "$name" || result=1
   done
   return "$result"
@@ -140,7 +141,7 @@ case "$command" in
         if [[ "$bome_exit" == 0 ]]; then printf 'bome=stopped\n'; else printf 'bome=failed\n'; fi
         printf 'bome_exit=%s\nsession_log=%s\n' "$bome_exit" "${session[4]}"
       fi
-    elif [[ -e "$state_file" || -e "$bridge_file" || -e "$ableton_file" || -e "$bome_file" ]]; then
+    elif [[ -e "$state_file" || -e "$bridge_file" || -e "$ableton_file" || -e "$bome_file" || -e "$runtime_dir/authorization.state" ]]; then
       printf 'session=recovery-required\nprefix=%s\n' "$prefix"
       if read_session; then
         printf 'recorded_prefix=%s\nrecorded_checkout=%s\n' "${session[2]}" "${session[3]}"
@@ -149,6 +150,17 @@ case "$command" in
       printf 'session=stopped\nprefix=%s\n' "$prefix"
     fi
     exit 0 ;;
+  authorize)
+    [[ $# == 1 && "$inspect" == 0 ]] || fail 'Expected one authorization request; dry-run delivery is not supported.'
+    active_session || fail 'Open WayDAW Ableton before authorizing it.'
+    [[ "${session[3]}" == "$ROOT_DIR" ]] || fail 'Install authorization handlers from the running WayDAW checkout.'
+    # Browsers may have been running before a custom copied prefix was selected.
+    # The verified live session, rather than the browser environment, owns it.
+    prefix="$(WAYDAW_ABLETON_RUNNER_PREFIX="${session[2]}" waydaw_copied_prefix)" || exit 1
+    [[ "$prefix" == "${session[2]}" ]] || fail 'Invalid authorization session prefix.'
+    [[ -n "${session[4]:-}" ]] || fail 'Restart WayDAW to enable authorization callbacks, then retry.'
+    exec python3 "$ROOT_DIR/config/ableton-authorization.py" submit "$ROOT_DIR" "$prefix" "$runtime_dir" \
+      "${session[0]}" "${session[1]}" "${session[4]}" "$1" ;;
   stop)
     if [[ "$inspect" == 1 ]]; then
       printf 'would_stop_prefix=%s\n' "$prefix"
@@ -178,6 +190,9 @@ case "$command" in
       [[ -e "$state_file" ]] || write_session 0 0
       recovery_result=0
       # Cancel every launcher before touching Wine or the KWin controller.
+      if read_session && [[ -n "${session[4]:-}" ]]; then
+        waydaw_cancel_authorization "${session[4]%/*}" || recovery_result=1
+      fi
       stop_workers || recovery_result=1
       "$ROOT_DIR/bin/ableton-proton-cleanup" || recovery_result=1
       [[ "$recovery_result" == 0 ]] || fail 'Session cleanup failed; recovery required. Retry Stop after resolving the logged error.'
@@ -185,7 +200,7 @@ case "$command" in
     fi
     exit 0 ;;
   start) ;;
-  *) printf 'Usage: %s {start [--with-bome] [--dry-run] [-- project.als]|check [--with-bome]|status|stop [--dry-run]}\n' "$0" >&2; exit 2 ;;
+  *) printf 'Usage: %s {start [--with-bome] [--dry-run] [-- project.als]|check [--with-bome]|status|authorize request|stop [--dry-run]}\n' "$0" >&2; exit 2 ;;
 esac
 
 guarded_environment
@@ -197,7 +212,7 @@ umask 077
 mkdir -p "$runtime_dir"
 exec 9>"$lock_file"
 flock -n 9 || fail 'A guarded WayDAW session is already starting, running, or stopping.'
-[[ ! -e "$state_file" && ! -e "$bridge_file" && ! -e "$ableton_file" && ! -e "$bome_file" ]] || fail 'Session recovery required; run waydaw stop with the recorded checkout and prefix before starting again.'
+[[ ! -e "$state_file" && ! -e "$bridge_file" && ! -e "$ableton_file" && ! -e "$bome_file" && ! -e "$runtime_dir/authorization.state" ]] || fail 'Session recovery required; run waydaw stop with the recorded checkout and prefix before starting again.'
 preflight "$@"
 log_root="${XDG_STATE_HOME:-$HOME/.local/state}/waydaw/logs"
 mkdir -p "$log_root"
@@ -216,6 +231,7 @@ cleanup() {
   # Publish cancellation first: even a child not yet scheduled cannot exec.
   touch "$cancelled"
   stop_workers || cleanup_result=1
+  waydaw_cancel_authorization "$log_dir" || cleanup_result=1
   for pid in "${worker_pids[@]}"; do
     if ! waydaw_process_start "$pid" >/dev/null; then wait "$pid" || true; fi
   done
@@ -236,6 +252,8 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 trap 'exit 141' PIPE
 # Publish the active identity only after Stop can invoke the cleanup handler.
+mkdir "$log_dir/authorization"
+authorization_pid=""
 write_session "$$" "$birth_time" "$log_dir/session.log"
 
 launch_worker() {
@@ -250,6 +268,7 @@ wait_worker_result() {
   local name="$1" pid="$2"
   while [[ ! -f "$log_dir/$name.result" ]]; do
     check_bome_runtime
+    check_authorization_requests
     kill -0 "$pid" 2>/dev/null || fail "$name process owner exited unexpectedly."
     sleep 0.05
   done

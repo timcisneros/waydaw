@@ -108,6 +108,15 @@ else
 fi
 printf 'wine:%s:%s:overrides=%s:wayland=%s\\n' "$WINEPREFIX" "$*" "${WINEDLLOVERRIDES:-}" "${WAYLAND_DISPLAY:-unset}" >> "$TEST_EVENTS"
 [[ "$1" != reg ]] || exit 91
+if [[ "${TEST_AUTH_RECEIVER:-0}" == 1 && "$1" == *'Ableton Live 12'* ]]; then
+  if [[ $# == 1 ]]; then
+    export WINELOADERNOEXEC=1 WINESERVERSOCKET=123 WINEPRELOADRESERVE=fixture
+  fi
+  application="$1"
+  shift
+  export PYTHONHOME=/usr
+  exec -a "$application" /usr/bin/python3 "$TEST_AUTH_RECEIVER_SCRIPT" "$application" "$@"
+fi
 if [[ "$1" == *MIDITranslator* ]]; then
   if [[ -n "${TEST_BOME_INITIALIZING:-}" ]]; then
     touch "$TEST_BOME_INITIALIZING"
@@ -250,6 +259,245 @@ exit "${TEST_CLEANUP_FAIL:-0}"
             if process.stdout is not None and process.stdout.closed:
                 process.stdout = None
             process.communicate(timeout=2)
+
+    def authorization_receiver(self):
+        receiver = self.fake / "authorization-receiver.py"
+        receiver.write_text('''import json, os, sys, time
+from pathlib import Path
+events = Path(os.environ["TEST_EVENTS"])
+if sys.argv[2:]:
+    gate = os.environ.get("TEST_AUTH_GATE")
+    if gate:
+        Path(gate).touch()
+        while not Path(os.environ["TEST_AUTH_RELEASE"]).exists():
+            time.sleep(0.02)
+    with events.open("a") as output:
+        output.write("authorization_received:" + json.dumps({
+            "arguments": sys.argv[2:], "prefix": os.environ["WINEPREFIX"],
+            "overrides": os.environ.get("WINEDLLOVERRIDES"),
+            "wayland": os.environ.get("WAYLAND_DISPLAY"),
+            "wine_internal": {key: os.environ.get(key) for key in ["WINELOADERNOEXEC", "WINESERVERSOCKET", "WINEPRELOADRESERVE"]},
+        }) + "\\n")
+    raise SystemExit(int(os.environ.get("TEST_AUTH_EXIT", "0")))
+with events.open("a") as output:
+    output.write("authorization_receiver_ready\\n")
+while not Path(os.environ["TEST_STOP"]).exists():
+    time.sleep(0.03)
+''')
+        return {"TEST_AUTH_RECEIVER": "1", "TEST_AUTH_RECEIVER_SCRIPT": str(receiver)}
+
+    def test_authorization_callback_uses_running_guarded_instance_and_keeps_tokens_out_of_logs(self):
+        process = self.launch("--with-bome", **self.authorization_receiver())
+        self.wait_for(lambda: "authorization_receiver_ready" in self.event_text(), process)
+        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        owners = {name: (runtime / (name + ".state")).read_bytes() for name in ("ableton", "bome")}
+        before = self.snapshot()
+        marker = self.home / "must-not-execute"
+        uri = f"ableton://authorize?license_id=fixture&session_id=private-fixture-$(touch {marker})"
+        result = self.run_command("authorize", uri, executable="waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.wait_for(lambda: not (runtime / "authorization.state").exists(), process)
+        event = next(line.removeprefix("authorization_received:") for line in self.event_text().splitlines()
+                     if line.startswith("authorization_received:"))
+        received = json.loads(event)
+        self.assertEqual(received["arguments"], [uri])
+        self.assertEqual(received["prefix"], str(self.prefix))
+        self.assertIn("d3d11,dxgi,d3d10core=n", received["overrides"])
+        self.assertIn("version=n,b", received["overrides"])
+        self.assertIsNone(received["wayland"])
+        self.assertTrue(all(value is None for value in received["wine_internal"].values()))
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual({name: (runtime / (name + ".state")).read_bytes() for name in owners}, owners)
+        self.assertEqual(self.event_text().count("authorization_receiver_ready"), 1)
+        self.assertIsNone(process.poll())
+        self.assertNotIn(uri, result.stdout + self.session_log_text())
+        for log in (Path(self.env["XDG_STATE_HOME"]) / "waydaw/desktop").glob("*.log"):
+            self.assertNotIn(uri, log.read_text())
+        queue = Path((runtime / "session.state").read_text().splitlines()[4]).parent / "authorization"
+        self.assertEqual(list(queue.iterdir()), [])
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0)
+
+    def test_authorization_file_uri_reaches_guarded_ableton_without_preparation(self):
+        path = self.home / "Downloads/official authorization.auz"
+        path.parent.mkdir()
+        path.write_bytes(b"fixture authorization file")
+        process = self.launch(**self.authorization_receiver())
+        self.wait_for(lambda: "authorization_receiver_ready" in self.event_text(), process)
+        before = self.snapshot()
+        result = self.run_command("authorize", path.as_uri())
+        self.assertEqual(result.returncode, 0, result.stdout)
+        event = next(line.removeprefix("authorization_received:") for line in self.event_text().splitlines()
+                     if line.startswith("authorization_received:"))
+        self.assertEqual(json.loads(event)["arguments"], [str(path)])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.event_text().count("authorization_receiver_ready"), 1)
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0)
+
+    def test_authorization_follows_the_live_custom_prefix_without_browser_environment(self):
+        custom = self.prefix.with_name("selected copied prefix")
+        self.prefix.rename(custom)
+        self.prefix = custom
+        process = self.launch(**self.authorization_receiver(), WAYDAW_ABLETON_RUNNER_PREFIX=str(custom))
+        self.wait_for(lambda: "authorization_receiver_ready" in self.event_text(), process)
+        result = self.run_command("authorize", "ableton://authorize?session_id=fixture-custom")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        event = next(line.removeprefix("authorization_received:") for line in self.event_text().splitlines()
+                     if line.startswith("authorization_received:"))
+        self.assertEqual(json.loads(event)["prefix"], str(custom))
+        self.assertIsNone(process.poll())
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0)
+
+    def test_authorization_does_not_start_wine_without_a_session(self):
+        before = self.snapshot()
+        result = self.run_command("authorize", "ableton://authorize?session_id=private-fixture")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Open WayDAW Ableton", result.stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.event_text(), "")
+        self.assertFalse(Path(self.env["XDG_RUNTIME_DIR"]).exists())
+
+    def test_authorization_rejects_unrelated_requests_and_dry_run_without_delivery(self):
+        process = self.launch(**self.authorization_receiver())
+        self.wait_for(lambda: "authorization_receiver_ready" in self.event_text(), process)
+        for value in ["https://example.invalid/authorize?private-fixture", "ableton://open?file=x",
+                      "file://remote/Unlock.auz", "ableton://private-fixture\u2100/authorize?token=x"]:
+            with self.subTest(value=value):
+                result = self.run_command("authorize", value)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn(value, result.stdout)
+        result = self.run_command("authorize", "--dry-run", "ableton://authorize?session_id=private-fixture")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("authorization_received:", self.event_text())
+        self.assertIsNone(process.poll())
+        self.stop.touch()
+        process.communicate(timeout=8)
+
+    def test_authorization_failure_keeps_ableton_open_and_does_not_log_the_callback(self):
+        self.script(self.fake / "kdialog", 'printf "dialog:%s\\n" "$*" >> "$TEST_EVENTS"')
+        process = self.launch(**self.authorization_receiver(), TEST_AUTH_EXIT="17")
+        self.wait_for(lambda: "authorization_receiver_ready" in self.event_text(), process)
+        uri = "ableton://authorize?session_id=private-fixture-failure"
+        result = self.run_command("authorize", uri, executable="waydaw-desktop")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn(uri, result.stdout + self.session_log_text())
+        self.assertIn("session=running", self.run_command("status").stdout)
+        self.assertIsNone(process.poll())
+        self.assertNotIn("wineserver:", self.event_text())
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0)
+
+    def test_authorization_requires_a_callback_capable_session(self):
+        process = self.launch(**self.authorization_receiver())
+        self.wait_for(lambda: "authorization_receiver_ready" in self.event_text(), process)
+        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        queue = Path((runtime / "session.state").read_text().splitlines()[4]).parent / "authorization"
+        queue.rmdir()
+        result = self.run_command("authorize", "ableton://authorize?session_id=fixture")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Restart", result.stdout)
+        self.assertNotIn("authorization_received:", self.event_text())
+        self.stop.touch()
+        process.communicate(timeout=8)
+
+    def test_authorization_never_bootstraps_a_missing_ableton_process(self):
+        helper = self.root / "config/ableton-authorization.py"
+        helper.write_text(helper.read_text().replace("time.monotonic() + 10", "time.monotonic() + 0.2"))
+        process = self.launch(TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        before = self.event_text().count("wine:")
+        result = self.run_command("authorize", "ableton://authorize?session_id=fixture")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.event_text().count("wine:"), before)
+        self.assertIsNone(process.poll())
+        self.stop.touch()
+        process.communicate(timeout=8)
+
+    def test_stop_cancels_authorization_delivery_and_clears_private_requests(self):
+        gate, release = self.home / "authorization-gate", self.home / "authorization-release"
+        self.releases.add(release)
+        process = self.launch(**self.authorization_receiver(), TEST_AUTH_GATE=str(gate), TEST_AUTH_RELEASE=str(release))
+        self.wait_for(lambda: "authorization_receiver_ready" in self.event_text(), process)
+        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        queue = Path((runtime / "session.state").read_text().splitlines()[4]).parent / "authorization"
+        callback = self.start_command("authorize", "ableton://authorize?session_id=private-fixture-stop")
+        self.wait_for(gate.exists, process)
+        queued = self.start_command("authorize", "ableton://authorize?session_id=private-fixture-queued")
+        self.wait_for(lambda: len(list(queue.glob("*.request"))) == 1, process)
+        stopped = self.run_command("stop")
+        self.assertEqual(stopped.returncode, 0, stopped.stdout)
+        output = callback.communicate(timeout=8)[0]
+        self.assertNotEqual(callback.returncode, 0, output)
+        output = queued.communicate(timeout=8)[0]
+        self.assertNotEqual(queued.returncode, 0, output)
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 143)
+        release.touch()
+        self.assertNotIn("authorization_received:", self.event_text())
+        self.assertEqual(list(queue.glob("*.request")), [])
+        self.assertFalse((runtime / "authorization.state").exists())
+        self.assertIn("session=stopped", self.run_command("status").stdout)
+
+    def test_desktop_authorization_handlers_are_redirected_and_restored(self):
+        applications = Path(self.env["XDG_DATA_HOME"]) / "applications"
+        applications.mkdir(parents=True)
+        originals = {}
+        for name, mime, field in [("wine-protocol-ableton.desktop", "x-scheme-handler/ableton", "%u"),
+                                  ("wine-extension-auz.desktop", "application/x-wine-extension-auz", "%f")]:
+            original = f"[Desktop Entry]\nType=Application\nName=Ableton\nMimeType={mime};\nExec=env WINEPREFIX=legacy wine start {field}\nNoDisplay=true\n"
+            (applications / name).write_text(original)
+            originals[name] = original
+        for _ in range(2):
+            result = self.run_command(executable="install-waydaw-desktop")
+            self.assertEqual(result.returncode, 0, result.stdout)
+        for name, original in originals.items():
+            installed = (applications / name).read_text()
+            self.assertIn('waydaw-desktop" authorize ', installed)
+            self.assertNotIn("WINEPREFIX=legacy", installed)
+            self.assertIn("MimeType=", installed)
+            if shutil.which("desktop-file-validate"):
+                validated = subprocess.run(["desktop-file-validate", str(applications / name)], capture_output=True, text=True)
+                self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+        handler = applications / "com.timcis.WayDAW.Authorization.desktop"
+        self.assertIn("authorize %u", handler.read_text())
+        self.assertIn("NoDisplay=true", handler.read_text())
+        record = json.loads((Path(self.env["XDG_STATE_HOME"]) / "waydaw/desktop-install.json").read_text())
+        self.assertEqual(record["original_authorization"], originals)
+        for name, original in originals.items():
+            (applications / name).write_text(original.replace("legacy", "regenerated"))
+        self.assertEqual(self.run_command(executable="install-waydaw-desktop").returncode, 0)
+        self.assertEqual(self.run_command("--uninstall", executable="install-waydaw-desktop").returncode, 0)
+        self.assertFalse(handler.exists())
+        for name, original in originals.items():
+            self.assertEqual((applications / name).read_text(), original)
+
+    def test_desktop_authorization_migrates_old_records_and_preserves_independent_edits(self):
+        applications = Path(self.env["XDG_DATA_HOME"]) / "applications"
+        applications.mkdir(parents=True)
+        path = applications / "wine-protocol-ableton.desktop"
+        original = '[Desktop Entry]\nType=Application\nName=Ableton\nMimeType=x-scheme-handler/ableton;\nExec=wine start %u\n'
+        path.write_text(original)
+        state = Path(self.env["XDG_STATE_HOME"]) / "waydaw/desktop-install.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"version": 1, "applications": str(applications),
+                                     "original_ableton": None, "installed": {}}))
+        self.assertEqual(self.run_command(executable="install-waydaw-desktop").returncode, 0)
+        edited = path.read_text() + 'X-User-Setting=keep\n'
+        path.write_text(edited)
+        result = self.run_command("--uninstall", executable="install-waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(path.read_text(), edited)
+        self.assertEqual(self.run_command(executable="install-waydaw-desktop").returncode, 0)
+        self.assertEqual(json.loads(state.read_text())["original_authorization"][path.name], original)
+        self.assertEqual(self.run_command("--uninstall", executable="install-waydaw-desktop").returncode, 0)
+        self.assertEqual(path.read_text(), original)
 
     def test_dry_run_and_print_do_not_mutate_or_invoke_services(self):
         (self.prefix / "drive_c/windows/system32/d3d11.dll").write_bytes(b"drifted")

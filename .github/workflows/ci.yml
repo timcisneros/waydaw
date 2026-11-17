@@ -24,7 +24,7 @@ jobs:
           shellcheck --severity=warning --exclude=SC1090,SC1091 \
             bin/waydaw bin/waydaw-desktop bin/install-waydaw-desktop bin/session bin/kill-session \
             bin/kill-system-session bin/ableton-proton-cleanup \
-            bin/verify-proton-runner-mode config/prefix-safety.sh config/validated-runtime.sh config/session-lifecycle.sh config/bome.sh \
+            bin/verify-proton-runner-mode config/prefix-safety.sh config/validated-runtime.sh config/session-lifecycle.sh config/bome.sh config/authorization.sh \
             bin/ableton bin/bome bin/ableton-proton-normalize-placement \
             config/ableton-runner.sh bin/ableton-kwin-decoration-controller \
             bin/check bin/check-system bin/ableton-wayland bin/session-status bin/wineasio-check \

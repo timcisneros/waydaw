@@ -152,6 +152,11 @@ All items below must pass on that recorded environment before a release tag:
 
 - Legitimate authorization completes in the copied prefix and survives closing,
   relaunching, and rebooting. Do not infer this from an interactive dialog.
+  Browser `ableton://authorize` callbacks and offline `.auz` files must return to
+  the running guarded instance without starting the legacy installation. Stop
+  must cancel a pending delivery before Wine shutdown. No callback URL or token
+  may appear in WayDAW's logs. Delivery acknowledgement alone does not establish
+  successful authorization; check the application and a cold relaunch.
 - Terminal and KDE menu launches produce the same runner, prefix, and guards.
 - Bome GUI initialization acknowledges before Ableton launches, including on a
   cold Wine start. A stalled or early-exiting Bome blocks Ableton. Confirm Bome
@@ -252,6 +257,9 @@ For rollback, stop the session; restore the matching prefix snapshot and known-
 good checkout/runtime artifacts; reinstall the desktop entry from that checkout;
 then run preflight and the recording/save/reopen/export checks. Never restore a
 prefix while its Wine processes are running.
+Before switching to a checkout older than authorization-handler support, run
+the current `bin/install-waydaw-desktop --uninstall` so its managed handlers are
+restored before the older installer reads the installation record.
 
 To remove menu integration, run `./bin/install-waydaw-desktop --uninstall`.
 It restores the saved original Ableton shortcut when the installed entry is

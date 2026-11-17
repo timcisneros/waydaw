@@ -87,6 +87,16 @@ also routes it through WayDAW while preserving its menu identity and icon.
 It saves the first original shortcut and installation record in
 `~/.local/state/waydaw/desktop-install.json`. Run the installer again after
 moving the checkout or if Wine regenerates its shortcut.
+The installer also manages Ableton's `ableton://authorize` browser callback and
+offline `.auz` file handlers. They forward authorization to the running guarded
+Ableton instance using the same prefix, runner, display path, and fixes. Start
+WayDAW before authorizing it; callbacks follow its recorded prefix even if the
+browser did not inherit a custom prefix selection. A session started before authorization forwarding
+was installed needs one restart; then retry from its authorization screen.
+Callback delivery does not prepare or repair the live prefix. It is cancelled
+with the session, and callback URLs are omitted from WayDAW's logs.
+The first original Wine handlers are retained for uninstall. Rerun the desktop
+installer if Wine regenerates a handler after an application update.
 `./bin/install-waydaw-desktop --uninstall` removes the WayDAW entry and restores
 the original Ableton shortcut. Independently edited entries are preserved;
 the saved original remains available across uninstall/reinstall cycles.

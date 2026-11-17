@@ -7,6 +7,8 @@ python3 - "$ROOT_DIR" "${1:---install}" <<'PY'
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -15,6 +17,8 @@ applications = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/sh
 state = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'waydaw/desktop-install.json'
 dedicated = 'com.timcis.WayDAW.desktop'
 ableton = 'wine/Programs/Ableton Live 12 Suite.desktop'
+authorization = 'com.timcis.WayDAW.Authorization.desktop'
+wine_authorization = {'wine-protocol-ableton.desktop': '%u', 'wine-extension-auz.desktop': '%f'}
 if mode not in ('--install', '--print', '--uninstall'):
     raise SystemExit('Usage: install-waydaw-desktop [--install|--print|--uninstall]')
 if any(c in root for c in '\n\r'):
@@ -47,6 +51,15 @@ Exec={launcher} check
 [Desktop Action Stop]
 Name=Stop session (unsaved work may be lost)
 Exec={launcher} stop
+'''
+authorization_entry = f'''[Desktop Entry]
+Type=Application
+Name=WayDAW Ableton authorization
+Exec={launcher} authorize %u
+Icon=audio-x-generic
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/ableton;application/x-wine-extension-auz;
 '''
 if mode == '--print':
     print(entry, end='')
@@ -81,23 +94,32 @@ except ValueError:
 if (not isinstance(record, dict)
         or record.get('version') != 1 or record.get('applications') != str(applications)
         or not isinstance(record.get('installed'), dict)
-        or any(name not in (dedicated, ableton) or not isinstance(content, str)
+        or any(name not in (dedicated, ableton, authorization, *wine_authorization) or not isinstance(content, str)
                for name, content in record['installed'].items())
-        or not isinstance(record.get('original_ableton'), (str, type(None)))):
+        or not isinstance(record.get('original_ableton'), (str, type(None)))
+        or not isinstance(record.get('original_authorization', {}), dict)
+        or any(name not in wine_authorization or not isinstance(content, str)
+               for name, content in record.get('original_authorization', {}).items())):
     raise SystemExit(f'Invalid or mismatched desktop installation record: {state}')
+record.setdefault('original_authorization', {})
 
 def save_record():
     write_file(state, json.dumps(record, indent=2) + '\n')
+
+def refresh_mime_cache():
+    if applications.is_dir() and shutil.which('update-desktop-database'):
+        subprocess.run(['update-desktop-database', str(applications)], check=True)
 
 if mode == '--uninstall':
     for name, installed in list(record['installed'].items()):
         destination = applications / name
         current = read_file(destination)
         if current == installed:
-            if name == ableton:
-                if record['original_ableton'] is None:
-                    raise SystemExit(f'Original Ableton shortcut missing from {state}')
-                write_file(destination, record['original_ableton'], 0o644)
+            if name == ableton or name in wine_authorization:
+                original = record['original_ableton'] if name == ableton else record['original_authorization'].get(name)
+                if original is None:
+                    raise SystemExit(f'Original Wine entry missing from {state}')
+                write_file(destination, original, 0o644)
                 print(f'Restored {destination}')
             else:
                 destination.unlink()
@@ -106,9 +128,10 @@ if mode == '--uninstall':
             print(f'Preserved independently changed entry: {destination}')
         del record['installed'][name]
         save_record()
+    refresh_mime_cache()
     raise SystemExit
 
-def redirect_ableton(original):
+def redirect_ableton(original, command='start', field=''):
     # Preserve Wine's menu ID, icon, name, and any unrelated desktop actions.
     lines = original.splitlines()
     if lines.count('[Desktop Entry]') != 1:
@@ -116,10 +139,12 @@ def redirect_ableton(original):
     start = lines.index('[Desktop Entry]') + 1
     end = next((i for i in range(start, len(lines)) if lines[i].startswith('[')), len(lines))
     updates = {
-        'Exec': launcher + ' start', 'Terminal': 'false',
+        'Exec': launcher + ' ' + command + (' ' + field if field else ''), 'Terminal': 'false',
         'Path': root.replace('\\', '\\\\').replace('\t', '\\t'),
-        'Comment': 'Ableton Live through the guarded WayDAW Proton session',
+        'Comment': 'Ableton Live through the guarded WayDAW Proton session' if command == 'start' else 'Authorization for the running WayDAW Ableton session',
     }
+    if command == 'authorize':
+        updates['StartupNotify'] = 'false'
     body = []
     for line in lines[start:end]:
         if line.partition('=')[0].strip() not in updates:
@@ -127,7 +152,7 @@ def redirect_ableton(original):
     body.extend(f'{key}={value}' for key, value in updates.items())
     return '\n'.join(lines[:start] + body + lines[end:]) + '\n'
 
-entries = {dedicated: entry}
+entries = {dedicated: entry, authorization: authorization_entry}
 original = read_file(applications / ableton)
 if original is not None:
     entries[ableton] = redirect_ableton(original)
@@ -135,6 +160,12 @@ if original is not None:
     # The current entry may still invoke WayDAW when it is installed again.
     if record['original_ableton'] is None:
         record['original_ableton'] = original
+
+for name, field in wine_authorization.items():
+    original = read_file(applications / name)
+    if original is not None:
+        entries[name] = redirect_ableton(original, 'authorize', field)
+        record['original_authorization'].setdefault(name, original)
 
 for name, content in entries.items():
     destination = applications / name
@@ -144,5 +175,6 @@ for name, content in entries.items():
     save_record()
     write_file(destination, content, 0o644)
     print(f'Installed {destination}')
+refresh_mime_cache()
 print(f'Installation record and original shortcut: {state}')
 PY
