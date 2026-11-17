@@ -654,3 +654,29 @@ prefix-scoped wineserver and verifies shutdown before unloading the controller.
 Run `./bin/verify-proton-runner-mode` for isolated Python regressions and
 `node tests/test_kwin_controller.cjs` for KWin compatibility checks. These checks
 use fixture services and do not launch installed applications.
+
+## Supported guarded sessions
+
+Use the supervisor for ordinary terminal and full-session launches:
+
+```sh
+./bin/waydaw check --with-bome
+./bin/waydaw start --with-bome
+./bin/waydaw status
+./bin/waydaw stop --dry-run
+```
+
+Omit `--with-bome` for Ableton alone. The supervisor applies `pw-jack`, waits
+for Bome GUI initialization before Ableton, and monitors Bome without closing
+Ableton when MIDI translation fails. Status queries are read-only and validate
+worker ownership when health records cannot be published. A normal Bome quit
+reports stopped without an error alert; exit results publish before release
+readiness so completion and cleanup agree.
+
+Save work and close Ableton normally. `./bin/waydaw stop` is emergency recovery
+and can lose unsaved work. Session locking, verified process-group owners, and
+persistent recovery records prevent duplicate launches and late wrapper execs.
+Legacy session, stop, preflight, and Wayland commands route to this supervisor;
+explicit `check-system` and `kill-system-session` retain system-Wine diagnostics.
+Build the Bome readiness helper with `./compat/waydaw-launch/build.sh` before
+starting a full session. Real MIDI routing and recording require host acceptance.

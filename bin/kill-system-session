@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Explicit emergency recovery for the legacy system-Wine working prefix.
+set -euo pipefail
+prefix="$HOME/WinePrefixes/ableton12"
+[[ -d "$prefix/drive_c" ]] || { echo 'ERROR: working prefix is missing.' >&2; exit 1; }
+runner=/usr/bin/wineserver
+[[ -x "$runner" ]] || { echo 'ERROR: system wineserver is missing.' >&2; exit 1; }
+timeout 8 env WINEPREFIX="$prefix" "$runner" -k
+timeout 8 env WINEPREFIX="$prefix" "$runner" -w

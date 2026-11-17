@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# Supported KDE Plasma Wayland / PipeWire session supervisor.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Give the supervisor a stable argv identity even when started as ./bin/waydaw.
+if [[ "$0" != "$ROOT_DIR/bin/waydaw" ]]; then
+  exec "$ROOT_DIR/bin/waydaw" "$@"
+fi
+source "$ROOT_DIR/config/prefix-safety.sh"
+source "$ROOT_DIR/config/validated-runtime.sh"
+source "$ROOT_DIR/config/session-lifecycle.sh"
+source "$ROOT_DIR/config/bome.sh"
+prefix="$(waydaw_copied_prefix)" || exit 1
+runner="$ROOT_DIR/.local-runners/kron4ek-proton-exp-11.0/bin"
+runtime_dir="${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}}/waydaw"
+lock_file="$runtime_dir/session.lock"
+state_file="$runtime_dir/session.state"
+bridge_file="$runtime_dir/bridge.state"
+ableton_file="$runtime_dir/ableton.state"
+bome_file="$runtime_dir/bome.state"
+command="${1:-start}"
+[[ $# -eq 0 ]] || shift
+with_bome=0
+inspect="${WAYDAW_ABLETON_DRY_RUN:-0}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --with-bome) with_bome=1; shift ;;
+    --dry-run|--print-launch-config) inspect=1; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+stop_workers() {
+  local name result=0
+  for name in ableton bome bridge; do
+    waydaw_stop_worker "$runtime_dir/$name.state" "$name" || result=1
+  done
+  return "$result"
+}
+read_session() {
+  [[ -f "$state_file" ]] || return 1
+  mapfile -t session < "$state_file"
+  # Older sessions have four fields; new sessions also record their log path.
+  [[ ( ${#session[@]} -eq 4 || ${#session[@]} -eq 5 ) && "${session[0]}" =~ ^[0-9]+$ && "${session[1]}" =~ ^[0-9]+$ ]]
+}
+require_session_scope() {
+  [[ ! -e "$state_file" ]] || {
+    read_session || fail 'Invalid session record; recovery required. Preserve the record and inspect the session log.'
+    [[ "${session[2]}" == "$prefix" && "${session[3]}" == "$ROOT_DIR" ]] || fail "Recorded session belongs to ${session[3]} with prefix ${session[2]}; use that configuration to stop it."
+  }
+}
+write_session() {
+  local temporary
+  temporary="$(mktemp "$runtime_dir/.session-XXXXXX")"
+  printf '%s\n' "$1" "$2" "$prefix" "$ROOT_DIR" > "$temporary"
+  if [[ -n "${3:-}" ]]; then printf '%s\n' "$3" >> "$temporary"; fi
+  mv -f -- "$temporary" "$state_file"
+}
+active_session() {
+  read_session || return 1
+  waydaw_same_process "${session[0]}" "${session[1]}" || return 1
+  tr '\0' '\n' < "/proc/${session[0]}/cmdline" | grep -Fx -- "${session[3]}/bin/waydaw" >/dev/null
+}
+guarded_environment() {
+  local setting audio_profile audio_config
+  for setting in WAYDAW_ABLETON_KWIN_CONTROLLER WAYDAW_ABLETON_SIZING_SHIM WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY; do
+    [[ "${!setting:-1}" == 1 ]] || fail "$setting must be 1 for the supported launcher."
+  done
+  [[ "${WAYDAW_ABLETON_GRAPHICS:-dxvk}" == dxvk ]] || fail 'The supported launcher requires DXVK.'
+  export WAYDAW_ABLETON_RUNNER=proton-exp WAYDAW_ABLETON_RUNNER_PREFIX="$prefix"
+  export WAYDAW_ABLETON_WINDOW_DRIVER=x11 WAYDAW_ABLETON_GRAPHICS=dxvk
+  export WAYDAW_ABLETON_KWIN_CONTROLLER=1 WAYDAW_ABLETON_SIZING_SHIM=1 WAYDAW_ABLETON_DIAGNOSTIC_NO_REGISTRY=1
+  unset WAYDAW_PREFIX_PREPARED
+  source "$ROOT_DIR/config/env"
+  audio_profile="${XDG_CONFIG_HOME:-$HOME/.config}/waydaw/pipewire.properties"
+  if [[ -z "${PIPEWIRE_PROPS+x}" && -f "$audio_profile" ]]; then
+    # Plain PipeWire property data, never sourced as shell commands.
+    PIPEWIRE_PROPS="$(cat -- "$audio_profile")" || fail "Cannot read $audio_profile"
+    export PIPEWIRE_PROPS
+  fi
+  audio_config="${XDG_CONFIG_HOME:-$HOME/.config}/waydaw/pipewire"
+  if [[ -z "${PIPEWIRE_CONFIG_DIR+x}" && -f "$audio_config/jack.conf" ]]; then
+    export PIPEWIRE_CONFIG_DIR="$audio_config"
+  fi
+  printf 'pipewire_properties=%s\n' "${PIPEWIRE_PROPS:-default}"
+  printf 'pipewire_config_dir=%s\n' "${PIPEWIRE_CONFIG_DIR:-default}"
+}
+preflight() {
+  local dependency pair file expected target source_hash bome_exe
+  [[ -n "${WAYLAND_DISPLAY:-}" && -n "${DISPLAY:-}" ]] || fail 'A Wayland session with XWayland (DISPLAY) is required.'
+  for dependency in flock timeout pw-jack busctl sha256sum systemctl python3; do
+    command -v "$dependency" >/dev/null || fail "Missing dependency: $dependency"
+  done
+  [[ -x "$runner/wine" && -x "$runner/wineserver" ]] || fail "Restore the pinned Proton runner at $runner"
+  [[ -d "$prefix/drive_c/windows/system32" ]] || fail "Restore the copied prefix at $prefix"
+  [[ -f "$WAYDAW_ABLETON_SIZING_SHIM_DLL" ]] || fail 'Sizing shim missing; run compat/ableton-sizing-shim/build.sh'
+  [[ "$(head -c2 "$WAYDAW_ABLETON_SIZING_SHIM_DLL")" == MZ ]] || fail 'Sizing shim is not a PE DLL.'
+  [[ ! -e "$prefix/drive_c/ProgramData/Ableton/.Live 12 Suite_updated" ]] || fail 'Ableton updater swap marker present in copied prefix; restore or repair it before launch.'
+  for pair in "d3d11.dll:$WAYDAW_D3D11_SHA256" "dxgi.dll:$WAYDAW_DXGI_SHA256" "d3d10core.dll:$WAYDAW_D3D10CORE_SHA256"; do
+    file="${pair%%:*}"; expected="${pair#*:}"
+    target="$(sha256sum "$prefix/drive_c/windows/system32/$file" 2>/dev/null | awk '{print $1}')" || target=""
+    if [[ "$target" != "$expected" ]]; then
+      source_hash="$(sha256sum "$HOME/WinePrefixes/ableton12/drive_c/windows/system32/$file" 2>/dev/null | awk '{print $1}')" || source_hash=""
+      [[ "$source_hash" == "$expected" ]] || fail "Required DXVK $file missing or changed; no verified restore source."
+      waydaw_require_native_dxvk "$HOME/WinePrefixes/ableton12/drive_c/windows/system32/$file" || exit 1
+      printf 'WARN: %s will be restored from the verified working-prefix copy at real launch.\n' "$file"
+    else
+      waydaw_require_native_dxvk "$prefix/drive_c/windows/system32/$file" || exit 1
+    fi
+  done
+  timeout 5 "$ROOT_DIR/bin/ableton-kwin-decoration-controller" --status || fail 'KWin scripting is unavailable.'
+  timeout 5 systemctl --user is-active --quiet pipewire.service || fail 'PipeWire user service is not active.'
+  if [[ "$with_bome" == 1 ]]; then
+    [[ -x "$runner/winepath" ]] || fail 'Runner winepath is missing.'
+    bome_helper="$ROOT_DIR/.local-tools/waydaw-launch/wait-bome.exe"
+    [[ -f "$bome_helper" && "$(head -c2 "$bome_helper")" == MZ ]] || fail 'Bome readiness helper missing; run compat/waydaw-launch/build.sh'
+    bome_exe="$(waydaw_bome_executable "$prefix")" || exit 1
+    printf 'bome_executable=%s\n' "$bome_exe"
+  fi
+  WAYDAW_ABLETON_DRY_RUN=1 "$ROOT_DIR/bin/ableton" "$@"
+  printf 'runtime=%s\nprefix=%s\npreflight=passed\n' "$WAYDAW_RUNTIME_ID" "$prefix"
+}
+
+case "$command" in
+  check)
+    guarded_environment
+    preflight "$@"
+    exit 0 ;;
+  status)
+    if active_session; then
+      session_health=running
+      bome_exit="$(waydaw_bome_status_code "${session[4]:-}" "$bome_file")"
+      if [[ -n "$bome_exit" ]]; then
+        [[ "$bome_exit" == 0 ]] || session_health=degraded
+      fi
+      printf 'session=%s\npid=%s\nprefix=%s\ncheckout=%s\n' "$session_health" "${session[0]}" "${session[2]}" "${session[3]}"
+      if [[ -n "$bome_exit" ]]; then
+        if [[ "$bome_exit" == 0 ]]; then printf 'bome=stopped\n'; else printf 'bome=failed\n'; fi
+        printf 'bome_exit=%s\nsession_log=%s\n' "$bome_exit" "${session[4]}"
+      fi
+    elif [[ -e "$state_file" || -e "$bridge_file" || -e "$ableton_file" || -e "$bome_file" ]]; then
+      printf 'session=recovery-required\nprefix=%s\n' "$prefix"
+      if read_session; then
+        printf 'recorded_prefix=%s\nrecorded_checkout=%s\n' "${session[2]}" "${session[3]}"
+      fi
+    else
+      printf 'session=stopped\nprefix=%s\n' "$prefix"
+    fi
+    exit 0 ;;
+  stop)
+    if [[ "$inspect" == 1 ]]; then
+      printf 'would_stop_prefix=%s\n' "$prefix"
+      exit 0
+    fi
+    if active_session; then
+      require_session_scope
+      if [[ -n "${session[4]:-}" ]]; then
+        printf 'session_log=%s\n' "${session[4]}"
+      fi
+      completion_file="$runtime_dir/session-${session[0]}-${session[1]}.result"
+      kill -TERM "${session[0]}"
+      flock -w 45 "$lock_file" true || fail 'Session did not stop within 45 seconds; inspect its log.'
+      [[ -f "$completion_file" ]] || fail 'Supervisor stopped without a cleanup result; inspect the session log.'
+      [[ "$(cat "$completion_file")" == 0 ]] || fail 'Session cleanup failed; inspect the session log and retry Stop.'
+      rm -f "$completion_file"
+    else
+      umask 077
+      mkdir -p "$runtime_dir"
+      exec 9>"$lock_file"
+      require_session_scope
+      # A worker may still hold the inherited lock while publishing ownership
+      # after supervisor death. Wait for that bounded handoff before recovery.
+      flock -w 5 9 || fail 'Session is still starting or stopping after 5 seconds; retry shortly.'
+      require_session_scope
+      # Keep a recovery marker even if an unsupervised-session cleanup fails.
+      [[ -e "$state_file" ]] || write_session 0 0
+      recovery_result=0
+      # Cancel every launcher before touching Wine or the KWin controller.
+      stop_workers || recovery_result=1
+      "$ROOT_DIR/bin/ableton-proton-cleanup" || recovery_result=1
+      [[ "$recovery_result" == 0 ]] || fail 'Session cleanup failed; recovery required. Retry Stop after resolving the logged error.'
+      rm -f "$state_file"
+    fi
+    exit 0 ;;
+  start) ;;
+  *) printf 'Usage: %s {start [--with-bome] [--dry-run] [-- project.als]|check [--with-bome]|status|stop [--dry-run]}\n' "$0" >&2; exit 2 ;;
+esac
+
+guarded_environment
+if [[ "$inspect" == 1 ]]; then
+  printf 'with_bome=%s\naudio_wrapper=pw-jack\n' "$with_bome"
+  exec env WAYDAW_ABLETON_DRY_RUN=1 "$ROOT_DIR/bin/ableton" "$@"
+fi
+umask 077
+mkdir -p "$runtime_dir"
+exec 9>"$lock_file"
+flock -n 9 || fail 'A guarded WayDAW session is already starting, running, or stopping.'
+[[ ! -e "$state_file" && ! -e "$bridge_file" && ! -e "$ableton_file" && ! -e "$bome_file" ]] || fail 'Session recovery required; run waydaw stop with the recorded checkout and prefix before starting again.'
+preflight "$@"
+log_root="${XDG_STATE_HOME:-$HOME/.local/state}/waydaw/logs"
+mkdir -p "$log_root"
+log_dir="$(mktemp -d "$log_root/$(date +%Y%m%d-%H%M%S)-XXXXXX")"
+printf 'session_log=%s/session.log\n' "$log_dir"
+exec > >(tee --output-error=warn-nopipe -a "$log_dir/session.log" 9>&-) 2>&1
+birth_time="$(waydaw_process_start "$$")"
+completion_file="$runtime_dir/session-$$-$birth_time.result"
+cancelled="$log_dir/cancelled"
+worker_pids=()
+cleanup() {
+  local result=$? cleanup_result=0 pid
+  trap - EXIT INT TERM HUP PIPE
+  # Cleanup must not depend on the terminal reader or a live logging relay.
+  exec >>"$log_dir/session.log" 2>&1
+  # Publish cancellation first: even a child not yet scheduled cannot exec.
+  touch "$cancelled"
+  stop_workers || cleanup_result=1
+  for pid in "${worker_pids[@]}"; do
+    if ! waydaw_process_start "$pid" >/dev/null; then wait "$pid" || true; fi
+  done
+  "$ROOT_DIR/bin/ableton-proton-cleanup" 9>&- || cleanup_result=$?
+  if [[ "$cleanup_result" == 0 ]]; then
+    rm -f "$state_file"
+  else
+    printf 'ERROR: session recovery required; run waydaw stop before restarting.\n' >&2
+  fi
+  printf '%s\n' "$cleanup_result" > "$completion_file"
+  printf 'session_exit=%s cleanup_exit=%s\n' "$result" "$cleanup_result"
+  [[ "$result" != 0 ]] || result="$cleanup_result"
+  exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 141' PIPE
+# Publish the active identity only after Stop can invoke the cleanup handler.
+write_session "$$" "$birth_time" "$log_dir/session.log"
+
+launch_worker() {
+  local name="$1"
+  shift
+  python3 "$ROOT_DIR/config/session-worker.py" run "$runtime_dir/$name.state" \
+    "$log_dir/$name.result" "$cancelled" "$$" "$birth_time" "$@" &
+  worker_pid=$!
+  worker_pids+=("$worker_pid")
+}
+wait_worker_result() {
+  local name="$1" pid="$2"
+  while [[ ! -f "$log_dir/$name.result" ]]; do
+    check_bome_runtime
+    kill -0 "$pid" 2>/dev/null || fail "$name process owner exited unexpectedly."
+    sleep 0.05
+  done
+  check_bome_runtime
+  return "$(cat "$log_dir/$name.result")"
+}
+
+check_bome_runtime() {
+  local message temporary
+  [[ "$with_bome" == 1 && -z "$bome_runtime_exit" ]] || return 0
+  if [[ -f "$log_dir/bome.result" ]]; then
+    bome_runtime_exit="$(waydaw_bome_exit_code "$log_dir/bome.result")"
+    message="Bome exited with code $bome_runtime_exit. MIDI translation is unavailable. Ableton remains open; save your work before restarting the full session."
+  elif (( SECONDS >= bome_owner_check )); then
+    # Check identity once per second; result-file polling stays inexpensive.
+    bome_owner_check=$((SECONDS + 1))
+    waydaw_same_process "$bome_pid" "$bome_birth" "$bome_pid" && return 0
+    bome_runtime_exit=1
+    message='Bome monitoring failed: its process owner exited without a result. MIDI translation may be unavailable. Ableton remains open; save your work before restarting the full session.'
+  else
+    return 0
+  fi
+  # This session-owned receipt makes degraded status persistent until cleanup.
+  # A reporting failure must not trigger shutdown of a running Ableton session.
+  if temporary="$(mktemp "$log_dir/.bome-exit-XXXXXX")"; then
+    if ! { printf '%s\n' "$bome_runtime_exit" > "$temporary" && mv -f -- "$temporary" "$log_dir/bome.exit"; }; then
+      rm -f -- "$temporary" || true
+      printf 'WARN: Could not publish Bome runtime status.\n' >&2 || true
+    fi
+  fi
+  if [[ "$bome_runtime_exit" == 0 ]]; then
+    printf 'bome_exit=0; Bome closed normally; Ableton remains open.\n' || true
+    return 0
+  fi
+  printf 'ERROR: %s See %s/logs/bome.log\n' "$message" "$ROOT_DIR" >&2 || true
+  if command -v notify-send >/dev/null; then
+    # Do not let a notification client retain the session lock or block Stop.
+    timeout --kill-after=1 3 notify-send --app-name=WayDAW --urgency=critical \
+      'WayDAW: Bome stopped' "$message" 9>&- </dev/null >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+waydaw_prepare_proton_prefix
+export WAYDAW_PREFIX_PREPARED=1
+if command -v a2jmidid >/dev/null && ! pgrep -x a2jmidid >/dev/null; then
+  launch_worker bridge pw-jack a2jmidid -e >"$log_dir/midi-bridge.log" 2>&1
+fi
+if [[ "$with_bome" == 1 ]]; then
+  bome_ready="$log_dir/bome.ready"
+  launch_worker bome env WAYDAW_BOME_READY_FILE="$bome_ready" pw-jack "$ROOT_DIR/bin/bome"
+  bome_pid="$worker_pid"
+  # The host deadline includes pw-jack, winepath, Wine bootstrap, and GUI init.
+  bome_deadline=$((SECONDS + 45))
+  while [[ ! -f "$bome_ready" || "$(cat "$bome_ready")" != ready ]]; do
+    if [[ -f "$log_dir/bome.result" ]] || ! kill -0 "$bome_pid" 2>/dev/null; then
+      fail 'Bome exited during startup; inspect logs/bome.log.'
+    fi
+    (( SECONDS < bome_deadline )) || fail 'Bome readiness timed out after 45 seconds; launch blocked.'
+    sleep 0.05
+  done
+  [[ ! -f "$log_dir/bome.result" ]] || fail 'Bome exited during startup; launch blocked.'
+  bome_birth="$(waydaw_process_start "$bome_pid")" || fail 'Bome process owner exited during startup.'
+  printf 'bome_readiness=gui-initialized\n'
+fi
+bome_runtime_exit=""
+bome_owner_check=$SECONDS
+printf 'Starting guarded Ableton session; close Ableton normally to save your work.\n'
+launch_worker ableton pw-jack "$ROOT_DIR/bin/ableton" "$@"
+result=0
+wait_worker_result ableton "$worker_pid" || result=$?
+if [[ -n "$bome_runtime_exit" && "$bome_runtime_exit" != 0 ]]; then
+  printf 'ERROR: Bome failed during this session (exit=%s); inspect %s/logs/bome.log.\n' "$bome_runtime_exit" "$ROOT_DIR" >&2 || true
+  [[ "$result" != 0 ]] || result="$bome_runtime_exit"
+fi
+exit "$result"

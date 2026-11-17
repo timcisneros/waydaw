@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../config/env
 source "$ROOT_DIR/config/env"
+source "$ROOT_DIR/config/bome.sh"
+
+if [[ "${WAYDAW_ABLETON_RUNNER:-}" == proton-exp ]]; then
+  # Use the same XWayland display path as the guarded Ableton launch.
+  unset WAYLAND_DISPLAY
+fi
 
 LOG_DIR="$ROOT_DIR/logs"
 LOG_FILE="$LOG_DIR/bome.log"
@@ -16,24 +22,6 @@ if [[ "${1:-}" == "--debug" ]]; then
   shift
 fi
 
-find_bome_exe() {
-  local drive_c="$WINEPREFIX/drive_c"
-  local candidate
-
-  for candidate in \
-    "$drive_c/Program Files/Bome MIDI Translator Pro/MIDITranslator.exe" \
-    "$drive_c/Program Files/Bome/Bome MIDI Translator Pro/MIDITranslator.exe" \
-    "$drive_c/Program Files (x86)/Bome MIDI Translator Pro/MIDITranslator.exe" \
-    "$drive_c/Program Files (x86)/Bome/Bome MIDI Translator Pro/MIDITranslator.exe"; do
-    if [[ -f "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-
-  find "$drive_c" -type f \( -iname 'MIDITranslator*.exe' -o -iname 'Bome MIDI Translator*.exe' \) 2>/dev/null | head -n 1
-}
-
 if ! command -v wine >/dev/null 2>&1; then
   printf 'ERROR: wine not found on PATH.\n' >&2
   exit 1
@@ -44,14 +32,24 @@ if [[ ! -d "$WINEPREFIX" ]]; then
   exit 1
 fi
 
-bome_exe="$(find_bome_exe)"
-if [[ -z "$bome_exe" ]]; then
-  printf 'ERROR: Bome MIDI Translator Pro executable not found in %s\n' "$WINEPREFIX" >&2
-  printf 'Install Bome into the shared prefix, then rerun this launcher.\n' >&2
-  exit 1
-fi
+bome_exe="$(waydaw_bome_executable "$WINEPREFIX")"
 
 printf '[%s] launching Bome: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$bome_exe" >>"$LOG_FILE"
+
+if [[ -n "${WAYDAW_BOME_READY_FILE:-}" ]]; then
+  helper="$ROOT_DIR/.local-tools/waydaw-launch/wait-bome.exe"
+  [[ -f "$helper" ]] || { printf 'ERROR: build compat/waydaw-launch/build.sh first.\n' >&2; exit 1; }
+  # winepath uses the selected runner and the same prefix. Its bootstrap is
+  # covered by the supervisor's host-side startup deadline and cancellation.
+  windows_path_output="$(winepath -w "$WAYDAW_BOME_READY_FILE" "$bome_exe")"
+  mapfile -t windows_paths <<<"$windows_path_output"
+  # Some Wine builds emit CRLF even when stdout is redirected on Linux.
+  for index in "${!windows_paths[@]}"; do windows_paths[index]="${windows_paths[index]%$'\r'}"; done
+  [[ ${#windows_paths[@]} == 2 && -n "${windows_paths[0]}" && -n "${windows_paths[1]}" ]] || {
+    printf 'ERROR: could not resolve Bome readiness paths.\n' >&2; exit 1;
+  }
+  exec wine "$helper" "${windows_paths[0]}" 30000 "${windows_paths[1]}" "$@" >>"$LOG_FILE" 2>&1
+fi
 
 if [[ "$debug_mode" -eq 1 ]]; then
   {

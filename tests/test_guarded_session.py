@@ -251,6 +251,22 @@ exit "${TEST_CLEANUP_FAIL:-0}"
                 process.stdout = None
             process.communicate(timeout=2)
 
+    def test_dry_run_and_print_do_not_mutate_or_invoke_services(self):
+        (self.prefix / "drive_c/windows/system32/d3d11.dll").write_bytes(b"drifted")
+        seed = self.prefix / "drive_c/users/fixture/AppData/Roaming/Ableton/Live 12/Preferences/Preferences.cfg"
+        seed.parent.mkdir(parents=True)
+        seed.write_bytes(b"seed")
+        (self.prefix / "drive_c/users/steamuser/AppData/Roaming/Ableton/Live 12/Preferences").mkdir(parents=True)
+        before = self.snapshot()
+        for command in (("start", "--dry-run"), ("start", "--print-launch-config")):
+            result = self.run_command(*command)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn("sizing_shim=would_enable", result.stdout)
+        result = self.run_command("--print-launch-config", executable="ableton-proton")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.events.exists())
+        self.assertFalse((self.root / "logs").exists())
 
     def test_sourcing_config_is_read_only(self):
         (self.prefix / "drive_c/windows/system32/d3d11.dll").write_bytes(b"drifted")
@@ -262,23 +278,235 @@ exit "${TEST_CLEANUP_FAIL:-0}"
         self.assertEqual(self.snapshot(), before)
         self.assertFalse(self.events.exists())
 
+    def test_preflight_does_not_repair_drift_or_start_wine(self):
+        (self.prefix / "drive_c/windows/system32/d3d11.dll").write_bytes(b"drifted")
+        before = self.snapshot()
+        result = self.run_command("check", "--with-bome")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("preflight=passed", result.stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.assertNotIn("wine:", self.event_text())
+        self.assertNotIn("loadScript", self.event_text())
 
+    def test_working_prefix_aliases_and_overlaps_are_rejected(self):
+        alias = self.home / "alias"
+        alias.symlink_to(self.working, target_is_directory=True)
+        for path in (self.working, alias, self.working / "nested", self.working.parent):
+            for command in ("start", "stop"):
+                result = self.run_command(command, "--dry-run", env={"WAYDAW_ABLETON_RUNNER_PREFIX": str(path)})
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("overlapping", result.stdout)
+        self.assertFalse(self.events.exists())
 
+    def test_symlinked_system_directory_is_rejected(self):
+        system = self.prefix / "drive_c/windows/system32"
+        shutil.rmtree(system)
+        system.symlink_to(self.working / "drive_c/windows/system32", target_is_directory=True)
+        result = self.run_command("start", "--dry-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("escapes", result.stdout)
 
+    def test_missing_dependencies_and_unsafe_settings_block_launch(self):
+        cases = [
+            ({"DISPLAY": ""}, "XWayland"),
+            ({"TEST_PIPEWIRE_FAIL": "1"}, "PipeWire"),
+            ({"WAYDAW_ABLETON_KWIN_CONTROLLER": "0"}, "must be 1"),
+            ({"WAYDAW_ABLETON_SIZING_SHIM": "0"}, "must be 1"),
+            ({"WAYDAW_ABLETON_GRAPHICS": "wined3d"}, "requires DXVK"),
+        ]
+        for env, message in cases:
+            result = self.run_command("start", env=env)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn(message, result.stdout)
+        self.assertNotIn("wine:", self.event_text())
 
+    def test_missing_dlls_and_update_marker_block_launch(self):
+        dll = self.prefix / "drive_c/windows/system32/d3d11.dll"
+        dll.write_bytes(b"drift")
+        (self.working / "drive_c/windows/system32/d3d11.dll").write_bytes(b"drift")
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no verified restore source", result.stdout)
+        dll.write_bytes(b"fixture d3d11")
+        (self.prefix / "drive_c/ProgramData/Ableton/.Live 12 Suite_updated").touch()
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("swap marker", result.stdout)
+        self.assertNotIn("wine:", self.event_text())
 
+    def test_missing_shim_and_runner_block_launch(self):
+        shim = self.root / ".local-tools/ableton-sizing-shim/version.dll"
+        shim.unlink()
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("shim missing", result.stdout)
+        (self.runner / "wine").unlink()
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("wine not found", result.stdout)
 
+    def test_bome_requires_readiness_helper_and_winepath(self):
+        helper = self.root / ".local-tools/waydaw-launch/wait-bome.exe"
+        helper.unlink()
+        result = self.run_command("check", "--with-bome")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("readiness helper missing", result.stdout)
+        helper.write_bytes(b"MZfixture helper")
+        (self.runner / "winepath").unlink()
+        result = self.run_command("check", "--with-bome")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("winepath is missing", result.stdout)
+        self.assertNotIn("wine:", self.event_text())
 
+    def test_controller_failure_blocks_wine_and_cleans_up(self):
+        result = self.run_command("start", env={"TEST_CONTROLLER_FAIL": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("launch blocked", result.stdout)
+        self.assertNotIn("wine:", self.event_text())
+        self.assertIn("wineserver:" + str(self.prefix) + ":-k", self.event_text())
 
+    def test_normal_exit_repairs_only_copy_and_propagates_status(self):
+        before = {p.name: p.read_bytes() for p in (self.working / "drive_c/windows/system32").iterdir()}
+        dll = self.prefix / "drive_c/windows/system32/d3d11.dll"
+        dll.unlink()
+        dll.symlink_to(self.working / "drive_c/windows/system32/d3d11.dll")
+        # A correct symlink should also be safe: no write through the link.
+        result = self.run_command("start", "--", "project with spaces.als", env={"TEST_WINE_EXIT": "7"})
+        self.assertEqual(result.returncode, 7, result.stdout)
+        self.assertIn("project with spaces.als", self.event_text())
+        self.assertIn("overrides=d3d11,dxgi,d3d10core=n;version=n,b:wayland=unset", self.event_text())
+        self.assertEqual(before, {p.name: p.read_bytes() for p in (self.working / "drive_c/windows/system32").iterdir()})
+        self.assertFalse(Path(self.env["TEST_KWIN"]).exists())
+        self.assertFalse((Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw/session.state").exists())
 
+    def test_wine_exit_is_reported_when_a_descendant_keeps_stdout_open(self):
+        self.script(self.runner / "wine", '''
+bash -c 'trap "" TERM; while :; do sleep 0.05; done' &
+exit 23
+''')
+        result = self.run_command("start")
+        self.assertEqual(result.returncode, 23, result.stdout)
+        self.assertIn("session_exit=23 cleanup_exit=0", self.session_log_text())
+        self.assertFalse((Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw/session.state").exists())
 
+    def test_local_pipewire_properties_are_data_and_reach_the_child(self):
+        self.env.pop("PIPEWIRE_PROPS", None)
+        profile = Path(self.env["XDG_CONFIG_HOME"]) / "waydaw/pipewire.properties"
+        profile.parent.mkdir(parents=True)
+        marker = self.home / "must-not-be-created"
+        value = f'{{ rt.prio=0 custom.value="$(touch {marker})" }}'
+        profile.write_text(value + "\n")
+        self.script(self.fake / "pw-jack", '''
+printf 'props:%s\\n' "${PIPEWIRE_PROPS:-}" >> "$TEST_EVENTS"
+exec "$@"
+''')
+        result = self.run_command("start")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("props:" + value, self.event_text())
+        self.assertFalse(marker.exists())
 
+    def test_explicit_pipewire_properties_override_the_local_profile(self):
+        profile = Path(self.env["XDG_CONFIG_HOME"]) / "waydaw/pipewire.properties"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("{ rt.prio=0 }\n")
+        result = self.run_command("check", env={"PIPEWIRE_PROPS": "{ rt.prio=12 }"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("pipewire_properties={ rt.prio=12 }", result.stdout)
 
+    def test_local_pipewire_configuration_reaches_the_child(self):
+        self.env.pop("PIPEWIRE_CONFIG_DIR", None)
+        profile = Path(self.env["XDG_CONFIG_HOME"]) / "waydaw/pipewire"
+        profile.mkdir(parents=True)
+        (profile / "jack.conf").write_text("context.properties = { loop.rt-prio = 0 }\n")
+        self.script(self.fake / "pw-jack", '''
+printf 'config-dir:%s\\n' "${PIPEWIRE_CONFIG_DIR:-}" >> "$TEST_EVENTS"
+exec "$@"
+''')
+        result = self.run_command("start")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("config-dir:" + str(profile), self.event_text())
+        explicit = self.run_command("check", env={"PIPEWIRE_CONFIG_DIR": "/explicit/config"})
+        self.assertEqual(explicit.returncode, 0, explicit.stdout)
+        self.assertIn("pipewire_config_dir=/explicit/config", explicit.stdout)
 
+    def test_duplicate_launch_status_stop_and_restart(self):
+        process = self.launch(relative=True, TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "wine:" in self.event_text(), process)
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already", result.stdout)
+        self.assertIn("session=running", self.run_command("status").stdout)
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        output = process.communicate(timeout=8)[0]
+        self.assertEqual(process.returncode, 143, output)
+        self.assertIn("session=stopped", self.run_command("status").stdout)
+        self.assertFalse(Path(self.env["TEST_BRIDGE"]).exists())
+        self.stop.unlink()
+        self.assertEqual(self.run_command("start").returncode, 0)
 
+    def test_real_start_restores_drifted_dll_without_changing_source(self):
+        target = self.prefix / "drive_c/windows/system32/d3d11.dll"
+        source = self.working / "drive_c/windows/system32/d3d11.dll"
+        target.write_bytes(b"drifted")
+        before = source.read_bytes()
+        result = self.run_command("start")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(target.read_bytes(), b"fixture d3d11")
+        self.assertEqual(source.read_bytes(), before)
 
+    def test_real_start_seeds_and_normalizes_only_copied_preferences(self):
+        seed = self.prefix / "drive_c/users/fixture/AppData/Roaming/Ableton/Live 12/Preferences/Preferences.cfg"
+        seed.parent.mkdir(parents=True)
+        original = struct.pack("<iiiii", 3, 0, 0, 1280, 1096) + b"\x01" + b"\0" * 7
+        seed.write_bytes(original)
+        preferences = self.prefix / "drive_c/users/steamuser/AppData/Roaming/Ableton/Live 12/Preferences"
+        preferences.mkdir(parents=True)
+        result = self.run_command("start")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        normalized = (preferences / "Preferences.cfg").read_bytes()
+        self.assertEqual(struct.unpack_from("<iiiii", normalized), (1, 0, 0, 1280, 1026))
+        self.assertEqual(normalized[20], 0)
+        self.assertEqual(seed.read_bytes(), original)
+        self.assertEqual((preferences / "Preferences.cfg.bak-normalize").read_bytes(), original)
 
+    def test_escaping_preferences_symlink_is_rejected_before_write(self):
+        outside = self.home / "outside-preferences"
+        outside.write_bytes(b"unchanged")
+        preferences = self.prefix / "drive_c/users/steamuser/AppData/Roaming/Ableton/Live 12/Preferences"
+        preferences.mkdir(parents=True)
+        (preferences / "Preferences.cfg").symlink_to(outside)
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Preferences.cfg escapes", result.stdout)
+        self.assertEqual(outside.read_bytes(), b"unchanged")
+        self.assertNotIn("wine:", self.event_text())
 
+    def test_regression_backup_symlinks_are_rejected_without_writes(self):
+        preferences = self.prefix / "drive_c/users/steamuser/AppData/Roaming/Ableton/Live 12/Preferences"
+        preferences.mkdir(parents=True)
+        original = struct.pack("<iiiii", 3, 0, 0, 1280, 1096) + b"\x01" + b"\0" * 7
+        cfg = preferences / "Preferences.cfg"
+        cfg.write_bytes(original)
+        backup = preferences / "Preferences.cfg.bak-normalize"
+        for existing in (False, True):
+            with self.subTest(existing_target=existing):
+                cfg.write_bytes(original)
+                outside = self.working / f"backup-target-{existing}"
+                if existing:
+                    outside.write_bytes(b"untouched")
+                backup.symlink_to(outside)
+                try:
+                    result = self.run_command("start")
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("backup must be a regular file", result.stdout)
+                    self.assertEqual(cfg.read_bytes(), original)
+                    self.assertTrue(backup.is_symlink())
+                    self.assertEqual(outside.read_bytes() if outside.exists() else None,
+                                     b"untouched" if existing else None)
+                    self.assertNotIn("wine:", self.event_text())
+                finally:
+                    backup.unlink()
 
     def test_atomic_preferences_update_preserves_hardlinked_source_and_first_backup(self):
         preferences = self.prefix / "drive_c/users/steamuser/AppData/Roaming/Ableton/Live 12/Preferences"
@@ -298,34 +526,541 @@ exit "${TEST_CLEANUP_FAIL:-0}"
             self.assertEqual((preferences / "Preferences.cfg.bak-normalize").read_bytes(), original)
         self.assertEqual(list(preferences.glob(".Preferences.cfg-*")), [])
 
+    def test_regression_stop_survives_disconnected_stdout(self):
+        process = self.launch(TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        process.stdout.close()
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        process.wait(timeout=6)
+        self.assertEqual(process.returncode, 143)
+        self.assertIn("session=stopped", self.run_command("status").stdout)
+        self.assertFalse(Path(self.env["TEST_KWIN"]).exists())
+        logs = Path(self.env["XDG_STATE_HOME"]) / "waydaw/logs"
+        output = next(logs.glob("*/session.log")).read_text()
+        self.assertIn("session_exit=143 cleanup_exit=0", output)
 
+    def test_regression_stop_survives_logger_exit(self):
+        logger = self.home / "logger-pid"
+        self.script(self.fake / "tee", '''
+if [[ "$*" == *session.log* ]]; then printf '%s' "$$" > "$TEST_LOGGER"; fi
+exec /usr/bin/tee "$@"
+''')
+        process = self.launch(TEST_WINE_HOLD="1", TEST_LOGGER=str(logger))
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        os.kill(int(logger.read_text()), signal.SIGTERM)
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        process.communicate(timeout=6)
+        self.assertIn("session=stopped", self.run_command("status").stdout)
+        self.assertFalse(Path(self.env["TEST_KWIN"]).exists())
 
+    def test_logger_exit_during_startup_triggers_complete_cleanup(self):
+        gate, release = self.home / "bome-starting", self.home / "bome-release"
+        logger = self.home / "logger-pid"
+        self.script(self.fake / "tee", '''
+if [[ "$*" == *session.log* ]]; then printf '%s' "$$" > "$TEST_LOGGER"; fi
+exec /usr/bin/tee "$@"
+''')
+        process = self.launch("--with-bome", TEST_BOME_INITIALIZING=str(gate),
+                              TEST_BOME_RELEASE=str(release), TEST_LOGGER=str(logger))
+        self.wait_for(gate.exists, process)
+        logger_pid = int(logger.read_text())
+        os.kill(logger_pid, signal.SIGTERM)
+        self.wait_for(lambda: self.process_birth(logger_pid) is None)
+        release.touch()
+        process.communicate(timeout=6)
+        self.assertEqual(process.returncode, 141)
+        self.assertNotIn("Ableton Live 12 Suite.exe:", self.event_text())
+        self.assertIn("session_exit=141 cleanup_exit=0", self.session_log_text())
+        self.assertIn("session=stopped", self.run_command("status").stdout)
 
+    def test_bome_uses_same_prefix_and_is_stopped(self):
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        self.assertIn("wine:" + str(self.prefix) + ":" + str(self.prefix / "drive_c/Program Files/Bome MIDI Translator Pro/MIDITranslator.exe"), self.event_text())
+        bome_event = next(line for line in self.event_text().splitlines()
+                          if line.startswith("wine:") and "MIDITranslator.exe" in line)
+        self.assertIn("wayland=unset", bome_event)
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        process.communicate(timeout=8)
 
+    def test_bome_preflight_and_launcher_accept_same_alternate_filename(self):
+        directory = self.prefix / "drive_c/Program Files/Bome MIDI Translator Pro"
+        executable = directory / "Bome MIDI Translator Pro.exe"
+        (directory / "MIDITranslator.exe").rename(executable)
+        before = self.snapshot()
+        checked = self.run_command("check", "--with-bome")
+        self.assertEqual(checked.returncode, 0, checked.stdout)
+        self.assertEqual(self.snapshot(), before)
+        launched = self.run_command(executable="bome", env={"WAYDAW_ABLETON_RUNNER": "proton-exp"})
+        self.assertEqual(launched.returncode, 0, launched.stdout)
+        self.assertIn("wine:" + str(self.prefix) + ":" + str(executable), self.event_text())
 
+    def test_bome_preflight_rejects_executable_symlink_outside_prefix(self):
+        executable = self.prefix / "drive_c/Program Files/Bome MIDI Translator Pro/MIDITranslator.exe"
+        outside = self.home / "outside-bome.exe"
+        outside.touch()
+        executable.unlink()
+        executable.symlink_to(outside)
+        checked = self.run_command("check", "--with-bome")
+        self.assertNotEqual(checked.returncode, 0, checked.stdout)
+        self.assertIn("Bome executable escapes", checked.stdout)
+        self.assertNotIn("wine:", self.event_text())
 
+    def test_bome_discovery_rejects_installers_and_backup_executables(self):
+        (self.prefix / "drive_c/Program Files/Bome MIDI Translator Pro/MIDITranslator.exe").unlink()
+        directory = self.prefix / "drive_c/users/fixture/Downloads"
+        directory.mkdir(parents=True)
+        for name in ("MIDITranslatorPro1.9.2_Full_Windows.exe", "Bome MIDI Translator Pro Setup.exe", "MIDITranslator.backup.exe"):
+            with self.subTest(name=name):
+                candidate = directory / name
+                candidate.touch()
+                checked = self.run_command("check", "--with-bome")
+                self.assertNotEqual(checked.returncode, 0, checked.stdout)
+                launched = self.run_command(executable="bome", env={"WAYDAW_ABLETON_RUNNER": "proton-exp"})
+                self.assertNotEqual(launched.returncode, 0, launched.stdout)
+                self.assertNotIn("wine:", self.event_text())
+                candidate.unlink()
 
+    def test_bome_discovery_rejects_ambiguous_nonstandard_installations(self):
+        (self.prefix / "drive_c/Program Files/Bome MIDI Translator Pro/MIDITranslator.exe").unlink()
+        for folder in ("Custom Bome", "Old Bome"):
+            candidate = self.prefix / "drive_c" / folder / "MIDITranslator.exe"
+            candidate.parent.mkdir()
+            candidate.touch()
+        result = self.run_command("check", "--with-bome")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Multiple Bome executables", result.stdout)
+        self.assertNotIn("wine:", self.event_text())
 
+    def test_bome_runtime_failure_warns_once_and_preserves_ableton(self):
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="23")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        self.bome_stop.touch()
+        self.wait_for(lambda: "session=degraded" in self.run_command("status").stdout, process)
+        self.wait_for(lambda: "notification:" in self.event_text(), process)
+        status = self.run_command("status").stdout
+        self.assertIn("bome=failed", status)
+        self.assertIn("bome_exit=23", status)
+        self.assertIsNone(process.poll())
+        self.assertNotIn("wineserver:", self.event_text())
+        self.assertIn("Ableton remains open", self.session_log_text())
+        for _ in range(3):
+            self.assertIn("session=degraded", self.run_command("status").stdout)
+        self.assertEqual(self.event_text().count("notification:"), 1)
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 23)
+        self.assertIn("session_exit=23 cleanup_exit=0", self.session_log_text())
+        self.assertIn("session=stopped", self.run_command("status").stdout)
+        self.stop.unlink()
+        self.assertEqual(self.run_command("start").returncode, 0)
 
+    def test_bome_normal_quit_keeps_ableton_open_without_error_alert(self):
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="0")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        self.bome_stop.touch()
+        self.wait_for(lambda: "bome=stopped" in self.run_command("status").stdout, process)
+        self.assertIn("session=running", self.run_command("status").stdout)
+        self.assertIsNone(process.poll())
+        self.assertNotIn("notification:", self.event_text())
+        self.assertNotIn("wineserver:", self.event_text())
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0)
 
+    def test_bome_runtime_failure_preserves_ableton_error_code(self):
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_WINE_FINAL_EXIT="17", TEST_BOME_RUNTIME_EXIT="23")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        self.bome_stop.touch()
+        self.wait_for(lambda: "session=degraded" in self.run_command("status").stdout, process)
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 17)
 
+    def test_bome_runtime_alert_failure_does_not_close_ableton(self):
+        self.script(self.fake / "notify-send", 'printf "notification-failed\\n" >> "$TEST_EVENTS"; exit 7')
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="23")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        self.bome_stop.touch()
+        self.wait_for(lambda: "notification-failed" in self.event_text(), process)
+        self.assertIsNone(process.poll())
+        self.assertIn("session=degraded", self.run_command("status").stdout)
+        self.assertNotIn("wineserver:", self.event_text())
+        stopped = self.run_command("stop")
+        self.assertEqual(stopped.returncode, 0, stopped.stdout)
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 143)
 
+    def test_bome_runtime_owner_loss_is_reported_without_closing_ableton(self):
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="0")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        state = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw/bome.state"
+        owner = int(state.read_text().splitlines()[0])
+        children = [int(pid) for pid in Path(f"/proc/{owner}/task/{owner}/children").read_text().split()]
+        os.kill(owner, signal.SIGKILL)
+        self.wait_for(lambda: "session=degraded" in self.run_command("status").stdout, process)
+        self.assertIn("bome_exit=1", self.run_command("status").stdout)
+        self.wait_for(lambda: "process owner exited without a result" in self.session_log_text(), process)
+        self.assertIn("process owner exited without a result", self.session_log_text())
+        self.assertIsNone(process.poll())
+        self.assertNotIn("wineserver:", self.event_text())
+        self.bome_stop.touch()
+        self.wait_for(lambda: all(self.process_birth(pid) is None for pid in children), process)
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 1)
 
+    def test_bome_invalid_runtime_result_is_a_reported_failure(self):
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        state = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw/session.state"
+        log_dir = Path(state.read_text().splitlines()[4]).parent
+        (log_dir / "bome.result").write_text("invalid exit status\n")
+        self.wait_for(lambda: "session=degraded" in self.run_command("status").stdout, process)
+        self.wait_for(lambda: "notification:" in self.event_text(), process)
+        self.assertIn("bome_exit=1", self.run_command("status").stdout)
+        self.assertIsNone(process.poll())
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 1)
 
+    def test_bome_status_falls_back_when_health_publication_fails(self):
+        self.script(self.fake / "mv", '''
+[[ "${@: -1}" != */bome.exit ]] || exit 1
+exec /usr/bin/mv "$@"
+''')
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="23")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        state = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw/session.state"
+        log_dir = Path(state.read_text().splitlines()[4]).parent
+        self.bome_stop.touch()
+        self.wait_for(lambda: "notification:" in self.event_text(), process)
+        self.assertFalse((log_dir / "bome.exit").exists())
+        self.assertEqual((log_dir / "bome.result").read_text().strip(), "23")
+        before_prefix = self.snapshot()
+        before_events = self.event_text()
+        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        before_records = {str(path): path.read_bytes() for directory in (runtime, log_dir)
+                          for path in directory.iterdir() if path.is_file()}
+        result = self.run_command("status")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("session=degraded", result.stdout)
+        self.assertIn("bome=failed", result.stdout)
+        self.assertIn("bome_exit=23", result.stdout)
+        self.assertEqual(self.snapshot(), before_prefix)
+        self.assertEqual(self.event_text(), before_events)
+        self.assertEqual({str(path): path.read_bytes() for directory in (runtime, log_dir)
+                          for path in directory.iterdir() if path.is_file()}, before_records)
+        self.assertIsNone(process.poll())
+        self.assertNotIn("wineserver:", self.event_text())
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 23)
 
+    def test_bome_status_reports_normal_quit_without_health_record(self):
+        self.script(self.fake / "mv", '''
+[[ "${@: -1}" != */bome.exit ]] || exit 1
+exec /usr/bin/mv "$@"
+''')
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="0")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        self.bome_stop.touch()
+        self.wait_for(lambda: "Bome closed normally" in self.session_log_text(), process)
+        status = self.run_command("status").stdout
+        self.assertIn("session=running", status)
+        self.assertIn("bome=stopped", status)
+        self.assertIn("bome_exit=0", status)
+        self.assertNotIn("notification:", self.event_text())
+        self.assertIsNone(process.poll())
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0)
 
+    def test_bome_normal_exit_publication_keeps_status_healthy_and_stop_safe(self):
+        pending = self.home / "result-pending"
+        publish_release = self.home / "publish-release"
+        published = self.home / "result-published"
+        waiting_release = self.home / "waiting-release"
+        signalled = self.home / "bome-signalled"
+        self.releases.update((publish_release, waiting_release))
+        worker = self.root / "config/session-worker.py"
+        # Pause the real worker on both sides of its atomic result publication.
+        # Neither pause changes the ordering of its completion records.
+        worker.write_text(worker.read_text().replace(
+            "def publish(path, value):\n",
+            "def publish(path, value):\n"
+            "    if path.name == 'bome.result':\n"
+            "        Path(os.environ['TEST_RESULT_PENDING']).touch()\n"
+            "        while not Path(os.environ['TEST_PUBLISH_RELEASE']).exists(): time.sleep(0.02)\n"
+        ).replace(
+            "        os.replace(temporary, path)",
+            "        os.replace(temporary, path)\n"
+            "        if path.name == 'bome.result':\n"
+            "            Path(os.environ['TEST_RESULT_PUBLISHED']).touch()\n"
+            "            while not Path(os.environ['TEST_WAITING_RELEASE']).exists(): time.sleep(0.02)"
+        ).replace(
+            "        stopping = True",
+            "        stopping = True\n"
+            "        if receipt.name == 'bome.state': Path(os.environ['TEST_BOME_SIGNALLED']).touch()"
+        ))
+        process = self.launch(
+            "--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="0",
+            TEST_RESULT_PENDING=str(pending), TEST_PUBLISH_RELEASE=str(publish_release),
+            TEST_RESULT_PUBLISHED=str(published), TEST_WAITING_RELEASE=str(waiting_release),
+            TEST_BOME_SIGNALLED=str(signalled),
+        )
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        self.bome_stop.touch()
+        try:
+            self.wait_for(pending.exists, process)
+            status = self.run_command("status")
+            self.assertEqual(status.returncode, 0, status.stdout)
+            self.assertIn("session=running", status.stdout)
+            self.assertNotIn("bome=failed", status.stdout)
+            self.assertNotIn("notification:", self.event_text())
+            self.assertIsNone(process.poll())
+            self.assertNotIn("wineserver:", self.event_text())
+            publish_release.touch()
+            self.wait_for(published.exists, process)
+            status = self.run_command("status")
+            self.assertEqual(status.returncode, 0, status.stdout)
+            self.assertIn("session=running", status.stdout)
+            self.assertIn("bome=stopped", status.stdout)
+            self.assertIn("bome_exit=0", status.stdout)
+            self.assertNotIn("notification:", self.event_text())
+            stop = self.start_command("stop")
+            self.wait_for(signalled.exists)
+            self.assertIsNone(stop.poll())
+        finally:
+            publish_release.touch()
+            waiting_release.touch()
+        output = stop.communicate(timeout=8)[0]
+        self.assertEqual(stop.returncode, 0, output)
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 143)
+        self.assertNotIn("bome_stop=forced", self.session_log_text())
+        self.assertIn("cleanup_exit=0", self.session_log_text())
+        self.assertIn("session=stopped", self.run_command("status").stdout)
 
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses directory read permissions")
+    def test_bome_status_uses_ownership_when_session_log_directory_is_unreadable(self):
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="0")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        log_dir = Path((runtime / "session.state").read_text().splitlines()[4]).parent
+        owner = int((runtime / "bome.state").read_text().splitlines()[0])
+        children = [int(pid) for pid in Path(f"/proc/{owner}/task/{owner}/children").read_text().split()]
+        mode = log_dir.stat().st_mode & 0o777
+        try:
+            log_dir.chmod(0)
+            os.kill(owner, signal.SIGKILL)
+            self.wait_for(lambda: "notification:" in self.event_text(), process)
+            result = self.run_command("status")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn("session=degraded", result.stdout)
+            self.assertIn("bome_exit=1", result.stdout)
+            self.assertIsNone(process.poll())
+            self.assertNotIn("wineserver:", self.event_text())
+        finally:
+            log_dir.chmod(mode)
+        self.bome_stop.touch()
+        self.wait_for(lambda: all(self.process_birth(pid) is None for pid in children), process)
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 1)
 
+    def test_bome_status_reports_lost_owner_when_health_record_cannot_be_created(self):
+        self.script(self.fake / "mktemp", '''
+[[ "$*" != *'/.bome-exit-'* ]] || exit 1
+exec /usr/bin/mktemp "$@"
+''')
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="0")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        log_dir = Path((runtime / "session.state").read_text().splitlines()[4]).parent
+        owner = int((runtime / "bome.state").read_text().splitlines()[0])
+        children = [int(pid) for pid in Path(f"/proc/{owner}/task/{owner}/children").read_text().split()]
+        os.kill(owner, signal.SIGKILL)
+        self.wait_for(lambda: "notification:" in self.event_text(), process)
+        self.assertFalse((log_dir / "bome.exit").exists())
+        self.assertFalse((log_dir / "bome.result").exists())
+        status = self.run_command("status").stdout
+        self.assertIn("session=degraded", status)
+        self.assertIn("bome_exit=1", status)
+        self.assertIsNone(process.poll())
+        self.assertNotIn("wineserver:", self.event_text())
+        self.bome_stop.touch()
+        self.wait_for(lambda: all(self.process_birth(pid) is None for pid in children), process)
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 1)
 
+    def test_bome_status_does_not_treat_unverified_ownership_as_healthy(self):
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        receipt = runtime / "bome.state"
+        original = receipt.read_bytes()
+        unrelated = subprocess.Popen(["sleep", "30"])
+        cases = [None, b"invalid ownership\n", f"{os.getpid()}\n0\nprocess-group-v1\n".encode(),
+                 f"{unrelated.pid}\n{self.process_birth(unrelated.pid)}\nprocess-group-v1\n".encode(),
+                 original + b"waiting\n"]
+        try:
+            for record in cases:
+                with self.subTest(record=record):
+                    if record is None:
+                        receipt.unlink(missing_ok=True)
+                    else:
+                        receipt.write_bytes(record)
+                    status = self.run_command("status").stdout
+                    self.assertIn("session=degraded", status)
+                    self.assertIn("bome_exit=1", status)
+                    self.assertNotIn("notification:", self.event_text())
+                    self.assertIsNone(process.poll())
+        finally:
+            receipt.write_bytes(original)
+            self.assertIsNone(unrelated.poll())
+            unrelated.terminate()
+            unrelated.wait(timeout=2)
+        self.assertIn("session=running", self.run_command("status").stdout)
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0)
 
+    def test_bome_status_rejects_nonregular_health_records_without_blocking(self):
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        state = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw/session.state"
+        record = Path(state.read_text().splitlines()[4]).parent / "bome.exit"
+        try:
+            record.mkdir()
+            self.assertIn("session=degraded", self.run_command("status").stdout)
+            record.rmdir()
+            os.mkfifo(record)
+            self.assertIn("session=degraded", self.run_command("status").stdout)
+        finally:
+            if record.is_dir():
+                record.rmdir()
+            else:
+                record.unlink(missing_ok=True)
+        self.assertNotIn("notification:", self.event_text())
+        self.assertIn("session=running", self.run_command("status").stdout)
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0)
 
+    def test_bome_status_ignores_other_session_failure_records(self):
+        stale = Path(self.env["XDG_STATE_HOME"]) / "waydaw/logs/other-session"
+        stale.mkdir(parents=True)
+        (stale / "bome.exit").write_text("23\n")
+        (stale / "bome.result").write_text("23\n")
+        (stale / "bome.ready").write_text("ready\n")
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        status = self.run_command("status").stdout
+        self.assertIn("session=running", status)
+        self.assertNotIn("bome=failed", status)
+        self.assertNotIn("notification:", self.event_text())
+        self.stop.touch()
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0)
 
+    def test_bome_stalled_notification_does_not_hold_stop_lock(self):
+        self.script(self.fake / "notify-send", 'printf "notification-started\\n" >> "$TEST_EVENTS"\nsleep 30')
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", TEST_BOME_RUNTIME_EXIT="23")
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe:" in self.event_text(), process)
+        self.bome_stop.touch()
+        self.wait_for(lambda: "notification-started" in self.event_text(), process)
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 143)
+        self.assertIn("session=stopped", self.run_command("status").stdout)
 
+    def test_bome_default_system_mode_keeps_its_prefix_and_display(self):
+        executable = self.working / "drive_c/Program Files/Bome MIDI Translator Pro/MIDITranslator.exe"
+        executable.parent.mkdir(parents=True)
+        executable.touch()
+        shutil.copy2(self.runner / "wine", self.fake / "wine")
+        result = self.run_command(executable="bome", env={"TEST_BOME_EXIT": "0"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("wine:" + str(self.working) + ":" + str(executable), self.event_text())
+        self.assertIn("wayland=wayland-fixture", self.event_text())
 
+    def test_bome_clean_early_exit_is_failure(self):
+        result = self.run_command("start", "--with-bome", env={"TEST_BOME_EXIT": "0"})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Bome exited during startup", result.stdout)
+        self.assertNotIn("Ableton Live 12 Suite.exe:", self.event_text())
 
+    def test_cleanup_failure_is_reported(self):
+        result = self.run_command("start", env={"TEST_CLEANUP_FAIL": "1"})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("cleanup_exit=1", self.session_log_text())
 
+    def test_crashed_supervisor_blocks_start_until_explicit_recovery(self):
+        process = self.launch(TEST_WINE_HOLD="1")
+        try:
+            self.wait_for(lambda: "wine:" in self.event_text(), process)
+            self.wait_for(lambda: Path(self.env["TEST_BRIDGE"]).is_file(), process)
+            process.kill()
+            process.wait(timeout=2)
+            before = self.snapshot()
+            result = self.run_command("start")
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("recovery required", result.stdout.lower())
+            self.assertEqual(self.snapshot(), before)
+            self.assertEqual(self.event_text().count("wine:"), 1)
+            self.assertIn("session=recovery-required", self.run_command("status").stdout)
+            events_before_stop = self.event_text()
+            wrong_scope = self.run_command("stop", env={"WAYDAW_ABLETON_RUNNER_PREFIX": str(self.home / "other-copy")})
+            self.assertNotEqual(wrong_scope.returncode, 0, wrong_scope.stdout)
+            self.assertIn("Recorded session belongs", wrong_scope.stdout)
+            self.assertEqual(self.event_text(), events_before_stop)
+            result = self.run_command("stop")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertFalse(Path(self.env["TEST_BRIDGE"]).exists())
+            process.communicate(timeout=3)
+            self.assertIn("session=stopped", self.run_command("status").stdout)
+            self.stop.unlink()
+            self.assertEqual(self.run_command("start").returncode, 0)
+        finally:
+            self.stop.touch()
+            bridge = Path(self.env["TEST_BRIDGE"])
+            if bridge.is_file():
+                try:
+                    os.kill(int(bridge.read_text()), signal.SIGTERM)
+                except (ProcessLookupError, ValueError):
+                    pass
 
+    def test_failed_cleanup_preserves_recovery_marker_and_blocks_start(self):
+        result = self.run_command("start", env={"TEST_CLEANUP_FAIL": "1"})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        before = self.event_text()
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("recovery required", result.stdout.lower())
+        self.assertEqual(self.event_text(), before)
+        self.assertIn("session=recovery-required", self.run_command("status").stdout)
+        failed_stop = self.run_command("stop", env={"TEST_CLEANUP_FAIL": "1"})
+        self.assertNotEqual(failed_stop.returncode, 0, failed_stop.stdout)
+        self.assertIn("session=recovery-required", self.run_command("status").stdout)
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("session=stopped", self.run_command("status").stdout)
 
+    def test_bome_dll_update_blocks_ableton_launch(self):
+        source = self.working / "drive_c/windows/system32/d3d11.dll"
+        before = source.read_bytes()
+        result = self.run_command("start", "--with-bome", env={"TEST_BOME_DRIFT": "1"})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("DXVK verification failed", result.stdout)
+        self.assertNotIn("Ableton Live 12 Suite.exe:", self.event_text())
+        self.assertEqual(source.read_bytes(), before)
+        self.assertIn("wineserver:" + str(self.prefix) + ":-k", self.event_text())
 
     def gate_launcher(self, name):
         gate = self.home / "launcher-waiting"
@@ -351,29 +1086,364 @@ exec "$@"
         self.assertFalse(Path(self.env["TEST_KWIN"]).exists())
         self.assertIn("session=stopped", self.run_command("status").stdout)
 
+    def test_stop_cancels_delayed_ableton_wrapper_before_wine_cleanup(self):
+        gate, release = self.gate_launcher("ableton")
+        process = self.launch(TEST_GATE=str(gate), TEST_RELEASE=str(release))
+        self.wait_for(gate.exists, process)
+        self.assert_no_launch_after_stop(process, release)
 
+    def test_stop_cancels_delayed_bome_wrapper_before_wine_cleanup(self):
+        gate, release = self.gate_launcher("bome")
+        process = self.launch("--with-bome", TEST_GATE=str(gate), TEST_RELEASE=str(release))
+        self.wait_for(gate.exists, process)
+        self.assert_no_launch_after_stop(process, release)
 
+    def test_exited_launcher_descendants_are_cancelled(self):
+        release = self.home / "descendant-release"
+        self.script(self.fake / "pw-jack", '''
+if [[ "$1" == */bin/ableton ]]; then
+  (
+    while [[ ! -e "$TEST_RELEASE" ]]; do sleep 0.02; done
+    exec "$@"
+  ) &
+  exit 0
+fi
+exec "$@"
+''')
+        try:
+            result = self.run_command("start", env={"TEST_RELEASE": str(release)})
+            self.assertEqual(result.returncode, 0, result.stdout)
+        finally:
+            release.touch()
+        time.sleep(0.2)
+        self.assertNotIn("wine:", self.event_text())
+        self.assertFalse(Path(self.env["TEST_KWIN"]).exists())
 
+    def test_crash_recovery_cancels_delayed_launcher(self):
+        gate, release = self.gate_launcher("ableton")
+        process = self.launch(TEST_GATE=str(gate), TEST_RELEASE=str(release))
+        self.wait_for(gate.exists, process)
+        process.kill()
+        process.wait(timeout=2)
+        self.assert_no_launch_after_stop(process, release)
 
+    def test_regression_recovery_waits_for_pending_worker_publication(self):
+        bridge_gate, bridge_release = self.home / "bridge-pending", self.home / "bridge-release"
+        gate, release = self.gate_launcher("ableton")
+        self.releases.add(bridge_release)
+        self.script(self.fake / "python3", '''
+if [[ "$1" == */session-worker.py && "$2" == run && "$3" == */bridge.state ]]; then
+  touch "$TEST_BRIDGE_GATE"
+  while [[ ! -e "$TEST_BRIDGE_RELEASE" ]]; do sleep 0.02; done
+fi
+exec /usr/bin/python3 "$@"
+''')
+        process = self.launch(TEST_GATE=str(gate), TEST_RELEASE=str(release),
+                              TEST_BRIDGE_GATE=str(bridge_gate), TEST_BRIDGE_RELEASE=str(bridge_release))
+        self.wait_for(lambda: bridge_gate.exists() and gate.exists(), process)
+        process.kill()
+        process.wait(timeout=2)
+        stop = self.start_command("stop")
+        try:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                stop.communicate(timeout=0.25)
+        finally:
+            bridge_release.touch()
+        output = stop.communicate(timeout=6)[0]
+        self.assertEqual(stop.returncode, 0, output)
+        release.touch()
+        process.communicate(timeout=4)
+        self.assertNotIn("wine:", self.event_text())
+        self.assertIn("session=stopped", self.run_command("status").stdout)
 
+    def test_recovery_lock_wait_is_bounded_and_preserves_session(self):
+        directory = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        directory.mkdir(parents=True)
+        state = directory / "session.state"
+        state.write_text(f"0\n0\n{self.prefix}\n{self.root}\n")
+        with (directory / "session.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_command("stop")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("after 5 seconds", result.stdout)
+        self.assertTrue(state.exists())
+        self.assertEqual(self.event_text(), "")
 
+    def test_fixture_teardown_cleans_failed_recovery_and_preserves_unrelated_process(self):
+        fixture = GuardedSessionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        unrelated = subprocess.Popen(["sleep", "30"])
+        try:
+            process = fixture.launch(TEST_WINE_HOLD="1")
+            fixture.wait_for(lambda: "wine:" in fixture.event_text(), process)
+            process.kill()
+            process.wait(timeout=2)
+            directory = Path(fixture.env["XDG_RUNTIME_DIR"]) / "waydaw"
+            (directory / "ableton.state").write_text("invalid ownership")
+            fixture.doCleanups()
+            self.assertEqual(fixture.fixture_processes(), {})
+            self.assertIsNotNone(process.poll())
+            self.assertIsNone(unrelated.poll())
+        finally:
+            unrelated.terminate()
+            unrelated.wait(timeout=3)
 
+    def test_stop_before_worker_publishes_ownership_cancels_launch(self):
+        gate, release = self.home / "worker-waiting", self.home / "worker-release"
+        self.script(self.fake / "python3", '''
+if [[ "$1" == */session-worker.py && "$2" == run ]]; then
+  touch "$TEST_GATE"
+  while [[ ! -e "$TEST_RELEASE" ]]; do sleep 0.02; done
+fi
+exec /usr/bin/python3 "$@"
+''')
+        process = self.launch(TEST_GATE=str(gate), TEST_RELEASE=str(release), TEST_BRIDGE_EXISTING="1")
+        self.wait_for(gate.exists, process)
+        stop = self.start_command("stop")
+        try:
+            logs = Path(self.env["XDG_STATE_HOME"]) / "waydaw/logs"
+            self.wait_for(lambda: bool(list(logs.glob("*/cancelled"))))
+            self.assertIsNone(stop.poll())  # Pending worker still holds the lock.
+        finally:
+            release.touch()
+        output = stop.communicate(timeout=6)[0]
+        self.assertEqual(stop.returncode, 0, output)
+        process.communicate(timeout=4)
+        self.assertNotIn("wine:", self.event_text())
+        directory = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        self.assertEqual(list(directory.glob("*.state")), [])
 
+    def test_stop_as_session_record_becomes_visible_runs_cleanup(self):
+        gate, release = self.home / "session-published", self.home / "session-release"
+        stop_waiting = self.home / "stop-waiting"
+        self.script(self.fake / "mv", '''
+/usr/bin/mv "$@"
+if [[ "${@: -1}" == */session.state ]]; then
+  touch "$TEST_GATE"
+  while [[ ! -e "$TEST_RELEASE" ]]; do sleep 0.02; done
+fi
+''')
+        self.script(self.fake / "flock", '''
+[[ "$1" != -w ]] || touch "$TEST_STOP_WAITING"
+exec /usr/bin/flock "$@"
+''')
+        process = self.launch(TEST_GATE=str(gate), TEST_RELEASE=str(release))
+        self.wait_for(gate.exists, process)
+        stop = self.start_command("stop", env={"TEST_STOP_WAITING": str(stop_waiting)})
+        try:
+            self.wait_for(stop_waiting.exists)  # Stop has delivered SIGTERM.
+        finally:
+            release.touch()
+        output = stop.communicate(timeout=6)[0]
+        self.assertEqual(stop.returncode, 0, output)
+        output = process.communicate(timeout=4)[0]
+        self.assertIn("cleanup_exit=0", self.session_log_text())
+        self.assertNotIn("wine:", self.event_text())
 
+    def test_stop_while_worker_publishes_ownership_cancels_launch(self):
+        gate, release = self.home / "worker-published", self.home / "worker-release"
+        signalled = self.home / "worker-signalled"
+        worker = self.root / "config/session-worker.py"
+        worker.write_text(worker.read_text().replace(
+            "        stopping = True", "        stopping = True\n        Path(os.environ['TEST_SIGNALLED']).touch()"
+        ).replace(
+            "    parent_state = process(int(parent))",
+            "    Path(os.environ['TEST_GATE']).touch()\n"
+            "    while not Path(os.environ['TEST_RELEASE']).exists(): time.sleep(0.02)\n"
+            "    parent_state = process(int(parent))"))
+        process = self.launch(TEST_GATE=str(gate), TEST_RELEASE=str(release),
+                              TEST_SIGNALLED=str(signalled), TEST_BRIDGE_EXISTING="1")
+        self.wait_for(gate.exists, process)
+        stop = self.start_command("stop")
+        try:
+            self.wait_for(signalled.exists)
+        finally:
+            release.touch()
+        output = stop.communicate(timeout=6)[0]
+        self.assertEqual(stop.returncode, 0, output)
+        process.communicate(timeout=4)
+        self.assertNotIn("wine:", self.event_text())
+        self.assertIn("session=stopped", self.run_command("status").stdout)
 
+    def test_bome_readiness_deadline_cleans_up_without_starting_ableton(self):
+        launcher = self.root / "bin/waydaw"
+        launcher.write_text(launcher.read_text().replace(
+            "bome_deadline=$((SECONDS + 45))", "bome_deadline=$((SECONDS + 1))"))
+        gate, release = self.home / "bome-initializing", self.home / "bome-release"
+        try:
+            result = self.run_command("start", "--with-bome", env={
+                "TEST_BOME_INITIALIZING": str(gate), "TEST_BOME_RELEASE": str(release)})
+        finally:
+            release.touch()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Bome readiness timed out", result.stdout)
+        self.assertNotIn("Ableton Live 12 Suite.exe:", self.event_text())
+        self.assertIn("session=stopped", self.run_command("status").stdout)
 
+    def test_delayed_bome_initialization_precedes_dxvk_verification(self):
+        gate = self.home / "bome-initializing"
+        release = self.home / "bome-release"
+        process = self.launch("--with-bome", TEST_BOME_INITIALIZING=str(gate),
+                              TEST_BOME_RELEASE=str(release), TEST_BOME_DRIFT="1")
+        self.wait_for(gate.exists, process)
+        try:
+            time.sleep(2.2)  # Longer than the old fixed startup delay.
+            self.assertNotIn("Ableton Live 12 Suite.exe:", self.event_text())
+        finally:
+            release.touch()
+        output = process.communicate(timeout=6)[0]
+        self.assertNotEqual(process.returncode, 0, output)
+        self.assertIn("DXVK verification failed", output)
+        self.assertNotIn("Ableton Live 12 Suite.exe:", self.event_text())
 
+    def test_stop_during_bome_initialization_blocks_ableton(self):
+        gate = self.home / "bome-initializing"
+        release = self.home / "bome-release"
+        process = self.launch("--with-bome", TEST_BOME_INITIALIZING=str(gate),
+                              TEST_BOME_RELEASE=str(release))
+        self.wait_for(gate.exists, process)
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        process.communicate(timeout=4)
+        release.touch()
+        time.sleep(0.2)
+        self.assertNotIn("Ableton Live 12 Suite.exe:", self.event_text())
 
+    def test_bridge_ignoring_sigterm_is_killed_within_cleanup_deadline(self):
+        self.script(self.fake / "a2jmidid", '''
+printf '%s' "$$" > "$TEST_BRIDGE"
+trap '' TERM INT
+while :; do sleep 0.05; done
+''')
+        process = self.launch(TEST_WINE_HOLD="1")
+        bridge_pid = None
+        try:
+            self.wait_for(lambda: "wine:" in self.event_text(), process)
+            self.wait_for(lambda: Path(self.env["TEST_BRIDGE"]).is_file(), process)
+            bridge_pid = int(Path(self.env["TEST_BRIDGE"]).read_text())
+            self.stop.touch()  # Ableton closes normally; cleanup must finish.
+            output = process.communicate(timeout=6)[0]
+            self.assertEqual(process.returncode, 0, output)
+            self.assertIn("bridge_stop=forced", self.session_log_text())
+            self.assertFalse((Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw/session.state").exists())
+        finally:
+            self.stop.touch()
+            if bridge_pid is not None:
+                try:
+                    os.kill(bridge_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
+    def test_preexisting_midi_bridge_survives_session_cleanup(self):
+        bridge = subprocess.Popen([str(self.fake / "a2jmidid")], env=self.env)
+        try:
+            self.wait_for(lambda: Path(self.env["TEST_BRIDGE"]).is_file())
+            result = self.run_command("start", env={"TEST_BRIDGE_EXISTING": "1"})
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIsNone(bridge.poll())
+        finally:
+            bridge.terminate()
+            bridge.wait(timeout=3)
 
+    def test_stop_reports_supervisor_cleanup_failure(self):
+        process = self.launch(TEST_WINE_HOLD="1", TEST_CLEANUP_FAIL="1")
+        self.wait_for(lambda: "wine:" in self.event_text(), process)
+        result = self.run_command("stop")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Session cleanup failed", result.stdout)
+        output = process.communicate(timeout=8)[0]
+        session_log = next(line for line in output.splitlines() if line.startswith("session_log="))
+        self.assertIn(session_log, result.stdout)
 
+    def test_stop_accepts_legacy_session_record_without_log_path(self):
+        process = self.launch(TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "wine:" in self.event_text(), process)
+        state = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw/session.state"
+        state.write_text("\n".join(state.read_text().splitlines()[:4]) + "\n")
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        process.communicate(timeout=8)
+        self.assertIn("session=stopped", self.run_command("status").stdout)
 
+    def test_stale_state_does_not_signal_unrelated_process(self):
+        directory = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        directory.mkdir(parents=True)
+        # Our own PID but a mismatched birth time: never signal it.
+        (directory / "session.state").write_text(f"{os.getpid()}\n0\n{self.prefix}\n{self.root}\n")
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("wineserver:" + str(self.prefix) + ":-k", self.event_text())
+        self.assertNotIn("wineserver:" + str(self.working) + ":", self.event_text())
 
+    def test_stale_bridge_identity_does_not_signal_reused_pid(self):
+        directory = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        directory.mkdir(parents=True)
+        (directory / "session.state").write_text(f"0\n0\n{self.prefix}\n{self.root}\n")
+        (directory / "bridge.state").write_text(f"{os.getpid()}\n0\n")
+        result = self.run_command("stop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertFalse((directory / "bridge.state").exists())
+        self.assertFalse((directory / "session.state").exists())
 
+    def test_reused_group_owner_is_not_signalled_and_preserves_recovery(self):
+        unrelated = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            directory = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+            directory.mkdir(parents=True)
+            (directory / "session.state").write_text(f"0\n0\n{self.prefix}\n{self.root}\n")
+            receipt = directory / "ableton.state"
+            receipt.write_text(f"{unrelated.pid}\n0\nprocess-group-v1\n")
+            result = self.run_command("stop")
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("owner lost while descendants remain", result.stdout)
+            self.assertIsNone(unrelated.poll())
+            self.assertTrue(receipt.exists())
+            self.assertIn("session=recovery-required", self.run_command("status").stdout)
+        finally:
+            unrelated.terminate()
+            unrelated.wait(timeout=3)
 
+    def test_invalid_bridge_record_preserves_recovery_marker(self):
+        directory = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw"
+        directory.mkdir(parents=True)
+        (directory / "session.state").write_text(f"0\n0\n{self.prefix}\n{self.root}\n")
+        (directory / "bridge.state").write_text("")
+        result = self.run_command("stop")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("invalid bridge ownership record", result.stdout)
+        self.assertTrue((directory / "session.state").exists())
+        self.assertTrue((directory / "bridge.state").exists())
 
+    def test_stop_refuses_a_different_active_prefix(self):
+        process = self.launch(TEST_WINE_HOLD="1")
+        self.wait_for(lambda: "wine:" in self.event_text(), process)
+        result = self.run_command("stop", env={"WAYDAW_ABLETON_RUNNER_PREFIX": str(self.home / "other-copy")})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("session belongs", result.stdout)
+        self.assertIsNone(process.poll())
 
+    def test_check_rejects_wine_builtin_even_with_matching_hash(self):
+        builtin = b"MZ" + bytes(62) + b"Wine builtin DLL\0"
+        for prefix in (self.prefix, self.working):
+            (prefix / "drive_c/windows/system32/d3d11.dll").write_bytes(builtin)
+        manifest = self.root / "config/validated-runtime.sh"
+        with manifest.open("a") as output:
+            output.write(f"\nWAYDAW_D3D11_SHA256={hashlib.sha256(builtin).hexdigest()}\n")
+        before = self.snapshot()
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Wine builtin marker", result.stdout)
+        self.assertEqual(before, self.snapshot())
+        self.assertNotIn("wine:", self.event_text())
 
+    def test_missing_d3d10core_blocks_launch_before_wine(self):
+        for prefix in (self.prefix, self.working):
+            (prefix / "drive_c/windows/system32/d3d10core.dll").unlink()
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Required DXVK d3d10core.dll missing", result.stdout)
+        self.assertNotIn("wine:", self.event_text())
 
     def test_cleanup_accepts_an_already_stopped_wineserver(self):
         server = self.root / ".local-runners/kron4ek-proton-exp-11.0/bin/wineserver"
@@ -417,6 +1487,14 @@ exit 99
 
 
 
+    def test_compatibility_entry_points_use_the_supervisor(self):
+        for executable, marker in (("session", "with_bome=1"), ("ableton-wayland", "with_bome=0")):
+            result = self.run_command("--dry-run", executable=executable)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn(marker, result.stdout)
+        result = self.run_command("--dry-run", executable="kill-session")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("would_stop_prefix=" + str(self.prefix), result.stdout)
 
 
 if __name__ == "__main__":

@@ -19,5 +19,4 @@ if [[ -z "${DISPLAY:-}" ]]; then
   exit 1
 fi
 
-export WAYDAW_ABLETON_WINDOW_DRIVER=x11
-exec "$ROOT_DIR/bin/ableton-proton" "$@"
+exec "$ROOT_DIR/bin/waydaw" start "$@"
