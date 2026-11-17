@@ -281,7 +281,9 @@ node tests/test_kwin_controller.cjs
 Tests use disposable homes, copied scripts, fake Wine/KWin/PipeWire services,
 and fixture DLLs. They never touch real prefixes or the desktop. The Node.js
 check covers KWin windows with and without optional decoration signals,
-decoration protection, window scoping, and removal of closed-window state.
+decoration protection, window scoping, and removal of closed-window state. CI verifies
+shell syntax, ShellCheck for session scripts, desktop entries, launcher behavior,
+and reproducible MinGW builds of the sizing shim and Bome readiness helper.
 
 Read [the production-readiness plan](docs/production-readiness.md) for the
 implementation milestones, first-machine setup, release gates, and rollback.
