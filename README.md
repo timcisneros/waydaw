@@ -1,682 +1,287 @@
 # waydaw
 
-Minimal Linux Wayland Wine DAW harness for Ableton Live 12, Max for Live, Bome MIDI Translator Pro, and Windows VST2/VST3 plugins.
+Linux Wayland/Wine session harness for Ableton Live 12, Max for Live,
+Bome MIDI Translator Pro, and Windows VST2/VST3 plugins.
 
 [Portfolio case study](https://timcis.com/projects/waydaw)
 
-![Explicit environment checks reporting pass and warning states](docs/images/environment-check.png)
+WayDAW provides a guarded Proton/XWayland launch path for KDE Plasma Wayland,
+explicit dependency checks, session logs, and recovery scoped to one copied
+Wine prefix. The sizing shim preserves Ableton's menu row; a runtime KWin
+controller protects the KDE frame and translates maximize into safe-fit.
 
-## What this demonstrates
+The launcher infrastructure has automated regression tests. A production
+release still requires the recording, authorization, MIDI, and recovery
+acceptance checks in [the readiness plan](docs/production-readiness.md).
 
-- Explicit launchers and recovery operations for a shared Wine prefix.
-- 59 focused, non-mutating diagnostic commands covering audio, MIDI, Wine,
-  windowing, plugins, and application state.
-- Evidence-led compatibility investigation documented alongside the scripts.
-- Guardrails around known updater, authorization, routing, and presentation
-  failures instead of opaque one-off shell fixes.
+## Start here
 
-Start with the environment report:
-
-```sh
-./bin/check
-```
-
-The command reports prerequisites and known risks without installing packages
-or mutating the shared prefix. Use `./bin/session` only after the checks match
-the supported environment described below.
-
-This is an operational wrapper around one shared Wine prefix:
+Run commands from the repository root:
 
 ```sh
-~/WinePrefixes/ableton12
+./bin/waydaw check
+./bin/waydaw start
 ```
 
-It is intentionally Bash-first, small, explicit, and easy to reset. It does not install Wine, Ableton, Bome, plugins, drivers, or system packages.
-
-## Why One Prefix Matters
-
-Ableton Live, Max for Live, Bome, plugin scanners, VST2/VST3 paths, registry state, licenses, and shared runtime DLLs need to see the same Windows environment. A single `WINEPREFIX` keeps that state in one place and avoids mismatches between DAW, MIDI tooling, and plugins.
-
-The harness always uses:
-
-```sh
-WINEPREFIX="$HOME/WinePrefixes/ableton12"
-```
-
-## Why XWayland
-
-The target desktop is KDE Plasma Wayland, but this MVP preserves XWayland compatibility by forcing common GUI toolkits toward X11:
-
-```sh
-GDK_BACKEND=x11
-QT_QPA_PLATFORM=xcb
-SDL_VIDEODRIVER=x11
-```
-
-That keeps Wine-adjacent windows, plugin editors, MIDI utilities, and older GUI assumptions on the most tested path for now.
-
-## Why Gamescope Is Not In The Stable Harness
-
-Gamescope is intentionally excluded from the stable launcher because this harness is not a compositor integration layer. The stable baseline remains one prefix, direct Wine launchers, explicit logs, and simple recovery commands.
-
-Current windowing investigation may use Gamescope only as a manually launched one-off containment test. Do not add Gamescope integration until it is proven better than Wine virtual desktop and does not harm audio/MIDI.
-
-Later experiments may include:
-
-- gamescope one-off containment
-- cage or labwc nested compositor containment
-- native Wine Wayland driver only after containment options are exhausted
-
-## Why Auto-Updates Are Disabled Under Wine
-
-Ableton Live's in-app updater and swapper can leave unstable launch state under Wine. This harness treats update disabling as part of the supported operational model so the DAW starts from the installed application path instead of an updater handoff path.
-
-The maintenance command never deletes updater state. It renames known updater paths to timestamped `.disabled.TIMESTAMP` backups:
-
-```sh
-./waydaw/bin/disable-ableton-updates
-```
-
-## Sharing Violation Behavior
-
-The known failure mode is:
-
-```text
-Swapper: rename_1 stage failed: Sharing violation.
-```
-
-When that happens, Live may repeatedly enter updater loops, corrupt launch state, or exit unexpectedly. The launchers warn if these updater paths reappear:
-
-```text
-_autoupdates
-_autoupdates/deltas
-```
-
-Ableton may recreate `_autoupdates` during normal startup. That path alone is treated as a warning. `_autoupdates/deltas` is a stronger warning because an update payload may be present. The swap marker remains a hard blocker:
-
-```text
-.Live 12 Suite_updated
-```
-
-If `.Live 12 Suite_updated` exists, `./waydaw/bin/session` exits before launching Bome or Ableton. Run:
-
-```sh
-./waydaw/bin/disable-ableton-updates
-```
-
-## Why Manual Updates Are Preferred
-
-Manual updates are preferred because they keep installation and DAW launch as separate operations. Use the Ableton account installer manually, avoid the in-app updater, then disable updater state again before normal sessions.
-
-Manual update workflow:
-
-```sh
-# 1. Backup ~/WinePrefixes/ableton12
-# 2. Install the new Live build manually from your Ableton account
-# 3. Avoid the in-app updater
-./waydaw/bin/disable-ableton-updates
-./waydaw/bin/check
-pw-jack ./waydaw/bin/session
-```
-
-## Stable Operational Workflow
-
-Recommended normal workflow:
-
-```sh
-./waydaw/bin/check
-./waydaw/bin/disable-ableton-updates
-./waydaw/bin/midi-check
-./waydaw/bin/audio-check
-pw-jack ./waydaw/bin/session
-```
-
-## Windowing Root Cause
-
-Ableton's DXVK window is stable in a native Plasma X11 session but can enter a
-`VK_SUBOPTIMAL_KHR` swapchain-recreation loop when presented through XWayland.
-This repository has reproduced that loop on current Plasma 6 as well as older
-KWin releases, so a Plasma upgrade alone is not treated as a fix.
-
-The supported Plasma Wayland-session launcher uses the guarded Proton runner
-through XWayland. This is intentional: the sizing shim preserves Ableton's
-File/Edit menu row, and the runtime KWin controller supplies and pins the
-native KDE frame:
-
-```sh
-./bin/ableton-wayland
-```
-
-Use `WAYDAW_ABLETON_DRY_RUN=1 ./bin/ableton-wayland` to inspect the effective
-command without launching. This path uses the copied Proton test prefix and
-does not touch the working prefix.
-
-Wine's native Wayland driver remains diagnostic-only because Wine 11 does not
-yet negotiate `xdg-decoration`; KDE therefore cannot provide its server-side
-titlebar and Wine draws its own frame. It is available explicitly as:
-
-```sh
-./bin/ableton-native-wayland
-```
-
-The X11/XWayland comparison and measured swapchain signature are recorded in
-`docs/ableton-x11-ab-test.md`.
-
-## Windowing Diagnostics
-
-Windowing investigation is limited to KDE Plasma Wayland/XWayland behavior. It must not change the stable WineASIO, VirMIDI, ALSA, Bome, or session launch workflow.
-
-Capture the current desktop, KWin, Wine process, Wine graphics registry, and DXVK/VKD3D prefix state:
-
-```sh
-./waydaw/bin/windowing-check
-```
-
-Do not use live `xprop`, `./waydaw/bin/window-identify`, or KDE Detect Window
-Properties against an unstable Ableton window; identification can add more
-X11/XWayland property traffic while the presentation loop is active.
-
-## Ableton Windowing Diagnosis Without Screenshots
-
-Use these diagnostics when Ableton launches but the KDE titlebar, menu bar, window bounds, or flicker behavior needs to be diagnosed from logs only.
-
-Start from a clean Ableton/Wine session:
-
-```bash
-./bin/kill-session
-./bin/ableton
-```
-
-In another terminal, collect the log-only windowing data:
-
-```bash
-./bin/log-ableton-window-geometry
-./bin/watch-ableton-window-geometry
-./bin/diagnose-ableton-windowing
-```
-
-These commands do not take screenshots and do not use Wine virtual desktop. Do not make new windowing fixes until the diagnostic output identifies the failing layer with:
-
-```text
-derived_issue=...
-rule_fired=...
-evidence=...
-```
-
-## Linux MIDI Routing Model
-
-Under Linux, MIDI routing is owned by the host audio/MIDI system, not by Windows kernel drivers inside Wine. The practical model for this harness is:
-
-- ALSA sequencer MIDI exposes hardware and virtual MIDI clients.
-- JACK MIDI exposes graph-routed MIDI ports.
-- PipeWire can host and bridge audio/MIDI graphs, including JACK-compatible clients when PipeWire JACK support is present.
-- Wine applications see only the devices and drivers that Wine, WineASIO, ALSA, JACK, and PipeWire expose to them.
-
-Use the diagnostics before a real session:
-
-```sh
-./waydaw/bin/midi-check
-./waydaw/bin/audio-check
-```
-
-## Why Bome Virtual MIDI Drivers Are Not Used Under Wine
-
-Bome's BMIDI virtual MIDI ports are Windows kernel drivers. Those drivers do not function as native Linux kernel MIDI drivers when Bome runs under Wine. The supported operational path is to run Bome for translation logic and use native Linux MIDI routing for virtual ports and device connections.
-
-Use ALSA/JACK/PipeWire MIDI ports instead of relying on BMIDI under Wine.
-
-## MIDI/Bome Verification
-
-Bome MIDI Translator Pro can run in the shared Wine session, but BMIDI virtual ports should not be assumed under Wine. BMIDI is a Windows driver path, not the Linux-native foundation for routing.
-
-Verify Bome and Ableton participation through the host graph instead:
-
-```sh
-pw-jack ./waydaw/bin/session
-./waydaw/bin/bome-midi-check
-./waydaw/bin/session-status
-```
-
-`bome-midi-check` inspects ALSA MIDI with `aconnect -l`, PipeWire links with `pw-link -l`, and JACK-visible ports with `pw-jack jack_lsp`. It does not create MIDI connections.
-
-`session-status` summarizes the Wine DAW processes, WineASIO readiness, and current MIDI graph visibility. It does not mutate routing.
-
-## Temporary VirMIDI Experiment
-
-The first Linux-native virtual MIDI experiment uses ALSA `snd-virmidi`. This is temporary until reboot or module unload and does not add permanent modprobe configuration.
-
-Inspect current state without mutation:
-
-```sh
-./waydaw/bin/virmidi-check
-```
-
-Load temporary virtual MIDI ports:
-
-```sh
-./waydaw/bin/load-virmidi-temp
-```
-
-Unload the temporary module:
-
-```sh
-./waydaw/bin/unload-virmidi
-```
-
-This experiment does not create MIDI connections automatically. Use the check output to verify whether Wine, Bome, Ableton, PipeWire, and JACK can see the new ALSA virtual MIDI ports before adding any routing.
-
-## Recommended Topology
-
-The supported MIDI routing foundation is Linux-native virtual MIDI, not BMIDI. Bome can handle translation logic inside Wine, while ALSA/PipeWire/JACK-visible ports provide the transport path that Ableton can see reliably.
-
-Manual working topology:
-
-```text
-Launchpad S -> Wine/Ableton direct
-Bome OUT -> VirMIDI 1-0 -> Ableton
-```
-
-BMIDI is intentionally not used because it is a Windows virtual MIDI driver path and is not a dependable Linux/Wine routing foundation. VirMIDI ports are temporary until reboot or `snd-virmidi` module unload.
-
-`aconnect` routes are also temporary. ALSA client IDs and port numbers may change after device reconnect, Wine restart, module reload, or reboot. Inspect before routing.
-
-`launchpad-route-temp` must be run after Ableton is running. `WINE ALSA Input` only exists while Wine/Ableton exposes its MIDI client. Start the DAW session first:
-
-```sh
-./waydaw/bin/disable-ableton-updates
-pw-jack ./waydaw/bin/session
-```
-
-Then run the route helper from a second shell.
-
-Inspect current route state:
-
-```sh
-./waydaw/bin/midi-route-inspect
-```
-
-Print example routes without executing them:
-
-```sh
-./waydaw/bin/midi-route-example
-```
-
-Dry-run the current Launchpad/VirMIDI route helper:
-
-```sh
-./waydaw/bin/launchpad-route-temp
-```
-
-Preferred second-shell route command after Ableton is running:
-
-```sh
-./waydaw/bin/apply-live-routes
-./waydaw/bin/midi-route-inspect
-```
-
-Clear only those temporary live routes:
-
-```sh
-./waydaw/bin/clear-live-routes
-```
-
-Lower-level Launchpad helper:
-
-```sh
-./waydaw/bin/launchpad-route-temp --apply
-```
-
-Remove only those temporary routes:
-
-```sh
-./waydaw/bin/launchpad-unroute-temp
-```
-
-Future optional persistence can be added later with explicit approval.
-
-## ALSA MIDI vs JACK MIDI vs PipeWire MIDI
-
-ALSA MIDI is the base Linux sequencer layer. `aconnect -l` shows ALSA clients and ports, which is the first visibility check for physical MIDI devices and many virtual ports.
-
-JACK MIDI is graph-oriented and is commonly used by low-latency audio applications. `jack_lsp` shows JACK ports when JACK or PipeWire JACK compatibility is active.
-
-PipeWire can manage the modern session graph and expose JACK-compatible behavior. `pw-link -l` and `pw-cli` help inspect PipeWire links and nodes.
-
-## a2jmidid Role
-
-`a2jmidid -e` bridges ALSA sequencer MIDI ports into the JACK MIDI graph. This is useful when a device appears in `aconnect -l` but the DAW or WineASIO/JACK path expects JACK MIDI ports.
-
-The session script starts the bridge when `a2jmidid` is available and no existing bridge process is detected. Missing `a2jmidid` is not fatal.
-
-Manual bridge command:
-
-```sh
-./waydaw/bin/start-midi-bridge
-```
-
-## WineASIO Expectations
-
-WineASIO is the expected low-latency ASIO path for Ableton under Wine when JACK or PipeWire JACK compatibility is running. This harness checks for WineASIO hints but does not install or register it.
-
-Expected shape:
-
-- PipeWire running as the user audio server.
-- PipeWire JACK compatibility available, usually through `pw-jack`.
-- WineASIO installed and registered in the shared `~/WinePrefixes/ableton12` prefix.
-- Ableton configured to use WineASIO in audio preferences.
-
-## WineASIO Readiness Workflow
-
-Use these read-only checks before installing or registering anything:
-
-```sh
-./waydaw/bin/pipewire-check
-./waydaw/bin/wineasio-check
-```
-
-`pipewire-check` verifies PipeWire, WirePlumber, and PipeWire JACK shim availability, then prints current PipeWire nodes when `pw-cli` is available.
-
-`wineasio-check` verifies `pw-jack`, PipeWire JACK libraries, WineASIO registration helpers, `wineasio.dll`, `regsvr32`, `jack_lsp`, `qpwgraph`, and the shared prefix registry override state.
-
-These checks do not install packages, register WineASIO, mutate PipeWire configuration, or modify the Wine prefix.
-
-## MIDI And Audio Troubleshooting
-
-If Ableton sees no MIDI:
-
-- Run `./waydaw/bin/midi-check`.
-- Confirm devices appear in `aconnect -l`.
-- Start `./waydaw/bin/start-midi-bridge` if JACK MIDI ports are needed.
-- Open Ableton preferences and enable the expected MIDI input ports.
-
-If Bome launches but ports are missing:
-
-- Do not rely on BMIDI virtual drivers under Wine.
-- Create/use native Linux virtual MIDI ports externally.
-- Verify Linux-visible ports with `aconnect -l`, `jack_lsp`, and `pw-link -l`.
-
-If latency is unstable:
-
-- Run `./waydaw/bin/audio-check`.
-- Prefer PipeWire plus PipeWire JACK compatibility plus WineASIO.
-- Keep sample rate and buffer size consistent between PipeWire/JACK and Ableton.
-- Avoid changing audio server topology during a running DAW session.
-
-## Layout
-
-```text
-waydaw/
-  README.md
-  config/env
-  bin/session
-  bin/check
-  bin/debug-env
-  bin/midi-check
-  bin/bome-midi-check
-  bin/virmidi-check
-  bin/load-virmidi-temp
-  bin/unload-virmidi
-  bin/midi-route-inspect
-  bin/midi-route-example
-  bin/apply-live-routes
-  bin/clear-live-routes
-  bin/launchpad-route-temp
-  bin/launchpad-unroute-temp
-  bin/session-status
-  bin/audio-check
-  bin/pipewire-check
-  bin/wineasio-check
-  bin/windowing-check
-  bin/window-identify
-  bin/start-midi-bridge
-  bin/disable-ableton-updates
-  bin/ableton
-  bin/ableton-wayland
-  bin/ableton-native-wayland
-  bin/ableton-proton
-  bin/bome
-  bin/kill-session
-  bin/reset-ableton-prefs
-  logs/midi-check.log
-  logs/bome-midi-check.log
-  logs/virmidi-check.log
-  logs/virmidi.log
-  logs/midi-route.log
-  logs/live-routes.log
-  logs/launchpad-route.log
-  logs/session-status.log
-  logs/midi-bridge.log
-  logs/audio-check.log
-  logs/pipewire-check.log
-  logs/wineasio-check.log
-  logs/windowing-check.log
-  logs/window-identify.log
-  logs/maintenance.log
-  logs/.gitkeep
-```
-
-## Commands
-
-Recommended normal workflow:
-
-```sh
-./waydaw/bin/check
-./waydaw/bin/disable-ableton-updates
-pw-jack ./waydaw/bin/session
-```
-
-Run diagnostics:
-
-```sh
-./waydaw/bin/check
-```
-
-Inspect the effective launch environment:
-
-```sh
-./waydaw/bin/debug-env
-```
-
-Inspect MIDI routing:
-
-```sh
-./waydaw/bin/midi-check
-```
-
-Inspect Bome/Ableton MIDI graph visibility:
-
-```sh
-./waydaw/bin/bome-midi-check
-./waydaw/bin/session-status
-```
-
-Inspect temporary VirMIDI experiment state:
-
-```sh
-./waydaw/bin/virmidi-check
-./waydaw/bin/load-virmidi-temp
-./waydaw/bin/unload-virmidi
-```
-
-Inspect manual MIDI route state and examples:
-
-```sh
-./waydaw/bin/midi-route-inspect
-./waydaw/bin/midi-route-example
-./waydaw/bin/apply-live-routes
-./waydaw/bin/clear-live-routes
-./waydaw/bin/launchpad-route-temp
-./waydaw/bin/launchpad-route-temp --apply
-./waydaw/bin/launchpad-unroute-temp
-```
-
-Inspect audio routing assumptions:
-
-```sh
-./waydaw/bin/audio-check
-```
-
-Inspect PipeWire readiness:
-
-```sh
-./waydaw/bin/pipewire-check
-```
-
-Inspect WineASIO readiness:
-
-```sh
-./waydaw/bin/wineasio-check
-```
-
-Inspect KDE Plasma/Wine windowing state:
-
-```sh
-./waydaw/bin/windowing-check
-```
-
-Capture observe-only top-band flicker analytics:
-
-```sh
-./waydaw/bin/window-flicker-capture --idle --duration 10
-./waydaw/bin/window-flicker-capture --duration 30 --label ableton-flicker
-```
-
-Do not identify live Ableton windows with `xprop` or `./waydaw/bin/window-identify` while native-window tests are paused.
-
-Start the optional ALSA-to-JACK MIDI bridge:
-
-```sh
-./waydaw/bin/start-midi-bridge
-```
-
-Launch Ableton Live 12 with system Wine (unguarded baseline):
-
-```sh
-./waydaw/bin/ableton
-```
-
-On a Plasma Wayland desktop, use the guarded KDE-frame/menu path:
-
-```sh
-./waydaw/bin/ableton-wayland
-```
-
-Launch Bome MIDI Translator Pro:
-
-```sh
-./waydaw/bin/bome
-```
-
-Terminate the Wine DAW session:
-
-```sh
-./waydaw/bin/kill-session
-```
-
-Backup and reset Ableton roaming preferences:
-
-```sh
-./waydaw/bin/reset-ableton-prefs
-```
-
-Disable Ableton updater state without deleting anything:
-
-```sh
-./waydaw/bin/disable-ableton-updates
-```
-
-## Logs
-
-Ableton output is written to:
-
-```sh
-waydaw/logs/ableton.log
-```
-
-Bome output is written to:
-
-```sh
-waydaw/logs/bome.log
-```
-
-Maintenance actions are written to:
-
-```sh
-waydaw/logs/maintenance.log
-```
-
-MIDI and audio diagnostics are written to:
-
-```sh
-waydaw/logs/midi-check.log
-waydaw/logs/bome-midi-check.log
-waydaw/logs/virmidi-check.log
-waydaw/logs/virmidi.log
-waydaw/logs/midi-route.log
-waydaw/logs/live-routes.log
-waydaw/logs/launchpad-route.log
-waydaw/logs/session-status.log
-waydaw/logs/midi-bridge.log
-waydaw/logs/audio-check.log
-waydaw/logs/pipewire-check.log
-waydaw/logs/wineasio-check.log
-waydaw/logs/windowing-check.log
-waydaw/logs/window-identify.log
-waydaw/logs/window-flicker-captures/
-```
-
-## Recovery
-
-For a stuck Wine DAW session:
-
-```sh
-./waydaw/bin/kill-session
-```
-
-For bad Ableton user preferences, backup and reset them:
-
-```sh
-./waydaw/bin/reset-ableton-prefs
-```
-
-The reset command never deletes preferences. It moves the existing roaming Ableton directory to a timestamped backup and creates a fresh empty directory in its place.
-
-## Copied-prefix runtime safety
-
-The Proton path records its runner and native DXVK baseline in
-`config/validated-runtime.sh`. Runner selection and inspection are read-only;
-real launch prepares only the copied prefix and rejects working-prefix overlaps
-or escaping directory symlinks. Preparation verifies all three native DXVK DLLs
-and atomically normalizes preferences while preserving the first backup.
-A required KWin controller failure blocks launch. Recovery uses only the matching
-prefix-scoped wineserver and verifies shutdown before unloading the controller.
-
-Run `./bin/verify-proton-runner-mode` for isolated Python regressions and
-`node tests/test_kwin_controller.cjs` for KWin compatibility checks. These checks
-use fixture services and do not launch installed applications.
-
-## Supported guarded sessions
-
-Use the supervisor for ordinary terminal and full-session launches:
+The launcher applies `pw-jack` itself. For a full session with Bome:
 
 ```sh
 ./bin/waydaw check --with-bome
 ./bin/waydaw start --with-bome
+```
+
+Bome and Ableton use the same copied prefix and Proton runner. The supervisor
+starts an optional ALSA-to-JACK bridge if none exists. Each launcher has a
+recorded process-group owner. Cleanup cancels and terminates these groups
+before shutting down the copied-prefix wineserver and unloading the runtime
+KWin controller. It checks owner identity before signalling a group, allows
+two seconds for SIGTERM, then uses SIGKILL with a two-second exit deadline.
+An existing bridge is preserved. Close Ableton normally after saving both
+applications.
+
+After startup, a Bome failure marks `status` as `session=degraded`, with
+`bome=failed` and its exit code. The supervisor logs the failure and sends one
+critical desktop notification when `notify-send` is available. Ableton stays
+open so you can save before closing and restarting the full session. If Ableton
+later exits successfully, the session returns Bome's failure code; an Ableton
+error keeps its own exit code. A normal Bome quit reports `bome=stopped` without
+an error alert and lets Ableton continue.
+Status is read-only. If the supervisor cannot publish its Bome health record,
+status falls back to this session's worker result and verifies the worker's
+PID, birth time, and process group. Missing or invalid ownership for a
+participating Bome worker reports degraded health instead of assuming success,
+including when the session log directory is unreadable.
+
+Inspect the command without launching or changing files:
+
+```sh
+./bin/waydaw start --dry-run
 ./bin/waydaw status
 ./bin/waydaw stop --dry-run
 ```
 
-Omit `--with-bome` for Ableton alone. The supervisor applies `pw-jack`, waits
-for Bome GUI initialization before Ableton, and monitors Bome without closing
-Ableton when MIDI translation fails. Status queries are read-only and validate
-worker ownership when health records cannot be published. A normal Bome quit
-reports stopped without an error alert; exit results publish before release
-readiness so completion and cleanup agree.
+`check` queries the host services and reads files; it does not launch Wine,
+repair DLLs, edit preferences, install the shim, or load a KWin script.
+`start --dry-run` only describes the selected command; use `check` for a full
+host preflight. `--print-launch-config` is also read-only.
 
-Save work and close Ableton normally. `./bin/waydaw stop` is emergency recovery
-and can lose unsaved work. Session locking, verified process-group owners, and
-persistent recovery records prevent duplicate launches and late wrapper execs.
-Legacy session, stop, preflight, and Wayland commands route to this supervisor;
-explicit `check-system` and `kill-system-session` retain system-Wine diagnostics.
-Build the Bome readiness helper with `./compat/waydaw-launch/build.sh` before
-starting a full session. Real MIDI routing and recording require host acceptance.
+## Desktop launcher
+
+```sh
+./bin/install-waydaw-desktop --print
+./bin/install-waydaw-desktop
+```
+
+Select **WayDAW** in KDE's application menu. Its default action starts Ableton;
+additional actions start with Bome, check the environment, or stop the session.
+Menu launches open Ableton without a terminal window. The `bin/waydaw-desktop`
+frontend calls the same `bin/waydaw` supervisor as the terminal workflow,
+records startup output under `~/.local/state/waydaw/desktop/`, and shows a
+dialog if startup or the session fails, including cleanup errors from that
+session's own log. The environment-check action displays
+its results in a dialog. Detailed session logs remain under
+`~/.local/state/waydaw/logs/`.
+
+If the Wine-generated **Ableton Live 12 Suite** shortcut exists, the installer
+also routes it through WayDAW while preserving its menu identity and icon.
+It saves the first original shortcut and installation record in
+`~/.local/state/waydaw/desktop-install.json`. Run the installer again after
+moving the checkout or if Wine regenerates its shortcut.
+`./bin/install-waydaw-desktop --uninstall` removes the WayDAW entry and restores
+the original Ableton shortcut. Independently edited entries are preserved;
+the saved original remains available across uninstall/reinstall cycles.
+
+## Runtime and prefixes
+
+The supported runtime is recorded in `config/validated-runtime.sh`:
+
+- Kron4ek Proton Experimental 11.0 standalone runner, pinned archive checksum.
+- Upstream DXVK 2.7.1, with its archive and native D3D10/11 DLL hashes pinned.
+- Repository sizing shim, built from `compat/ableton-sizing-shim`.
+- KDE Plasma Wayland with XWayland, PipeWire JACK compatibility, and WineASIO
+  registered in the copied prefix. Audio settings require host validation.
+
+The runtime runner lives at:
+
+```text
+.local-runners/kron4ek-proton-exp-11.0/bin/
+```
+
+The supported session uses:
+
+```text
+~/WinePrefixes/ableton12-winebase-protonexp-test
+```
+
+An existing validated copy may be selected with
+`WAYDAW_ABLETON_RUNNER_PREFIX=/absolute/path/to/copy`. Use the same selection
+for Start, Check, and Stop. Launch and recovery resolve symlink aliases and
+refuse paths overlapping the legacy working prefix:
+
+```text
+~/WinePrefixes/ableton12
+```
+
+The working prefix is a read-only fallback source for restoring the exact
+pinned `d3d11.dll`, `dxgi.dll`, and `d3d10core.dll` in the copied prefix.
+Wine builtin markers are rejected even when a recorded hash matches; those
+files can fall back to Wine's renderer under Proton. If neither location has
+the verified native DLLs, startup fails. The guarded process forces native
+loading for all three DLLs without modifying the registry. Prefix preparation runs at real launch under the
+session lock. It seeds missing copied `steamuser` preferences from the current
+Linux user's copied profile and normalizes saved placement with a backup.
+Normalization replaces the preferences atomically, preserves the first backup,
+and rejects backup symlinks before changing the preferences.
+Bome startup uses the built `wait-bome.exe` helper to acknowledge Windows GUI
+initialization with `WaitForInputIdle`; an elapsed delay alone is insufficient.
+Preflight and launch share executable discovery and reject Bome executables
+outside the copied prefix. In guarded Proton sessions Bome uses the same
+XWayland display path as Ableton.
+Discovery accepts `MIDITranslator.exe` and `Bome MIDI Translator Pro.exe`;
+setup programs and executable backups do not qualify. Standard installation
+locations take priority; multiple fallback application matches are rejected.
+The host allows 45 seconds for the complete startup, including Wine bootstrap;
+the helper allows 30 seconds for GUI initialization. This acknowledgement does
+not validate a loaded Bome project or MIDI routing. Ableton verifies the pinned
+DXVK DLL hashes after this acknowledgement, immediately before launch.
+If Bome's Wine startup changes the DLLs, the
+session aborts and cleans up; it does not repair DLLs while Bome is running.
+The harness does not install or authorize Ableton, Bome, plugins, WineASIO,
+or system packages. See the readiness plan for reproducible host setup.
+
+For settings specific to this machine, the guarded launcher reads optional
+PipeWire property data from `~/.config/waydaw/pipewire.properties`. It also uses
+`~/.config/waydaw/pipewire/` as `PIPEWIRE_CONFIG_DIR` when that directory contains
+`jack.conf`. Explicit environment values take precedence. These files affect
+WayDAW's child processes; they do not change the desktop audio service.
+Preflight and session logs report the selected values. A full JACK configuration
+can control data-thread scheduling, which `rt.prio` in JACK properties alone
+does not disable.
+
+## Session controls and compatibility commands
+
+```sh
+./bin/waydaw status
+./bin/waydaw stop
+```
+
+`stop` is emergency recovery: it terminates the copied-prefix Wine session,
+so unsaved work may be lost. Prefer saving and closing Ableton normally.
+Stop validates the supervisor PID and birth time before signalling it.
+Without a supervisor, it waits up to five seconds for pending worker setup to
+release the same lock before recovering the copied prefix through its matching
+wineserver. A lock timeout preserves the recovery record. It terminates recorded launcher groups
+first, preventing a delayed wrapper from starting Wine after a successful Stop.
+It never kills by a process-name regex. Stop waits up to 45 seconds for cleanup.
+
+If a supervisor crashes or cleanup fails, `status` reports
+`session=recovery-required`. A new Start refuses to prepare or launch that
+session until `stop` succeeds. Use the checkout and prefix recorded by Status
+to recover it. Stop also recovers recorded launcher groups and a bridge owned
+by the failed session. Do not delete ownership or session records to bypass
+recovery. If an owner disappears while its descendants remain, recovery fails
+and preserves the record for inspection rather than signalling an unknown group.
+
+Only one supervised WayDAW session runs per user. A second Start fails before
+changing the prefix. Long-lived children do not retain the session lock; worker
+setup retains it until ownership is recorded and cancellation is checked. Cleanup errors
+return a failure status and are recorded in the session log.
+
+Existing commands route to the supervisor:
+
+| Command | Behavior |
+| --- | --- |
+| `./bin/ableton-wayland` | Guarded Start |
+| `./bin/session` | Guarded Start with Bome |
+| `./bin/check` | Guarded preflight |
+| `./bin/kill-session` | Guarded emergency Stop |
+| `./bin/verify-proton-runner-mode` | Isolated regression suite |
+
+`bin/ableton` remains an explicit system-Wine diagnostic path by default.
+`bin/ableton-proton` remains a lower-level Proton diagnostic launcher; it does
+not provide the supervisor's session lifecycle. Use neither for normal sessions.
+`bin/check-system` and `bin/kill-system-session` explicitly target the older
+system-Wine setup. `bin/ableton-native-wayland` is experimental. Do not run
+these diagnostic launchers concurrently with a supervised session.
+
+## Audio and MIDI
+
+The production audio path is PipeWire JACK compatibility plus WineASIO. Use a
+consistent sample rate and buffer size in PipeWire and Ableton. Preflight checks
+PipeWire service availability; it does not prove WineASIO registration, actual
+routing, latency, or recording quality.
+
+For diagnostics against the supported copied prefix:
+
+```sh
+WAYDAW_ABLETON_RUNNER=proton-exp ./bin/wineasio-check
+WAYDAW_ABLETON_RUNNER=proton-exp ./bin/audio-check
+WAYDAW_ABLETON_RUNNER=proton-exp ./bin/bome-midi-check
+./bin/session-status
+```
+
+Bome's Windows BMIDI kernel driver is not the Linux routing foundation.
+Use ALSA sequencer MIDI, VirMIDI, and PipeWire/JACK graph routing. The working
+manual topology is Launchpad S directly to Wine/Ableton, plus Bome output
+through VirMIDI to Ableton. Device IDs and temporary routes can change on reboot
+or reconnect. Once Ableton has created its Wine MIDI ports, inspect and apply:
+
+```sh
+./bin/midi-route-inspect
+./bin/apply-live-routes
+./bin/midi-route-inspect
+```
+
+`./bin/clear-live-routes` removes those temporary routes. The supervisor does not
+load kernel modules, create persistent routing, or change PipeWire settings.
+
+## Updates and recovery
+
+Keep Ableton's in-app updater disabled. A `.Live 12 Suite_updated` swap marker
+blocks startup. `_autoupdates` alone produces a warning. The historical failure
+was `Swapper: rename_1 stage failed: Sharing violation.`
+
+After saving and stopping the session, inspect/update-disable the selected copy:
+
+```sh
+WAYDAW_ABLETON_RUNNER=proton-exp ./bin/disable-ableton-updates
+./bin/waydaw check
+```
+
+This maintenance command renames known updater paths to timestamped backups.
+It does not delete them. Back up the entire stopped prefix before manually
+installing any Ableton update. Validate updates in a separate copied prefix
+before using them for daily work.
+
+## Logs and verification
+
+Each supervised session prints a unique log path under:
+
+```text
+${XDG_STATE_HOME:-~/.local/state}/waydaw/logs/<timestamp>-<id>/session.log
+```
+
+The session log includes the effective runner, prefix, graphics overrides,
+application output, and cleanup result. The logging relay continues when its
+stdout reader disconnects. Cleanup writes directly to the session log, so it
+can finish even if the relay exits; inspect that log for shutdown diagnostics.
+New sessions record their exact log path for Stop, so the desktop action can
+display cleanup errors even when the session started in a terminal. Older
+session records remain supported but do not contain that path.
+Existing diagnostic commands also keep
+logs under the checkout's `logs/` directory. Logs may include user and project
+paths; review them before sharing. Session logs are retained until you remove
+them deliberately.
+
+```sh
+./bin/verify-proton-runner-mode
+node tests/test_kwin_controller.cjs
+```
+
+Tests use disposable homes, copied scripts, fake Wine/KWin/PipeWire services,
+and fixture DLLs. They never touch real prefixes or the desktop. The Node.js
+check covers KWin windows with and without optional decoration signals,
+decoration protection, window scoping, and removal of closed-window state.
+
+Read [the production-readiness plan](docs/production-readiness.md) for the
+implementation milestones, first-machine setup, release gates, and rollback.

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Desktop frontend: keep the guarded supervisor attached, with file logging.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+umask 077
+log_root="${XDG_STATE_HOME:-$HOME/.local/state}/waydaw/desktop"
+mkdir -p "$log_root"
+log_file="$(mktemp "$log_root/$(date +%Y%m%d-%H%M%S)-XXXXXX.log")"
+command="${1:-start}"
+result=0
+"$ROOT_DIR/bin/waydaw" "$@" >"$log_file" 2>&1 || result=$?
+
+if [[ "$result" == 129 || "$result" == 130 || "$result" == 143 ]]; then
+  # An intentional Stop needs no error dialog after successful cleanup.
+  # Preserve error reporting when cancellation leaves recovery required.
+  if "$ROOT_DIR/bin/waydaw" status 2>/dev/null | grep -q '^session=stopped$'; then
+    exit "$result"
+  fi
+fi
+if [[ "$result" != 0 ]]; then
+  # Cleanup writes directly to the session log so it survives a lost stdout
+  # reader. Use this invocation's published path, never the newest log on disk.
+  session_log="$(awk '/^session_log=/ {sub(/^session_log=/, ""); print; exit}' "$log_file")"
+  details_log="$log_file"
+  details="$(tail -n 40 "$log_file" || true)"
+  if [[ -n "$session_log" && -f "$session_log" && -r "$session_log" ]]; then
+    details_log="$session_log"
+    details+=$'\n\n'"Session log: $session_log"$'\n'"$(tail -n 40 "$session_log" || true)"
+  fi
+  message="WayDAW could not complete '$command'. See Details or the log: $details_log"
+  if command -v kdialog >/dev/null; then
+    kdialog --title WayDAW --detailederror "$message" "$details" || true
+  elif command -v notify-send >/dev/null; then
+    notify-send --app-name=WayDAW --urgency=critical WayDAW "$message" || true
+  fi
+elif [[ "$result" == 0 && "$command" == check ]]; then
+  if command -v kdialog >/dev/null; then
+    kdialog --title 'WayDAW environment check' --textbox "$log_file" || true
+  elif command -v notify-send >/dev/null; then
+    notify-send --app-name=WayDAW WayDAW "Environment check passed. Log: $log_file" || true
+  fi
+fi
+exit "$result"

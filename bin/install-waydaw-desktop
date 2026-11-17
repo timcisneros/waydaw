@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Install menu launchers and retain the original Wine shortcut for restoration.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+command -v python3 >/dev/null || { echo 'ERROR: python3 is required to install the desktop entry.' >&2; exit 1; }
+python3 - "$ROOT_DIR" "${1:---install}" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+root, mode = sys.argv[1:]
+applications = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'applications'
+state = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'waydaw/desktop-install.json'
+dedicated = 'com.timcis.WayDAW.desktop'
+ableton = 'wine/Programs/Ableton Live 12 Suite.desktop'
+if mode not in ('--install', '--print', '--uninstall'):
+    raise SystemExit('Usage: install-waydaw-desktop [--install|--print|--uninstall]')
+if any(c in root for c in '\n\r'):
+    raise SystemExit('Checkout path must not contain newlines.')
+def argument(value):
+    # Desktop string escaping followed by Exec argument quoting (XDG spec).
+    value = value.replace('\\', '\\\\\\\\')
+    for char in ('"', '`', '$'):
+        value = value.replace(char, '\\\\' + char)
+    return '"' + value.replace('%', '%%') + '"'
+launcher = argument(root + '/bin/waydaw-desktop')
+entry = f'''[Desktop Entry]
+Type=Application
+Name=WayDAW
+Comment=Guarded Ableton session on KDE Plasma Wayland
+Exec={launcher} start
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;
+Actions=FullSession;Check;Stop;
+
+[Desktop Action FullSession]
+Name=Start with Bome
+Exec={launcher} start --with-bome
+
+[Desktop Action Check]
+Name=Check environment
+Exec={launcher} check
+
+[Desktop Action Stop]
+Name=Stop session (unsaved work may be lost)
+Exec={launcher} stop
+'''
+if mode == '--print':
+    print(entry, end='')
+    raise SystemExit
+
+def read_file(path):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise SystemExit(f'Refusing to replace a symlink or non-file: {path}')
+    return path.read_text() if path.exists() else None
+
+def write_file(path, content, permissions=0o600):
+    read_file(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as output:
+            temporary = output.name
+            os.fchmod(output.fileno(), permissions)
+            output.write(content)
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+saved = read_file(state)
+try:
+    record = json.loads(saved) if saved else {
+        'version': 1, 'applications': str(applications), 'original_ableton': None, 'installed': {},
+    }
+except ValueError:
+    raise SystemExit(f'Invalid desktop installation record: {state}')
+if (not isinstance(record, dict)
+        or record.get('version') != 1 or record.get('applications') != str(applications)
+        or not isinstance(record.get('installed'), dict)
+        or any(name not in (dedicated, ableton) or not isinstance(content, str)
+               for name, content in record['installed'].items())
+        or not isinstance(record.get('original_ableton'), (str, type(None)))):
+    raise SystemExit(f'Invalid or mismatched desktop installation record: {state}')
+
+def save_record():
+    write_file(state, json.dumps(record, indent=2) + '\n')
+
+if mode == '--uninstall':
+    for name, installed in list(record['installed'].items()):
+        destination = applications / name
+        current = read_file(destination)
+        if current == installed:
+            if name == ableton:
+                if record['original_ableton'] is None:
+                    raise SystemExit(f'Original Ableton shortcut missing from {state}')
+                write_file(destination, record['original_ableton'], 0o644)
+                print(f'Restored {destination}')
+            else:
+                destination.unlink()
+                print(f'Removed {destination}')
+        elif current is not None:
+            print(f'Preserved independently changed entry: {destination}')
+        del record['installed'][name]
+        save_record()
+    raise SystemExit
+
+def redirect_ableton(original):
+    # Preserve Wine's menu ID, icon, name, and any unrelated desktop actions.
+    lines = original.splitlines()
+    if lines.count('[Desktop Entry]') != 1:
+        raise SystemExit('Ableton shortcut must contain one [Desktop Entry] group.')
+    start = lines.index('[Desktop Entry]') + 1
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith('[')), len(lines))
+    updates = {
+        'Exec': launcher + ' start', 'Terminal': 'false',
+        'Path': root.replace('\\', '\\\\').replace('\t', '\\t'),
+        'Comment': 'Ableton Live through the guarded WayDAW Proton session',
+    }
+    body = []
+    for line in lines[start:end]:
+        if line.partition('=')[0].strip() not in updates:
+            body.append(line)
+    body.extend(f'{key}={value}' for key, value in updates.items())
+    return '\n'.join(lines[:start] + body + lines[end:]) + '\n'
+
+entries = {dedicated: entry}
+original = read_file(applications / ableton)
+if original is not None:
+    entries[ableton] = redirect_ableton(original)
+    # Keep the first recovery copy even after an uninstall preserves edits.
+    # The current entry may still invoke WayDAW when it is installed again.
+    if record['original_ableton'] is None:
+        record['original_ableton'] = original
+
+for name, content in entries.items():
+    destination = applications / name
+    read_file(destination)
+    record['installed'][name] = content
+    # Save the original and intended content before changing the shortcut.
+    save_record()
+    write_file(destination, content, 0o644)
+    print(f'Installed {destination}')
+print(f'Installation record and original shortcut: {state}')
+PY

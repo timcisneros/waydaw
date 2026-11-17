@@ -1475,17 +1475,191 @@ exit 99
         self.assertIn(f"wine:{self.prefix}:reg query", self.event_text())
         self.assertNotIn("unexpected-system-wine64", self.event_text())
 
+    def test_desktop_install_print_and_uninstall(self):
+        result = self.run_command("--print", executable="install-waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f'Exec="{self.root}/bin/waydaw-desktop" start', result.stdout)
+        self.assertIn('Terminal=false', result.stdout)
+        self.assertFalse(Path(self.env["XDG_DATA_HOME"]).exists())
+        self.assertFalse(Path(self.env["XDG_STATE_HOME"]).exists())
+        result = self.run_command(executable="install-waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        desktop = Path(self.env["XDG_DATA_HOME"]) / "applications/com.timcis.WayDAW.desktop"
+        self.assertTrue(desktop.exists())
+        if shutil.which("desktop-file-validate"):
+            checked = subprocess.run(["desktop-file-validate", str(desktop)], capture_output=True, text=True)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        result = self.run_command("--uninstall", executable="install-waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(desktop.exists())
 
+    def test_desktop_frontend_logs_preflight_failure_and_preserves_status(self):
+        self.script(self.fake / "kdialog", 'printf "dialog:%s\\n" "$*" >> "$TEST_EVENTS"')
+        result = self.run_command("start", executable="waydaw-desktop", env={"TEST_PIPEWIRE_FAIL": "1"})
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("--detailederror", self.event_text())
+        self.assertIn("PipeWire user service is not active", self.event_text())
+        logs = list((Path(self.env["XDG_STATE_HOME"]) / "waydaw/desktop").glob("*.log"))
+        self.assertEqual(len(logs), 1)
+        self.assertIn("PipeWire user service is not active", logs[0].read_text())
 
+    def test_desktop_frontend_displays_actual_cleanup_failure(self):
+        self.script(self.fake / "kdialog", 'printf "dialog:%s\\n" "$*" >> "$TEST_EVENTS"')
+        unrelated = Path(self.env["XDG_STATE_HOME"]) / "waydaw/logs/unrelated/session.log"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("UNRELATED SESSION ERROR\n")
+        os.utime(unrelated, (time.time() + 3600, time.time() + 3600))
+        result = self.run_command("start", executable="waydaw-desktop", env={"TEST_CLEANUP_FAIL": "1"})
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("--detailederror", self.event_text())
+        self.assertIn("Wine shutdown could not be verified", self.event_text())
+        self.assertIn("session recovery required", self.event_text())
+        self.assertIn("cleanup_exit=1", self.event_text())
+        self.assertNotIn("UNRELATED SESSION ERROR", self.event_text())
 
+    def test_desktop_stop_displays_cleanup_failure_from_terminal_session(self):
+        self.script(self.fake / "kdialog", 'printf "dialog:%s\\n" "$*" >> "$TEST_EVENTS"')
+        process = self.launch(TEST_WINE_HOLD="1", TEST_CLEANUP_FAIL="1")
+        self.wait_for(lambda: "wine:" in self.event_text(), process)
+        result = self.run_command("stop", executable="waydaw-desktop")
+        output = process.communicate(timeout=8)[0]
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("--detailederror", self.event_text())
+        self.assertIn("Wine shutdown could not be verified", self.event_text())
+        self.assertIn("cleanup_exit=1", self.event_text())
+        self.assertIn("Session cleanup failed; inspect the session log", self.event_text())
+        session_log = next(line.removeprefix("session_log=") for line in output.splitlines()
+                           if line.startswith("session_log="))
+        self.assertIn(session_log, self.event_text())
+        self.assertIn("session=recovery-required", self.run_command("status").stdout)
 
+    def test_desktop_frontend_falls_back_when_session_log_is_unavailable(self):
+        self.script(self.fake / "kdialog", 'printf "dialog:%s\\n" "$*" >> "$TEST_EVENTS"')
+        self.script(self.root / "bin/waydaw", '''
+printf 'session_log=/missing/session.log\\nERROR: startup failed before logging\\n'
+exit 17
+''')
+        result = self.run_command("start", executable="waydaw-desktop")
+        self.assertEqual(result.returncode, 17, result.stdout)
+        self.assertIn("startup failed before logging", self.event_text())
 
+    def test_desktop_install_repairs_original_shortcut_and_restores_it(self):
+        desktop = Path(self.env["XDG_DATA_HOME"]) / "applications/wine/Programs/Ableton Live 12 Suite.desktop"
+        desktop.parent.mkdir(parents=True)
+        original = ('[Desktop Entry]\nName=Ableton Live 12 Suite\nExec=wine original.lnk\n'
+                    'Type=Application\nIcon=ableton-original\nStartupWMClass=ableton.exe\n'
+                    'Path=/original/path\nTerminal=true\n')
+        desktop.write_text(original)
+        for _ in range(2):
+            result = self.run_command(executable="install-waydaw-desktop")
+            self.assertEqual(result.returncode, 0, result.stdout)
+        installed = desktop.read_text()
+        self.assertIn(f'Exec="{self.root}/bin/waydaw-desktop" start\n', installed)
+        self.assertIn("Icon=ableton-original\n", installed)
+        self.assertIn("StartupWMClass=ableton.exe\n", installed)
+        self.assertIn("Terminal=false\n", installed)
+        self.assertEqual(installed.count("Exec="), 1)
+        self.assertNotIn("Exec=wine", installed)
+        record = Path(self.env["XDG_STATE_HOME"]) / "waydaw/desktop-install.json"
+        self.assertEqual(json.loads(record.read_text())["original_ableton"], original)
+        self.assertEqual(record.stat().st_mode & 0o777, 0o600)
+        if shutil.which("desktop-file-validate"):
+            checked = subprocess.run(["desktop-file-validate", str(desktop)], capture_output=True, text=True)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        result = self.run_command("--uninstall", executable="install-waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(desktop.read_text(), original)
 
+    def test_desktop_reinstall_repairs_wine_regeneration_without_losing_original(self):
+        desktop = Path(self.env["XDG_DATA_HOME"]) / "applications/wine/Programs/Ableton Live 12 Suite.desktop"
+        desktop.parent.mkdir(parents=True)
+        original = '[Desktop Entry]\nName=Ableton\nType=Application\nExec=wine first.lnk\n'
+        desktop.write_text(original)
+        self.assertEqual(self.run_command(executable="install-waydaw-desktop").returncode, 0)
+        self.root = self.root.rename(self.root.with_name("moved checkout with spaces"))
+        result = self.run_command(executable="install-waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f'Exec="{self.root}/bin/waydaw-desktop" start\n', desktop.read_text())
+        desktop.write_text(original.replace("first.lnk", "regenerated.lnk"))
+        result = self.run_command(executable="install-waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("waydaw-desktop", desktop.read_text())
+        result = self.run_command("--uninstall", executable="install-waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(desktop.read_text(), original)
 
+    def test_desktop_uninstall_preserves_independent_edits(self):
+        desktop = Path(self.env["XDG_DATA_HOME"]) / "applications/wine/Programs/Ableton Live 12 Suite.desktop"
+        desktop.parent.mkdir(parents=True)
+        original = '[Desktop Entry]\nName=Ableton\nType=Application\nExec=wine original.lnk\n'
+        desktop.write_text(original)
+        self.assertEqual(self.run_command(executable="install-waydaw-desktop").returncode, 0)
+        changed = desktop.read_text() + "X-User-Setting=keep\n"
+        desktop.write_text(changed)
+        result = self.run_command("--uninstall", executable="install-waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Preserved independently changed entry", result.stdout)
+        self.assertEqual(desktop.read_text(), changed)
+        record = Path(self.env["XDG_STATE_HOME"]) / "waydaw/desktop-install.json"
+        self.assertEqual(json.loads(record.read_text())["original_ableton"], original)
 
+    def test_desktop_reinstall_after_preserved_edit_keeps_original_wine_shortcut(self):
+        desktop = Path(self.env["XDG_DATA_HOME"]) / "applications/wine/Programs/Ableton Live 12 Suite.desktop"
+        desktop.parent.mkdir(parents=True)
+        original = '[Desktop Entry]\nName=Ableton\nType=Application\nExec=wine original.lnk\n'
+        desktop.write_text(original)
+        self.assertEqual(self.run_command(executable="install-waydaw-desktop").returncode, 0)
+        desktop.write_text(desktop.read_text() + "X-User-Setting=keep\n")
+        self.assertEqual(self.run_command("--uninstall", executable="install-waydaw-desktop").returncode, 0)
+        self.assertIn("X-User-Setting=keep", desktop.read_text())
+        record = Path(self.env["XDG_STATE_HOME"]) / "waydaw/desktop-install.json"
+        for _ in range(2):
+            result = self.run_command(executable="install-waydaw-desktop")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn("X-User-Setting=keep", desktop.read_text())
+            self.assertEqual(json.loads(record.read_text())["original_ableton"], original)
+            result = self.run_command("--uninstall", executable="install-waydaw-desktop")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(desktop.read_text(), original)
+            desktop.write_text(desktop.read_text() + "X-User-Setting=keep\n")
 
+    def test_desktop_frontend_keeps_the_session_supervised_without_a_terminal(self):
+        self.script(self.fake / "kdialog", 'printf "unexpected-dialog:%s\\n" "$*" >> "$TEST_EVENTS"')
+        process = subprocess.Popen(
+            [str(self.root / "bin/waydaw-desktop"), "start"],
+            env={**self.env, "TEST_WINE_HOLD": "1"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        self.processes.append(process)
+        self.wait_for(lambda: "wine:" in self.event_text(), process)
+        self.assertIsNone(process.poll())
+        self.assertIn("session=running", self.run_command("status").stdout)
+        self.stop.touch()
+        _, output = process.communicate(timeout=8)
+        self.assertEqual(process.returncode, 0, output)
+        self.assertIn("session_exit=0 cleanup_exit=0", self.session_log_text())
+        self.assertNotIn("unexpected-dialog", self.event_text())
 
+    def test_desktop_frontend_displays_environment_check_results(self):
+        self.script(self.fake / "kdialog", 'printf "dialog:%s\\n" "$*" >> "$TEST_EVENTS"')
+        result = self.run_command("check", executable="waydaw-desktop")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("--textbox", self.event_text())
+        self.assertNotIn("--detailederror", self.event_text())
 
+    def test_desktop_frontend_reports_incomplete_cleanup_after_cancellation(self):
+        self.script(self.fake / "kdialog", 'printf "dialog:%s\\n" "$*" >> "$TEST_EVENTS"')
+        self.script(self.root / "bin/waydaw", '''
+if [[ "$1" == status ]]; then printf 'session=%s\\n' "$TEST_SESSION_STATE"; exit 0; fi
+exit 143
+''')
+        result = self.run_command("start", executable="waydaw-desktop", env={"TEST_SESSION_STATE": "stopped"})
+        self.assertEqual(result.returncode, 143, result.stdout)
+        self.assertNotIn("--detailederror", self.event_text())
+        result = self.run_command("start", executable="waydaw-desktop", env={"TEST_SESSION_STATE": "recovery-required"})
+        self.assertEqual(result.returncode, 143, result.stdout)
+        self.assertIn("--detailederror", self.event_text())
 
     def test_compatibility_entry_points_use_the_supervisor(self):
         for executable, marker in (("session", "with_bome=1"), ("ableton-wayland", "with_bome=0")):
