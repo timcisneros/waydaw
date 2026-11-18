@@ -67,11 +67,23 @@ ordinary-scheduling buffer setting has passed sustained acceptance.
 
 A controlled follow-on trial applies RTKit round-robin scheduling only to the
 owned audio-processing threads: AudioCalc priority 10 and the PipeWire data loop
-priority 9, with the daemon's bounded CPU-time budget. Its 2048-sample four-hour
-measurement started at 09:26:21 local time, with a ten-second startup allowance.
-The normal launch profile remains unchanged. This scheduling experiment has not
-been promoted; it requires sustained acceptance and a guarded persistent
-implementation before normal use.
+priority 9, with the daemon's bounded CPU-time budget. That trial ran for about
+31 minutes without a captured signal gap or phase discontinuity, then stopped on
+two shared hardware-driver xrun notifications. Ableton's own error counter did
+not increase. Checks of the saved recording around the event also stayed clean.
+
+The user reported using volume keys near that event. Replaying the desktop
+volume actions in a separate silent test produced neither the notification nor
+signal loss, so the cause is unconfirmed. PipeWire's JACK implementation derives
+this callback from the [shared driver's counter](https://github.com/PipeWire/pipewire/blob/1.6.11/pipewire-jack/src/pipewire-jack.c#L1965).
+
+The restarted measurement began at 10:19:57 local time. It now records frame-clock
+continuity, owned-client errors, shared-driver reports, and audio-control events
+separately. It stops immediately on measured signal/clock loss or owned-client
+error increases. Shared-driver notifications remain in the final acceptance
+check and require review; this refinement does not establish a passing result.
+The normal launch profile remains unchanged pending sustained acceptance and a
+guarded persistent scheduling implementation.
 
 The current probe confines generated tones to Live and its capture ports. A
 zero-only port keeps the hardware audio clock active without sending the test
