@@ -8,6 +8,7 @@ docs/*
 !docs/ableton-system-wine-baseline-next.md
 !docs/production-readiness.md
 !docs/midi-routing.md
+!docs/component-validation-20261118.md
 tests/__pycache__/
 config/__pycache__/
 .local-tools/waydaw-launch/

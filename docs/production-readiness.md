@@ -29,8 +29,12 @@ support to other compositors, display layouts, or Wine builds.
 These software changes are implemented. The initially missing prefixes were
 recreated from the Ableton 12.4.2 installer on 2026-11-16. That reconstruction
 verified the editor, normal exit, the native DXVK renderer on Intel
-Iris Xe, and WineASIO initialization through PipeWire JACK. Authorization,
-recording/MIDI acceptance, and a release tag remain pending.
+Iris Xe, and WineASIO initialization through PipeWire JACK. Subsequent local
+validation used authorized Live 12.4.16 and confirmed a real 48 kHz recording,
+Max for Live signal processing, native save/reopen/export, and seven physical
+Launchpad pad pairs forwarded unchanged through Bome. The release gates below
+still require reboot/reconnect, the production plugin set, and sustained workload
+acceptance; a release tag remains pending.
 
 The reconstruction uses pinned upstream DXVK 2.7.1. The historical debug DLLs
 carried Wine builtin markers and fell back to a renderer that Ableton
@@ -127,7 +131,9 @@ realtime stability from successful driver initialization.
    selected the TeX `drmit10` math font until the standard fonts were installed.
    Preserve the font installers, checksums, and registration data with recovery
    artifacts. Keep Bome's Windows virtual-MIDI driver disabled under Wine and
-   configure native Linux MIDI ports and project aliases separately.
+   configure native Linux MIDI ports and project aliases separately. Follow
+   [MIDI routing setup](midi-routing.md) to load a Bome project automatically and
+   opt into guarded route maintenance using the existing MIDI Through port.
 8. Install the desktop entry with `./bin/install-waydaw-desktop`. It creates
    `com.timcis.WayDAW.desktop` under the user's XDG applications directory.
    Menu launches use `bin/waydaw-desktop` with `Terminal=false`; successful
@@ -181,7 +187,7 @@ All items below must pass on that recorded environment before a release tag:
   and export. Confirm recorded files and export content, not merely UI activity.
 - Exercise the actual VST2/VST3 set and Max for Live devices used in production.
   Confirm plugin state persists when reopening the project.
-- Validate Launchpad/Bome/VirMIDI routes after reboot and device reconnect.
+- Validate Launchpad/Bome/MIDI Through routes after reboot and device reconnect.
   No stuck notes, duplicate notes, or unexpected feedback loops.
 - Run the representative project for at least four hours at the intended sample
   rate/buffer. Record xruns/dropouts and CPU behavior, separating startup events
