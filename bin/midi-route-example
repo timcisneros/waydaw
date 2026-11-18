@@ -1,38 +1,24 @@
 #!/usr/bin/env bash
-set -u
-
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../config/env
-source "$ROOT_DIR/config/env"
+set -eu
 
 cat <<'EOF'
 MIDI route examples only. Nothing is executed by this script.
 
-ALSA aconnect direction is:
+Validated sequencer topology:
 
-  aconnect SOURCE DESTINATION
+  Launchpad S -> Bome -> Midi Through Port-0 -> guarded Ableton
 
-Recommended topology:
-
-  Bome OUT -> VirMIDI -> Ableton IN
-
-Example routes:
-
-  aconnect "VirMIDI 1-0:0" "WINE midi driver:0"
-  aconnect "WINE midi driver:0" "VirMIDI 1-0:0"
-
-Directionality:
-
-  "VirMIDI 1-0:0" -> "WINE midi driver:0"
-    Sends MIDI arriving at the VirMIDI port into Wine/Ableton.
-
-  "WINE midi driver:0" -> "VirMIDI 1-0:0"
-    Sends MIDI emitted by Wine/Ableton back toward the VirMIDI port.
-
-Actual ALSA client names and numeric IDs vary by boot, module load order,
-Wine process, and session state. Run:
+VirMIDI does not relay between two sequencer clients by itself. Receiving
+Bome both directly and through MIDI Through creates duplicate notes.
+Inspect and preview the route for the running guarded session:
 
   ./bin/midi-route-inspect
+  ./bin/bome-validation-route
 
-Then use the exact client/port names or client:port IDs shown on this machine.
+Apply after configuring Bome's project input and output:
+
+  ./bin/bome-validation-route --apply
+
+See docs/midi-routing.md for automatic project loading, optional route
+maintenance, direct Launchpad mode, and signal validation.
 EOF

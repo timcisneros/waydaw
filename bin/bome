@@ -33,6 +33,17 @@ if [[ ! -d "$WINEPREFIX" ]]; then
 fi
 
 bome_exe="$(waydaw_bome_executable "$WINEPREFIX")"
+if [[ $# == 0 ]]; then
+  project="$(waydaw_bome_project)"
+  if [[ -n "$project" ]]; then
+    project_windows="$(winepath -w "$project")"
+    project_windows="${project_windows%$'\r'}"
+    [[ -n "$project_windows" && "$project_windows" != *$'\n'* ]] || {
+      printf 'ERROR: could not resolve the Bome project path.\n' >&2; exit 1;
+    }
+    set -- /project "$project_windows"
+  fi
+fi
 
 printf '[%s] launching Bome: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$bome_exe" >>"$LOG_FILE"
 

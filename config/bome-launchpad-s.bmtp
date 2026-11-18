@@ -1,0 +1,7 @@
+; Launchpad S pass-through. Add your own translators in Bome as needed.
+[Project]
+Version=2
+
+[MIDI.routes]
+In0=Launchpad S MIDI 1
+Out0=Midi Through Port-0

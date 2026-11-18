@@ -1,5 +1,24 @@
 #!/usr/bin/env bash
 # Read-only Bome discovery, result parsing, and session health inspection.
+waydaw_bome_project() {
+  local project="" config_file="${XDG_CONFIG_HOME:-$HOME/.config}/waydaw/bome-project"
+  if [[ ${WAYDAW_BOME_PROJECT+x} ]]; then
+    project="$WAYDAW_BOME_PROJECT"
+  elif [[ -e "$config_file" || -L "$config_file" ]]; then
+    [[ -f "$config_file" && -r "$config_file" ]] || {
+      printf 'ERROR: Bome project configuration is not a readable file.\n' >&2; return 1;
+    }
+    project="$(cat -- "$config_file")" || return 1
+  fi
+  [[ -n "$project" ]] || return 0
+  if [[ "$project" != /* || "$project" == *$'\n'* || "$project" == *$'\r'* \
+        || "${project,,}" != *.bmtp || ! -f "$project" || ! -r "$project" ]]; then
+    printf 'ERROR: Bome project must be one readable absolute .bmtp path.\n' >&2
+    return 1
+  fi
+  realpath -e -- "$project"
+}
+
 waydaw_bome_executable() {
   local prefix="$1" candidate="" path
   local -a candidates=()

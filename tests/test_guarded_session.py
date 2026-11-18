@@ -1238,6 +1238,96 @@ exec /usr/bin/mktemp "$@"
         self.assertIn("wine:" + str(self.working) + ":" + str(executable), self.event_text())
         self.assertIn("wayland=wayland-fixture", self.event_text())
 
+    def test_bome_project_path_with_spaces_is_forwarded(self):
+        project = self.home / "Documents/Bome projects/Launchpad.bmtp"
+        project.parent.mkdir(parents=True)
+        project.write_text("[Project]\nVersion=2\n")
+        result = self.run_command(executable="bome", env={
+            "WAYDAW_ABLETON_RUNNER": "proton-exp", "WAYDAW_BOME_PROJECT": str(project),
+            "TEST_BOME_EXIT": "0"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("/project " + str(project), self.event_text())
+
+    def midi_route_stub(self):
+        self.script(self.fake / "aconnect", "exit 0")
+        (self.root / "config/midi-routing.py").write_text('''
+import os
+from pathlib import Path
+runtime = Path(os.environ["XDG_RUNTIME_DIR"]) / "waydaw"
+with Path(os.environ["TEST_EVENTS"]).open("a") as stream:
+    stream.write("midi-route:owner=" + str((runtime / "ableton.state").exists()) + "\\n")
+raise SystemExit(0 if Path(os.environ["TEST_MIDI_READY"]).exists() else 1)
+''')
+        return {"WAYDAW_MIDI_ROUTE": "bome", "TEST_MIDI_READY": str(self.home / "midi-ready")}
+
+    def test_invalid_midi_route_configuration_fails_before_wine(self):
+        result = self.run_command("check", "--with-bome", env={"WAYDAW_MIDI_ROUTE": "bome\nother"})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("MIDI route configuration must be", result.stdout)
+        self.assertNotIn("wine:", self.event_text())
+
+    def test_midi_route_maintenance_retries_without_closing_ableton(self):
+        env = self.midi_route_stub()
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", **env)
+        self.wait_for(lambda: "midi_routing=waiting" in self.session_log_text(), process)
+        self.assertIn("midi-route:owner=True", self.event_text())
+        self.assertIn("session=running", self.run_command("status").stdout)
+        Path(env["TEST_MIDI_READY"]).touch()
+        self.wait_for(lambda: "midi_routing=ready" in self.session_log_text(), process)
+        self.assertEqual(self.session_log_text().count("midi_routing=waiting"), 1)
+        self.assertEqual(self.session_log_text().count("midi_routing=ready"), 1)
+        self.stop.touch()
+        self.assertEqual(process.wait(timeout=4), 0)
+
+    def test_ableton_only_skips_bome_route_maintenance(self):
+        env = self.midi_route_stub()
+        process = self.launch(TEST_WINE_HOLD="1", **env)
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe" in self.event_text(), process)
+        self.stop.touch()
+        self.assertEqual(process.wait(timeout=4), 0)
+        self.assertNotIn("midi-route:", self.event_text())
+
+    def test_empty_midi_route_override_disables_configuration(self):
+        env = self.midi_route_stub()
+        config = Path(self.env["XDG_CONFIG_HOME"]) / "waydaw/midi-route"
+        config.parent.mkdir(parents=True)
+        config.write_text("bome\n")
+        process = self.launch("--with-bome", TEST_WINE_HOLD="1", **{**env, "WAYDAW_MIDI_ROUTE": ""})
+        self.wait_for(lambda: "Ableton Live 12 Suite.exe" in self.event_text(), process)
+        self.stop.touch()
+        self.assertEqual(process.wait(timeout=4), 0)
+        self.assertNotIn("midi-route:", self.event_text())
+
+    def test_bome_project_config_file_is_forwarded(self):
+        project = self.home / "Launchpad.bmtp"
+        project.write_text("[Project]\nVersion=2\n")
+        config = Path(self.env["XDG_CONFIG_HOME"]) / "waydaw/bome-project"
+        config.parent.mkdir(parents=True)
+        config.write_text(str(project) + "\n")
+        result = self.run_command(executable="bome", env={
+            "WAYDAW_ABLETON_RUNNER": "proton-exp", "TEST_BOME_EXIT": "0"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("/project " + str(project), self.event_text())
+
+    def test_missing_bome_project_fails_preflight_without_wine(self):
+        result = self.run_command("check", "--with-bome", env={
+            "WAYDAW_BOME_PROJECT": str(self.home / "missing.bmtp")})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Bome project must be", result.stdout)
+        self.assertNotIn("wine:", self.event_text())
+
+    def test_multiline_bome_project_is_rejected(self):
+        result = self.run_command("check", "--with-bome", env={"WAYDAW_BOME_PROJECT": "/one.bmtp\n/two.bmtp"})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("wine:", self.event_text())
+
+    def test_empty_bome_project_override_disables_configured_project(self):
+        config = Path(self.env["XDG_CONFIG_HOME"]) / "waydaw/bome-project"
+        config.parent.mkdir(parents=True)
+        config.write_text("/missing.bmtp\n")
+        result = self.run_command("check", "--with-bome", env={"WAYDAW_BOME_PROJECT": ""})
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_bome_clean_early_exit_is_failure(self):
         result = self.run_command("start", "--with-bome", env={"TEST_BOME_EXIT": "0"})
         self.assertNotEqual(result.returncode, 0, result.stdout)

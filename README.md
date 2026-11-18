@@ -231,19 +231,28 @@ WAYDAW_ABLETON_RUNNER=proton-exp ./bin/bome-midi-check
 ```
 
 Bome's Windows BMIDI kernel driver is not the Linux routing foundation.
-Use ALSA sequencer MIDI, VirMIDI, and PipeWire/JACK graph routing. The working
-manual topology is Launchpad S directly to Wine/Ableton, plus Bome output
-through VirMIDI to Ableton. Device IDs and temporary routes can change on reboot
-or reconnect. Once Ableton has created its Wine MIDI ports, inspect and apply:
+The validated translated path is Launchpad S → Bome → `Midi Through Port-0`
+→ Ableton. VirMIDI does not relay between these two sequencer clients by itself.
+Keep MIDI Through enabled as a Track input in Ableton and disable direct
+Launchpad/Bome inputs to avoid duplicate notes. Inspect the running session:
 
 ```sh
 ./bin/midi-route-inspect
-./bin/apply-live-routes
-./bin/midi-route-inspect
+./bin/bome-validation-check
+./bin/bome-validation-route          # preview
+./bin/bome-validation-route --apply
 ```
 
-`./bin/clear-live-routes` removes those temporary routes. The supervisor does not
-load kernel modules, create persistent routing, or change PipeWire settings.
+Configure a Bome project with one absolute `.bmtp` path in
+`~/.config/waydaw/bome-project`. Set `~/.config/waydaw/midi-route` to `bome`
+to maintain exclusive routing during `start --with-bome` sessions. This is
+opt-in; unavailable hardware leaves Ableton open. The helper discovers current
+port numbers and verifies application ownership before changing connections.
+`./bin/apply-live-routes` instead selects direct Launchpad input;
+`./bin/clear-live-routes` removes the known physical/bus routes. The supervisor
+does not load kernel modules or change PipeWire settings.
+See [MIDI setup and validation](docs/midi-routing.md) for the project template,
+desktop action, overrides, and the limits of a passing route check.
 
 ## Updates and recovery
 

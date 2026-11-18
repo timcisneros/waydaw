@@ -10,6 +10,7 @@ source "$ROOT_DIR/config/prefix-safety.sh"
 source "$ROOT_DIR/config/validated-runtime.sh"
 source "$ROOT_DIR/config/session-lifecycle.sh"
 source "$ROOT_DIR/config/bome.sh"
+source "$ROOT_DIR/config/midi.sh"
 source "$ROOT_DIR/config/authorization.sh"
 prefix="$(waydaw_copied_prefix)" || exit 1
 runner="$ROOT_DIR/.local-runners/kron4ek-proton-exp-11.0/bin"
@@ -89,7 +90,12 @@ guarded_environment() {
   printf 'pipewire_config_dir=%s\n' "${PIPEWIRE_CONFIG_DIR:-default}"
 }
 preflight() {
-  local dependency pair file expected target source_hash bome_exe
+  local dependency pair file expected target source_hash bome_exe bome_project
+  midi_mode="$(waydaw_midi_mode)" || exit 1
+  if [[ "$midi_mode" == bome && "$with_bome" == 1 ]]; then
+    command -v aconnect >/dev/null || fail 'MIDI route maintenance requires aconnect.'
+    printf 'midi_routing_mode=bome\n'
+  fi
   [[ -n "${WAYLAND_DISPLAY:-}" && -n "${DISPLAY:-}" ]] || fail 'A Wayland session with XWayland (DISPLAY) is required.'
   for dependency in flock timeout pw-jack busctl sha256sum systemctl python3; do
     command -v "$dependency" >/dev/null || fail "Missing dependency: $dependency"
@@ -119,6 +125,8 @@ preflight() {
     [[ -f "$bome_helper" && "$(head -c2 "$bome_helper")" == MZ ]] || fail 'Bome readiness helper missing; run compat/waydaw-launch/build.sh'
     bome_exe="$(waydaw_bome_executable "$prefix")" || exit 1
     printf 'bome_executable=%s\n' "$bome_exe"
+    bome_project="$(waydaw_bome_project)" || exit 1
+    [[ -z "$bome_project" ]] || printf 'bome_project=%s\n' "$bome_project"
   fi
   WAYDAW_ABLETON_DRY_RUN=1 "$ROOT_DIR/bin/ableton" "$@"
   printf 'runtime=%s\nprefix=%s\npreflight=passed\n' "$WAYDAW_RUNTIME_ID" "$prefix"
@@ -253,6 +261,8 @@ trap 'exit 129' HUP
 trap 'exit 141' PIPE
 # Publish the active identity only after Stop can invoke the cleanup handler.
 mkdir "$log_dir/authorization"
+# Used by the sourced authorization dispatcher.
+# shellcheck disable=SC2034
 authorization_pid=""
 write_session "$$" "$birth_time" "$log_dir/session.log"
 
@@ -268,6 +278,7 @@ wait_worker_result() {
   local name="$1" pid="$2"
   while [[ ! -f "$log_dir/$name.result" ]]; do
     check_bome_runtime
+    [[ ! -f "$ableton_file" ]] || waydaw_maintain_midi_routes "$ROOT_DIR" "$midi_mode" "$with_bome"
     check_authorization_requests
     kill -0 "$pid" 2>/dev/null || fail "$name process owner exited unexpectedly."
     sleep 0.05
