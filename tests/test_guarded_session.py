@@ -1251,11 +1251,12 @@ exec /usr/bin/mktemp "$@"
     def midi_route_stub(self):
         self.script(self.fake / "aconnect", "exit 0")
         (self.root / "config/midi-routing.py").write_text('''
-import os
+import os, sys
 from pathlib import Path
 runtime = Path(os.environ["XDG_RUNTIME_DIR"]) / "waydaw"
 with Path(os.environ["TEST_EVENTS"]).open("a") as stream:
     stream.write("midi-route:owner=" + str((runtime / "ableton.state").exists()) + "\\n")
+    stream.write("midi-reconnect:" + str("--reconnect" in sys.argv) + "\\n")
 raise SystemExit(0 if Path(os.environ["TEST_MIDI_READY"]).exists() else 1)
 ''')
         return {"WAYDAW_MIDI_ROUTE": "bome", "TEST_MIDI_READY": str(self.home / "midi-ready")}
@@ -1271,9 +1272,11 @@ raise SystemExit(0 if Path(os.environ["TEST_MIDI_READY"]).exists() else 1)
         process = self.launch("--with-bome", TEST_WINE_HOLD="1", **env)
         self.wait_for(lambda: "midi_routing=waiting" in self.session_log_text(), process)
         self.assertIn("midi-route:owner=True", self.event_text())
+        self.assertNotIn("midi-reconnect:True", self.event_text())
         self.assertIn("session=running", self.run_command("status").stdout)
         Path(env["TEST_MIDI_READY"]).touch()
         self.wait_for(lambda: "midi_routing=ready" in self.session_log_text(), process)
+        self.wait_for(lambda: "midi-reconnect:True" in self.event_text(), process)
         self.assertEqual(self.session_log_text().count("midi_routing=waiting"), 1)
         self.assertEqual(self.session_log_text().count("midi_routing=ready"), 1)
         self.stop.touch()

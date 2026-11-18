@@ -115,6 +115,20 @@ client 129: 'WINE midi driver' [type=user,pid=4200]
         self.assertTrue(all(midi.project_connections(self.selected, bome,
                          {("20:0", "128:0"), ("128:1", "14:0")}).values()))
 
+    def test_reconnect_restores_only_the_open_bome_input(self):
+        bome = {"inputs": ["128:0"], "outputs": ["128:1"]}
+        project = {"input_connected": False, "output_connected": True}
+        self.assertEqual(midi.reconnect_input(self.selected, bome, project),
+                         [("connect", "20:0", "128:0")])
+        self.assertEqual(midi.reconnect_input(self.selected, bome, dict(project, input_connected=True)), [])
+
+    def test_reconnect_refuses_missing_output_and_ambiguous_inputs(self):
+        project = {"input_connected": False, "output_connected": True}
+        for inputs, output in (([], True), (["128:0", "150:0"], True), (["128:0"], False)):
+            with self.assertRaisesRegex(midi.RoutingError, "Cannot restore Bome input"):
+                midi.reconnect_input(self.selected, {"inputs": inputs, "outputs": ["128:1"]},
+                                     dict(project, output_connected=output))
+
 
 class MidiOwnershipTests(unittest.TestCase):
     def setUp(self):
@@ -172,6 +186,19 @@ class MidiOwnershipTests(unittest.TestCase):
 
 
 class MidiCommandTests(unittest.TestCase):
+    def test_reconnect_apply_resubscribes_then_verifies_the_full_route(self):
+        ports, _ = midi.parse_ports(INVENTORY)
+        links = {("128:1", "14:0"), ("14:0", "129:0")}
+        bome = {"inputs": ["128:0"], "outputs": ["128:1"]}
+        with patch.object(midi, "snapshot", side_effect=[(ports, links), (ports, links),
+                          (ports, links | {("20:0", "128:0")})]), \
+             patch.object(midi, "bome_ports", return_value=bome), \
+             patch.object(midi, "guarded_application", return_value={"pid": 4200}), \
+             patch.object(midi.subprocess, "run", return_value=Mock(returncode=0)) as run, \
+             patch("builtins.print"):
+            self.assertEqual(midi.main(["route", "--reconnect", "--apply"]), 0)
+            self.assertEqual(run.call_args.args[0], ["aconnect", "20:0", "128:0"])
+
     def test_missing_bome_project_prevents_route_mutation_and_ready_check(self):
         ports, _ = midi.parse_ports(INVENTORY)
         with patch.object(midi, "snapshot", return_value=(ports, {("14:0", "129:0")})), \

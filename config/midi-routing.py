@@ -155,6 +155,16 @@ def project_connections(selected, bome, links):
             "output_connected": any((src, selected["bus"]) in links for src in bome["outputs"])}
 
 
+def reconnect_input(selected, bome, project):
+    # Only resubscribe an existing, owned input. Never create an application
+    # port or replace the project's MIDI output selection.
+    if project["input_connected"]:
+        return []
+    if not project["output_connected"] or len(bome["inputs"]) != 1 or not selected["launchpad"]:
+        raise RoutingError("Cannot restore Bome input: expected one open input and its MIDI Through output")
+    return [("connect", selected["launchpad"], bome["inputs"][0])]
+
+
 def changes(selected, links, mode, clear=False, bome_outputs=()):
     required = {"ableton"} if clear else {"ableton", "launchpad"}
     if not clear and mode == "bome":
@@ -185,7 +195,11 @@ def main(argv=None):
     parser.add_argument("command", choices=("inspect", "check", "route", "clear"))
     parser.add_argument("--mode", choices=("direct", "bome"), default="bome")
     parser.add_argument("--apply", action="store_true", help="apply the displayed connections/disconnections")
+    parser.add_argument("--reconnect", action="store_true",
+                        help="restore a lost Launchpad subscription into Bome's already-open input")
     args = parser.parse_args(argv)
+    if args.reconnect and (args.command != "route" or args.mode != "bome"):
+        parser.error("--reconnect requires route --mode bome")
     root = Path(__file__).resolve().parents[1]
     runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("XDG_STATE_HOME")
                    or Path.home() / ".local/state") / "waydaw"
@@ -210,8 +224,10 @@ def main(argv=None):
         print(json.dumps(report, indent=2))
         return 0
     plan = changes(selected, links, args.mode, clear=args.command == "clear", bome_outputs=outputs)
+    input_plan = reconnect_input(selected, bome_addresses, project) if args.reconnect else []
+    plan = input_plan + plan
     report["changes"] = plan
-    project_ready = args.mode == "direct" or all(project.values())
+    project_ready = args.mode == "direct" or all(project.values()) or bool(input_plan)
     report["ready"] = not plan and project_ready and args.command != "clear"
     if args.command == "check":
         print(json.dumps(report, indent=2))

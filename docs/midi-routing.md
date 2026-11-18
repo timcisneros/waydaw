@@ -52,6 +52,16 @@ removes physical/direct Bome bypasses into that instance. Connections to other
 applications remain untouched. It does not create Bome translators or routes
 inside a project.
 
+After verifying a complete route once, maintenance can also resubscribe a
+reconnected Launchpad to Bome's already-open input. It requires one unambiguous
+owned Bome input and the existing MIDI Through output. Before that initial
+verification, it waits for the project instead of opening an input on its behalf.
+For an explicit manual repair, use `bin/bome-validation-route --reconnect --apply`.
+This repairs an ALSA subscription; it does not rescan Wine's MIDI device list.
+If Wine cannot enumerate newly added hardware, restart the full session after
+saving. Hardware already connected at startup and later replugged is the
+tested reconnect case.
+
 Missing hardware, a stopped Bome, or an unavailable route leaves Ableton open
 for audio work and saving. State changes appear in the session log as
 `midi_routing=waiting` or `midi_routing=ready`. Maintenance is disabled by

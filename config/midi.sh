@@ -2,6 +2,7 @@
 # Optional MIDI route maintenance; sourced by the guarded supervisor.
 waydaw_midi_next_check=0
 waydaw_midi_status=""
+waydaw_midi_input_verified=0
 waydaw_midi_mode() {
   local mode="off" config_file="${XDG_CONFIG_HOME:-$HOME/.config}/waydaw/midi-route"
   if [[ ${WAYDAW_MIDI_ROUTE+x} ]]; then
@@ -20,13 +21,16 @@ waydaw_midi_mode() {
 
 waydaw_maintain_midi_routes() {
   local root="$1" mode="$2" with_bome="$3" report status
+  local -a reconnect=()
   [[ "$mode" == bome && "$with_bome" == 1 ]] || return 0
   (( SECONDS >= waydaw_midi_next_check )) || return 0
   # The Python helper checks session and application ownership before every
   # change. Unavailable ports must leave Ableton open for audio and saving.
   status=waiting
-  if report="$(timeout --kill-after=1 2 python3 "$root/config/midi-routing.py" route --mode bome --apply 9>&- 2>&1)"; then
+  [[ "$waydaw_midi_input_verified" != 1 ]] || reconnect=(--reconnect)
+  if report="$(timeout --kill-after=1 2 python3 "$root/config/midi-routing.py" route --mode bome --apply "${reconnect[@]}" 9>&- 2>&1)"; then
     status=ready
+    waydaw_midi_input_verified=1
   fi
   waydaw_midi_next_check=$((SECONDS + 2))
   if [[ "$status" != "$waydaw_midi_status" ]]; then
