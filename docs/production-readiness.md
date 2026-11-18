@@ -32,9 +32,12 @@ verified the editor, normal exit, the native DXVK renderer on Intel
 Iris Xe, and WineASIO initialization through PipeWire JACK. Subsequent local
 validation used authorized Live 12.4.16 and confirmed a real 48 kHz recording,
 Max for Live signal processing, native save/reopen/export, and seven physical
-Launchpad pad pairs forwarded unchanged through Bome. The release gates below
-still require reboot/reconnect, the production plugin set, and sustained workload
-acceptance; a release tag remains pending.
+Launchpad pad pairs forwarded unchanged through Bome. Later reboot/reconnect recovery checks and isolated source/project restoration
+are recorded in [reliability validation](reliability-validation-20261118.md).
+Sustained testing exposed audio gaps at the 1024-sample baseline; a separate
+2048-sample candidate is under investigation. The production plugin set and
+sustained workload acceptance remain release gates;
+a release tag remains pending.
 
 The reconstruction uses pinned upstream DXVK 2.7.1. The historical debug DLLs
 carried Wine builtin markers and fell back to a renderer that Ableton

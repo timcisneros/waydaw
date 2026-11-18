@@ -81,7 +81,8 @@ stopped-session preferences, Bome/configuration files, the acceptance project,
 and a source Git bundle. It supplements the stopped full-prefix snapshot from
 2026-11-17; it is not a new full-prefix or off-machine backup.
 
-Still unverified: reboot and USB reconnect behavior, a representative production
-VST2/VST3 collection and custom Bome mappings, round-trip latency, and at least
-four hours of the intended workload with measured dropout/xrun results. No
-claim of sustained recording stability follows from these short signal tests.
+Follow-on [reliability validation](reliability-validation-20261118.md) records
+reboot, reconnect recovery, source/project restoration, and the sustained test.
+The initial short signal tests alone do not establish sustained recording
+stability. Production VST2/VST3 combinations, custom Bome mappings, and physical
+round-trip latency require their own acceptance evidence.
