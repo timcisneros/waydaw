@@ -61,12 +61,17 @@ raising only the owned audio threads' normal scheduling priority to nice -10
 did not remove the gaps; that trial ended with the process, and no priority
 change was retained.
 
-A separate candidate requests a 2048-sample quantum and preferred ASIO buffer,
-using the same ordinary scheduling fallback. This is supplied only to the
-validation launch; the normal launch profile remains unchanged pending
-acceptance. Its four-hour measurement started at 09:16:14 local time, with a
-ten-second startup allowance. The runner stops early if a measured steady
-xrun or signal gap appears. This candidate has not yet passed sustained acceptance.
+A separate 2048-sample candidate, still using ordinary scheduling, also
+encountered a gap after about six minutes and stopped automatically. Neither
+ordinary-scheduling buffer setting has passed sustained acceptance.
+
+A controlled follow-on trial applies RTKit round-robin scheduling only to the
+owned audio-processing threads: AudioCalc priority 10 and the PipeWire data loop
+priority 9, with the daemon's bounded CPU-time budget. Its 2048-sample four-hour
+measurement started at 09:26:21 local time, with a ten-second startup allowance.
+The normal launch profile remains unchanged. This scheduling experiment has not
+been promoted; it requires sustained acceptance and a guarded persistent
+implementation before normal use.
 
 The current probe confines generated tones to Live and its capture ports. A
 zero-only port keeps the hardware audio clock active without sending the test
