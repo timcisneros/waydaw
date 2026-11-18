@@ -34,8 +34,10 @@ validation used authorized Live 12.4.16 and confirmed a real 48 kHz recording,
 Max for Live signal processing, native save/reopen/export, and seven physical
 Launchpad pad pairs forwarded unchanged through Bome. Later reboot/reconnect recovery checks and isolated source/project restoration
 are recorded in [reliability validation](reliability-validation-20261118.md).
-Sustained testing exposed audio gaps at the 1024-sample baseline; a separate
-2048-sample candidate is under investigation. The production plugin set and
+Sustained testing exposed audio gaps with ordinary scheduling at both 1024 and
+2048 samples. A scoped realtime 2048-sample trial also stopped after about two
+hours and six minutes on a signal/clock discontinuity; the measurement client's
+contribution remains under investigation. The production plugin set and
 sustained workload acceptance remain release gates;
 a release tag remains pending.
 

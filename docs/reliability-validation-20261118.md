@@ -77,13 +77,28 @@ volume actions in a separate silent test produced neither the notification nor
 signal loss, so the cause is unconfirmed. PipeWire's JACK implementation derives
 this callback from the [shared driver's counter](https://github.com/PipeWire/pipewire/blob/1.6.11/pipewire-jack/src/pipewire-jack.c#L1965).
 
-The restarted measurement began at 10:19:57 local time. It now records frame-clock
-continuity, owned-client errors, shared-driver reports, and audio-control events
-separately. It stops immediately on measured signal/clock loss or owned-client
-error increases. Shared-driver notifications remain in the final acceptance
-check and require review; this refinement does not establish a passing result.
-The normal launch profile remains unchanged pending sustained acceptance and a
-guarded persistent scheduling implementation.
+The refined measurement began at 10:19:57 local time and stopped automatically at
+12:26:32, after about two hours and six minutes. The first failure included a
+2048-sample gap in the captured return, a frame-clock discontinuity, and increased
+error counts on both Ableton and the measurement client. The saved native
+recording also contains a discontinuity around that event. All 125 hardware MIDI
+inquiries succeeded, but sustained audio acceptance failed.
+
+The measurement client was still explicitly using ordinary scheduling while
+Ableton's selected audio threads had realtime priorities. Its contribution to
+the failure needs isolation before attributing the cause to Ableton. Volume-key
+causality remains unconfirmed. Short CPU-load comparisons with and without
+realtime probe scheduling did not reproduce the failure. The pending final check
+was cancelled when this failure was inspected; the stopped attempt and its
+evidence were preserved. The temporary priorities on the matching experimental
+threads were then restored to ordinary scheduling.
+
+The monitor records frame-clock continuity, owned-client errors, shared-driver
+reports, and audio-control events separately. It stops on measured signal/clock
+loss or owned-client error increases. Shared-driver notifications also remain in
+the final acceptance check and require review. The normal launch profile remains
+unchanged pending sustained acceptance and a guarded persistent scheduling
+implementation.
 
 The current probe confines generated tones to Live and its capture ports. A
 zero-only port keeps the hardware audio clock active without sending the test
