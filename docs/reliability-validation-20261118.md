@@ -367,6 +367,15 @@ replies, and 14 positive-duration native MIDI notes passed. This qualifies the
 calibrated start for a longer check. The earlier failed take and sustained
 results remain part of the acceptance record.
 
+The first five-minute calibrated run stopped about 53 seconds after Record.
+A shared driver report coincided with a 1024-sample return gap and a frame
+clock jump. The source waveform stayed continuous. The saved WAV failed its
+tone check in window 52, before Stop. A repeat with PipeWire cycle tracing
+completed 313 steady seconds on both references, all 315 native windows, and
+six hardware replies with 42 native MIDI notes. Stop and Save held the
+calibrated counters steady. The trace never reproduced the earlier dropout,
+so it cannot attribute that fault. Sustained acceptance remains open.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
