@@ -349,6 +349,24 @@ and frame-clock jumps while Live and hardware errors increased. The comparison
 qualifies the performance hold for further testing. Sustained acceptance and
 the cause of the earlier recordings' dropouts remain open.
 
+An isolated two-minute performance check with the RR9 reference pair
+completed Record, Stop, and Save. All 117 checked native windows were clean.
+A five-minute ASIO/MIDI qualification then completed the steady reference
+interval, all five hardware inquiries, and observed Stop and Save. The
+finalized recording failed its native PCM check at second 16. Live had
+started recording before the reference calibration finished, and the raw
+observer trace shows a 1024-sample gap and frame-clock jump during that
+interval. The steady and finalization results remain clean. The full
+qualification failed, and its native recording was preserved.
+
+A separate bounded qualification kept transport stopped through calibration
+and five clean pre-roll seconds before Record. Both references then measured
+73 clean seconds after the conservative Record boundary. Stop and Save kept
+the calibrated counters steady. All 75 whole-second WAV windows, two hardware
+replies, and 14 positive-duration native MIDI notes passed. This qualifies the
+calibrated start for a longer check. The earlier failed take and sustained
+results remain part of the acceptance record.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
