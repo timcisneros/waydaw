@@ -256,6 +256,27 @@ control hit its time bound and remains an incomplete attempt. These short result
 do not overturn the failed four-hour finalization gate or justify another long
 trial without a concrete audio diagnosis. The normal profile is unchanged.
 
+### Ordinary scheduling recording failure
+
+A bounded recording test captured a dropout about 11 seconds after Record,
+before any Stop or Save action. Live used ordinary scheduling at 1024 samples
+and 48 kHz, and the independent asynchronous reference clients used RR9.
+The observer recorded 1024 consecutive zero samples and a frame-clock jump.
+The source stayed continuous across the event, and the finalized native WAV
+also contained a discontinuity near second 10.
+
+PipeWire profiling placed the missed cycle in Live's processing path. The node
+woke 6.10 ms after the graph signaled it and took a further 22.03 ms to report
+completion, for 28.13 ms against a nominal 21.33 ms cycle. These are elapsed
+times, which can include waits as well as CPU work. Both the hardware driver
+and Live error counters increased. The profile identifies the missed deadline
+during recording. The earlier dropout at Stop remains unresolved.
+
+The next bounded comparison isolates Live's PipeWire callback priority while
+keeping its audio workers at ordinary priority. The comparison was prepared
+with temporary grants and ownership checks. Linux administrator access was
+unavailable for that run, so it remains untested.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
