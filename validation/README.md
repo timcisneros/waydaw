@@ -26,7 +26,10 @@ python3 -m unittest discover -s tests -p test_audio_meter.py -v
 
 The tests inject buffer loss, a phase jump at a window boundary, a clock skip,
 valid clock wraparound, a nonfinite sample, and channel loss without starting an
-audio server. The monitor uses a bounded, prefaulted observation array and
+audio server. Separate protocol tests use a fake JACK client to verify completion
+ordering, continued hold observations and reports after the requested endpoint.
+Run them with `python3 -m unittest discover -s tests -p test_audio_diagnostic_protocol.py -v`.
+The monitor uses a bounded, prefaulted observation array and
 reports whether its measurement memory was locked. Its audio callback performs
 no allocation, locking or file I/O.
 
@@ -68,10 +71,23 @@ error count. Missing observer callbacks also make captured-sample duration diffe
 from elapsed wall time; preserve both time bases.
 
 The optional `--hold` argument emits `measurement_complete` after the requested
-observations, then retains its ports until SIGTERM or another 30 seconds. This
-allows the caller to stop native recording before removing the observer changes
-the graph. The monitor also enforces a wall-clock limit of the requested duration
-plus 60 seconds. Clip-edge fades must be disabled for the continuous reference:
+observations, then retains its ports until SIGTERM or another 30 seconds. It
+continues publishing observations with `phase: "hold"`; earlier rows have
+`phase: "measurement"`. The completion event includes the last measurement's
+monotonic timestamp. The final event includes the notification count sampled
+before client deactivation. The extra observation storage is bounded and locked
+with the measurement storage.
+
+Keep observing while stopping and saving the native recording, and record each
+action's monotonic interval and before/after client counters. A clean requested
+interval followed by an unexplained final counter increase is an incomplete
+acceptance result. A single counter read after several actions cannot identify
+which action caused it. Wait for a complete observation after the final action
+before removing the clients. This avoids both a blind finalization interval and
+port removal changing the graph while native recording is active.
+
+The monitor also enforces a wall-clock limit of the requested duration plus
+60 seconds. Clip-edge fades must be disabled for the continuous reference:
 the calibration should verify loop boundaries before any fault is attributed.
 
 A short comparison validates the measurement setup. Sustained acceptance still

@@ -14,7 +14,7 @@ static jack_client_t *client;
 static jack_port_t *inputs[2], *silence;
 static struct audio_meter meter;
 static struct audio_observation *records;
-static unsigned limit, completed;
+static unsigned limit, capacity, completed;
 static atomic_uint published, driver_notifications;
 static volatile sig_atomic_t stopped;
 
@@ -42,7 +42,7 @@ static int process(jack_nframes_t count, void *unused)
     memset(jack_port_get_buffer(silence, count), 0, count * sizeof(float));
     for (unsigned i = 0; i < count; ++i) {
         struct audio_observation observation;
-        if (audio_meter_sample(&meter, left[i], right[i], &observation) && completed < limit) {
+        if (audio_meter_sample(&meter, left[i], right[i], &observation) && completed < capacity) {
             records[completed++] = observation;
             atomic_store_explicit(&published, completed, memory_order_release);
         }
@@ -60,10 +60,11 @@ int main(int argc, char **argv)
     long seconds = strtol(argv[1], &end, 10);
     if (!argv[1][0] || *end || seconds < 1 || seconds > 21600) return 2;
     limit = (unsigned)seconds;
-    records = calloc(limit, sizeof(*records));
+    capacity = limit + (hold ? 30 : 0);
+    records = calloc(capacity, sizeof(*records));
     if (!records) return 3;
-    for (unsigned i = 0; i < limit; ++i) records[i].second = UINT32_MAX;
-    bool records_locked = mlock(records, limit * sizeof(*records)) == 0;
+    for (unsigned i = 0; i < capacity; ++i) records[i].second = UINT32_MAX;
+    bool records_locked = mlock(records, capacity * sizeof(*records)) == 0;
     bool meter_locked = mlock(&meter, sizeof(meter)) == 0;
     jack_status_t status = 0;
     client = jack_client_open("waydaw-audio-monitor", JackNoStartServer | JackUseExactName, &status);
@@ -88,20 +89,20 @@ int main(int argc, char **argv)
         unsigned ready = atomic_load_explicit(&published, memory_order_acquire);
         while (consumed < ready) {
             const struct audio_observation *s = &records[consumed++];
-            printf("{\"second\":%u,\"graph_frame\":%u,\"monotonic_ns\":%llu,\"rms\":%.10f,\"right_rms\":%.10f,\"tone_energy_fraction\":%.12f,\"max_zero_run\":%u,\"nonfinite_samples\":%u,\"clock_discontinuities\":%u,\"phase_step_radians\":%.10g,\"longest_callback_interval_us\":%.3f,\"channel_difference_rms\":%.10g,\"driver_notifications_seen_by_reader\":%u}\n",
-                s->second, s->graph_frame, (unsigned long long)s->monotonic_ns, s->rms,
+            printf("{\"second\":%u,\"phase\":\"%s\",\"graph_frame\":%u,\"monotonic_ns\":%llu,\"rms\":%.10f,\"right_rms\":%.10f,\"tone_energy_fraction\":%.12f,\"max_zero_run\":%u,\"nonfinite_samples\":%u,\"clock_discontinuities\":%u,\"phase_step_radians\":%.10g,\"longest_callback_interval_us\":%.3f,\"channel_difference_rms\":%.10g,\"driver_notifications_seen_by_reader\":%u}\n",
+                s->second, s->second <= limit ? "measurement" : "hold",
+                s->graph_frame, (unsigned long long)s->monotonic_ns, s->rms,
                 s->right_rms, s->tone_fraction, s->max_zero_run, s->nonfinite,
                 s->clock_discontinuities, s->phase_step_radians, s->longest_callback_interval_us,
                 s->channel_difference_rms, atomic_load(&driver_notifications));
+            if (consumed == limit) {
+                complete_ns = monotonic_ns();
+                printf("{\"event\":\"measurement_complete\",\"seconds_observed\":%u,\"measurement_end_monotonic_ns\":%llu}\n",
+                    limit, (unsigned long long)s->monotonic_ns);
+            }
         }
         uint64_t now = monotonic_ns();
-        if (consumed == limit) {
-            if (!complete_ns) {
-                complete_ns = now;
-                printf("{\"event\":\"measurement_complete\",\"seconds_observed\":%u}\n", consumed);
-            }
-            if (!hold || now - complete_ns >= UINT64_C(30000000000)) break;
-        }
+        if (complete_ns && (!hold || now - complete_ns >= UINT64_C(30000000000))) break;
         if (now - started_ns > (limit + UINT64_C(60)) * 1000000000) {
             fprintf(stderr, "Measurement exceeded wall-clock deadline\n");
             result = 8; break;
@@ -109,12 +110,15 @@ int main(int argc, char **argv)
         struct timespec pause = {0, 100000000};
         nanosleep(&pause, NULL);
     }
+    unsigned final_notifications = atomic_load(&driver_notifications);
     jack_deactivate(client);
-    printf("{\"event\":\"finished\",\"seconds_observed\":%u,\"interrupted\":%s}\n", consumed, consumed < limit ? "true" : "false");
+    printf("{\"event\":\"finished\",\"seconds_observed\":%u,\"requested_seconds\":%u,\"hold_seconds_observed\":%u,\"driver_notifications_seen_by_reader\":%u,\"interrupted\":%s}\n",
+        consumed, limit, consumed > limit ? consumed - limit : 0,
+        final_notifications, consumed < limit ? "true" : "false");
     if (!result && stopped && consumed < limit) result = 130;
 close:
     jack_client_close(client);
-    if (records_locked) munlock(records, limit * sizeof(*records));
+    if (records_locked) munlock(records, capacity * sizeof(*records));
     if (meter_locked) munlock(&meter, sizeof(meter));
     free(records);
     return result;

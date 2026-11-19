@@ -135,6 +135,31 @@ bounded guard checks the known active PCM payload separately from final WAV
 validation. This qualification validates the corrected test setup; a complete
 sustained result is still required.
 
+The corrected four-hour run completed 14,400 clean steady seconds in each
+independent reference client. Its saved mono 24-bit recording is 14,418.837
+seconds long; all 14,412 checked whole-second windows are clean. The native set
+contains the expected 1,680 positive-duration MIDI notes and all 240 hardware
+inquiries returned through Bome.
+
+Full acceptance nevertheless failed at finalization: hardware errors increased
+from 90 to 92 and Live errors from 93 to 105 between the final steady snapshot
+and the counter read after Stop/Save. Neither reference's client-error count
+increased. The original failed status is preserved. The former hold mode kept
+ports alive but stopped publishing observations at the requested endpoint, so
+those reports cannot yet be attributed precisely. Both diagnostic clients now
+continue publishing separately marked hold observations, with regression tests
+for the protocol. Clean four-hour content does not override the failed final gate.
+
+A subsequent bounded comparison did not reach measurement: sequentially
+reapplying the temporary RTKit priorities caused Live to exit with code 137.
+The saved owned project had already been backed up and verified. That private
+regrant action was disabled, and Live was reopened through the unchanged normal
+desktop launcher with ordinary scheduling. The exact kill cause and a safe
+scheduling transition need validation before a persistent helper is accepted.
+The [Linux realtime CPU limit](https://man7.org/linux/man-pages/man2/getrlimit.2.html)
+can terminate a realtime task that consumes its budget without blocking; this
+remains a hypothesis for the observed exit, rather than an established cause.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
@@ -150,9 +175,10 @@ project changes. A temporary sleep inhibitor lasts only for the test. It leaves
 Ableton open, saves the owned project when it can verify it, and removes its
 own audio/MIDI clients when finished. It does not close another project.
 
-Evidence, source and build provenance for the measurement client, and live
-`soak-status.json` are under
-`~/.local/state/waydaw/reliability-validation-20261118/`.
+Evidence, source and build provenance are under
+`~/.local/state/waydaw/reliability-validation-20261118/`. The corrected run's
+status is `native-isolation/io-soak-status.json` there. The root `soak-status.json`
+and earlier attempt directories preserve the prior failed measurement.
 No representative third-party plugin collection or external audio interface
 was available for this test. Those combinations and physical round-trip latency
 remain separate acceptance work when that production equipment is available.
