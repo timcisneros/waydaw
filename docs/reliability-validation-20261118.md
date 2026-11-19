@@ -370,11 +370,17 @@ results remain part of the acceptance record.
 The first five-minute calibrated run stopped about 53 seconds after Record.
 A shared driver report coincided with a 1024-sample return gap and a frame
 clock jump. The source waveform stayed continuous. The saved WAV failed its
-tone check in window 52, before Stop. A repeat with PipeWire cycle tracing
+tone check in window 52, before Stop. Fitting both test tones to the saved
+waveform located a 1024-frame skip at 52.544 seconds, exactly one graph
+quantum. A repeat with PipeWire cycle tracing
 completed 313 steady seconds on both references, all 315 native windows, and
 six hardware replies with 42 native MIDI notes. Stop and Save held the
 calibrated counters steady. The trace never reproduced the earlier dropout,
 so it cannot attribute that fault. Sustained acceptance remains open.
+
+A follow-up idle trace recorded both the PipeWire driver and Live callback
+context switches against the graph clock. Across 6897 cycles, neither counter
+increased. That interval supplied no missed cycle to attribute.
 
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
