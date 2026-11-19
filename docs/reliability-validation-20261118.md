@@ -339,6 +339,16 @@ timing margin improved during the temporary hold. Causality for the previous
 dropouts remains unresolved. The hold was released and the original desktop
 power state verified.
 
+A follow-up reversed the order on the same synchronous Live session and used
+independent RR9 source and observer threads in both runs. The performance hold
+completed Record, Stop, and Save with 72 clean native PCM windows and unchanged
+error counters. Live finished within 3.94 ms on all 3617 matched recording
+cycles. After releasing the hold, the power-saver control stopped before Record.
+The source signal stayed continuous, and the observer captured zero samples
+and frame-clock jumps while Live and hardware errors increased. The comparison
+qualifies the performance hold for further testing. Sustained acceptance and
+the cause of the earlier recordings' dropouts remain open.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
