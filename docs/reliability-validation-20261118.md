@@ -208,6 +208,51 @@ remain gated on an actual full pass. Earlier failed trials retain their failed
 status, and the original rare steady-state dropout remains unexplained. Code CI
 success is separate from audio acceptance.
 
+### Scheduling transition follow-up
+
+A later bounded comparison stopped during setup, before recording: the system
+RTKit daemon exited on SIGKILL while granting the third application thread.
+Live survived. Two grants had been acknowledged, but the third had already taken
+effect before its D-Bus reply was lost. The caller's cleanup removed that
+unacknowledged grant. The private batch now checks all 15 snapshotted roles on
+failure, and a controlled test discarded the reply after a real third grant.
+It verified all 15 threads ordinary before resuming Live and before removing the
+reference clock. This hardens the experiment; it is not a persistent helper or
+complete validation of every possible late-reply case.
+
+The normal D-Bus activation restored RTKit without a configuration change.
+Disposable scheduling controls then exposed a repeatable distinction on this
+host, running kernel `7.2.13-200.fc44.x86_64` and RTKit `0.11-70.fc44`:
+when priority was granted to a waiting child, both sleep orders completed nine
+35 ms realtime CPU bursts. When granted to a running child, sleeping 200 ms
+while still RR9 completed all nine bursts, but sleeping only after demotion to
+ordinary scheduling ended in SIGKILL after several bursts. All children used the
+same 200000 microsecond hard budget. A second implementation reproduced the
+running-thread distinction. No budget was increased.
+
+The [Linux scheduler](https://github.com/torvalds/linux/blob/master/kernel/sched/rt.c)
+resets its realtime timeout counter on a realtime wakeup.
+[RTKit 0.11](https://github.com/heftig/rtkit/blob/v0.11/rtkit-daemon.c)
+temporarily promotes its running request handler and then demotes it before
+returning to its event loop. That is consistent with the controlled transition
+pattern, but it does not establish the sender or exact cause of the daemon's
+earlier SIGKILL, Live's older exit 137, or the audio dropout. Read-only kernel
+signal attribution is prepared but remains pending administrator access; it has
+not run. The standalone [comparison procedure](../validation/README.md#realtime-budget-transition-comparison)
+preserves both outcomes and identifies failed/refused requests as inconclusive.
+It grants priority only to its own new diagnostic children and is never invoked
+by the normal launcher or CI.
+
+A corrected bounded audio sequence separately finalized two native recordings
+while playback continued, then stopped playback; both cycles remained clean.
+A subsequent combined recording/playback Stop also stayed clean. Transport
+button states, finalized WAV headers and stable file sizes prove that Record
+actually ended before the separate playback Stop. Hardware/Live/reference
+counters stayed at 205/850/0/0. An earlier sequence with an unintended preliminary
+control hit its time bound and remains an incomplete attempt. These short results
+do not overturn the failed four-hour finalization gate or justify another long
+trial without a concrete audio diagnosis. The normal profile is unchanged.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
