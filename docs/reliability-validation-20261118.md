@@ -281,6 +281,22 @@ and the temporary grants ended. RTKit remained active. This result rules out
 the callback-only profile as an accepted candidate. The source of this SIGKILL
 and the earlier failure at Stop remain unresolved.
 
+Two short comparisons tested the owned set's Max SignalAnalyzer enabled and
+bypassed, then reversed the order. Live used ordinary scheduling and both
+independent reference threads used RR9. With the analyzer enabled in the first
+pair, the observer captured 1024 consecutive zero samples and a frame-clock
+jump before Record. The guard stopped that trial. Both bypassed recordings
+and the enabled recording in the reversed pair completed Record, Stop, and
+Save. All 123 checked native PCM windows across the three finished takes
+were clean. Two Live errors in the reversed bypassed trial preceded the
+steady baseline and did not recur in its measured interval.
+
+The comparison did not reproduce the same fault consistently enough to
+attribute it to the analyzer. Worker timing was retained around Record for
+all 14 AudioCalc threads in both reversed trials, providing clean reference
+captures for a future fault. The analyzer's original state was restored in
+the saved test set. Sustained audio acceptance remains failed.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
