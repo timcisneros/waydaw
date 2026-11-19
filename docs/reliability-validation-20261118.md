@@ -314,6 +314,31 @@ then completed through Stop and Save, with 71 clean native PCM windows. The
 desktop scope eliminates the inherited weight difference from later tests
 but did not eliminate idle errors. Neither change passed sustained acceptance.
 
+With both reference clients and Live at ordinary priority, a temporary
+asynchronous Live node failed about 47 seconds after Record. The observer
+captured 2048 consecutive zero samples. The source remained continuous, and
+Live's error counter increased from 6 to 7 while hardware and reference
+counters held steady. The finalized 48.576-second native WAV also failed its
+tone and phase checks around seconds 45–46. The asynchronous launch was
+reverted after saving the failed take.
+
+A synchronous control with the same source, observer, buffer, and test
+procedure completed Record, Stop, and Save. All 72 checked native PCM windows
+were clean and the measured error counters held steady. This pair rules out
+the tested asynchronous setup for promotion. It leaves the intermittent
+failure under the normal synchronous launch unresolved.
+
+The host was on AC power with a 1.7 GHz CPU ceiling and turbo disabled in
+power-saver mode. A temporary desktop performance hold raised the ceiling to
+4.7 GHz and enabled turbo. The same synchronous recording, Stop, and Save
+check completed with unchanged error counters and 72 clean native PCM
+windows. Live's 99th-percentile graph signal-to-finish time fell from
+3.81 ms to 1.33 ms across approximately 3600 recorded cycles per mode. Both
+short synchronous recordings stayed inside the 21.33 ms cycle budget. The
+timing margin improved during the temporary hold. Causality for the previous
+dropouts remains unresolved. The hold was released and the original desktop
+power state verified.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
