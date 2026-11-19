@@ -38,6 +38,8 @@ jobs:
         run: |
           cc -std=c11 -O2 -Wall -Wextra -Werror validation/audio-monitor.c -ljack -lm -o /tmp/waydaw-audio-monitor
           cc -std=c11 -O2 -Wall -Wextra -Werror validation/audio-source.c -ljack -lm -o /tmp/waydaw-audio-source
+          cc -std=c11 -O2 -Wall -Wextra -Werror validation/rt-budget-transition.c -o /tmp/waydaw-rt-budget-transition
+          python3 -c 'from pathlib import Path; p = Path("validation/rt-budget-transition.py"); compile(p.read_text(), str(p), "exec")'
       - name: Verify sizing shim builds reproducibly
         run: |
           ./compat/ableton-sizing-shim/build.sh

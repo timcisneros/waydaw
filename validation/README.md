@@ -1,7 +1,9 @@
 # Audio isolation diagnostics
 
-These optional tools measure a disposable validation project. They do not change
-the normal launch profile, grant realtime priority, or connect audio ports.
+The optional audio tools measure a disposable validation project. They do not
+change the normal launch profile, grant realtime priority, or connect audio ports.
+The separate scheduling comparison below explicitly grants priority only to
+new disposable diagnostic children.
 
 The earlier measurement client generated the input and captured Live's output in
 the same synchronous graph. A delayed measurement process could therefore affect
@@ -107,3 +109,39 @@ port can keep the real hardware clock active while the application's speaker
 links are disconnected. Preserve source faults separately from application and
 observer faults. `audio-source` supports the same fixed duration and bounded
 `--hold` protocol as the observer.
+
+## Realtime budget transition comparison
+
+This separate Linux diagnostic compares a 200 ms sleep before and after dropping
+from RR9 to ordinary scheduling. Each child has a fixed 200000 microsecond
+realtime limit and nine 35 ms CPU bursts. The driver verifies the new child's
+PID, thread, UID, executable and process birth before granting priority. It
+never attaches to Live, accesses a Wine prefix, changes RTKit configuration or
+updates a normal launch profile. It requires Python's `dbus` module and an
+already running RTKit service.
+
+Build and explicitly run the comparison, using a new evidence directory:
+
+```sh
+cc -std=c11 -O2 -Wall -Wextra -Werror validation/rt-budget-transition.c \
+  -o /tmp/waydaw-rt-budget-transition
+python3 validation/rt-budget-transition.py --run \
+  --binary /tmp/waydaw-rt-budget-transition --output /tmp/waydaw-rt-transition-running
+```
+
+The default grants priority while the child is running. For a separate control,
+wait at least 21 seconds between invocations to respect RTKit's request limit,
+then repeat with `--promotion waiting` and a different output directory. That
+child waits for the parent's command after its grant, waking under realtime
+scheduling. Preserve refusals, service disconnects and unexpected exits as
+inconclusive attempts rather than recording them as a reproduced kernel pattern.
+
+The driver records both exits, completed bursts, request/CPU timestamps, and
+source/binary provenance. `pattern_observed` means the sleep-while-RR control
+completed but the sleep-after-demotion comparison received SIGKILL. It does not
+establish the sender of an earlier unrelated kill, fix the host scheduler, or
+evaluate audio acceptance. A whole pair is bounded; either child is stopped on
+controller error. No realtime comparison runs in CI. Its isolated regression
+checks verify that an ungranted child times out or exits on closed input without
+performing the realtime workload, reject a forged thread ID before any grant,
+and verify child cleanup after a failed request.

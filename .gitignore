@@ -16,3 +16,4 @@ config/__pycache__/
 logs/*
 .local-runners/
 kxstudio-repos_11.2.0_all.deb
+/validation/__pycache__/
