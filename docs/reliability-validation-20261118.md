@@ -160,6 +160,54 @@ The [Linux realtime CPU limit](https://man7.org/linux/man-pages/man2/getrlimit.2
 can terminate a realtime task that consumes its budget without blocking; this
 remains a hypothesis for the observed exit, rather than an established cause.
 
+### Observed finalization result — 2026-11-19
+
+The second four-hour run used the same 1024-sample, 48 kHz candidate and
+independent asynchronous, memory-locked RR9 reference clients. Before recording,
+it verified an active owned hardware clock, briefly quiesced only the owned Live
+engine, applied the bounded RR10/RR9 grants as a batch, and resumed the engine.
+This avoided the sequential-regrant failure in bounded qualifications. It is a
+private experimental transition, not an accepted startup implementation.
+
+Both references completed 14,400 clean steady seconds. The finalized mono 24-bit
+recording contains 14,413.248 seconds of audio; all 14,407 checked whole-second
+windows are clean. All 240 hardware inquiries succeeded, and the native set
+contains the expected 1,680 positive-duration MIDI notes.
+
+**Full acceptance failed during Stop.** The independently observed hold interval
+captured a real return-signal gap and frame-clock discontinuity. Hardware errors
+increased from 144 to 145 and Live errors from 433 to 440; the reference clients'
+own error counts stayed zero. Startup calibration had produced one shared-driver
+notification in each reference, so acceptance compared subsequent measurement
+and hold rows with each reference's own second-20 baseline. New reports and the
+measured signal loss failed that gate. Clean saved content does not override it.
+
+The guard stopped only its owned measurement, saved the test set, and restored
+all 15 experimental application threads to ordinary scheduling before removing
+the reference clock. The failed status, raw observations and stopped native
+project were preserved and backed up. No long audio trial is running, and the
+once-only checkpoint is disabled with no next run time.
+
+A short display-off/on comparison without a transport change stayed clean. A
+separate 22-second native recording reproduced a return gap and increased errors
+when Stop was clicked without waking or focusing the display. Read-only thread
+timing sampled a file flush and increased audio-callback CPU time near that
+event, with little measured run-queue delay. These observations narrow the next
+bounded comparisons; they do not establish a filesystem, scheduler, Max device,
+or display cause. An external Windows read initially returned a sharing violation
+for Live-held recording files. Closing the saved owned set and reopening it
+released those handles and allowed the read, so a persistent filesystem
+permission failure was not demonstrated. Repeated short recording/Stop/Save
+cycles after that fresh reload stayed clean, including bounded user-mode CPU
+sampling of the owned main and audio-callback threads. This suggests session
+state as a comparison target, but does not establish a cause or certify a fix.
+
+The normal launch profile remains unchanged. Native reopen/export acceptance
+for a passing sustained candidate and a guarded persistent scheduling helper
+remain gated on an actual full pass. Earlier failed trials retain their failed
+status, and the original rare steady-state dropout remains unexplained. Code CI
+success is separate from audio acceptance.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
