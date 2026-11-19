@@ -18,7 +18,7 @@ jobs:
           bash -n config/env
           find config compat -name '*.sh' -print0 | xargs -0 -r bash -n
       - name: Install verification tools
-        run: sudo apt-get update && sudo apt-get install -y shellcheck desktop-file-utils gcc-mingw-w64-x86-64 nodejs
+        run: sudo apt-get update && sudo apt-get install -y shellcheck desktop-file-utils gcc-mingw-w64-x86-64 nodejs libjack-jackd2-dev
       - name: Check supported launcher scripts
         run: |
           shellcheck --severity=warning --exclude=SC1090,SC1091 \
@@ -34,6 +34,10 @@ jobs:
         run: ./bin/verify-proton-runner-mode
       - name: Verify KWin controller compatibility
         run: node tests/test_kwin_controller.cjs
+      - name: Build independent audio diagnostics
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror validation/audio-monitor.c -ljack -lm -o /tmp/waydaw-audio-monitor
+          cc -std=c11 -O2 -Wall -Wextra -Werror validation/audio-source.c -ljack -lm -o /tmp/waydaw-audio-source
       - name: Verify sizing shim builds reproducibly
         run: |
           ./compat/ableton-sizing-shim/build.sh

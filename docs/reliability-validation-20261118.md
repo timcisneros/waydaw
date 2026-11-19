@@ -100,9 +100,47 @@ the final acceptance check and require review. The normal launch profile remains
 unchanged pending sustained acceptance and a guarded persistent scheduling
 implementation.
 
-The current probe confines generated tones to Live and its capture ports. A
-zero-only port keeps the hardware audio clock active without sending the test
-tones to the speakers. No microphone input is used. Native recording growth is
+### Isolating the measurement path
+
+New capture-only diagnostics and a native playback/resampling fixture separate
+the signal source from its observer. Seven injected-fault meter tests cover
+signal loss, channel loss, phase continuity and frame-clock handling. The full
+isolated regression suite passed 145 tests.
+
+A controlled 200 ms pause of the synchronous observer caused a hardware xrun.
+The same pause with asynchronous observation caused no hardware or Live errors;
+the native recordings remained clean in both cases. This confirms that the old
+measurement topology could influence the graph. It does not establish the cause
+of the earlier unprovoked recording failure. See the
+[diagnostic procedure](../validation/README.md).
+
+The unchanged normal launch at 1024 samples was then tested with native playback
+and the isolated observer. Within 30 seconds it missed an output deadline:
+hardware and Live error counts increased, while the observer's error count
+stayed zero. Native internal resampling stayed clean. The output stability gap
+therefore remains reproducible without the external signal generator.
+
+A subsequent, temporary 1024-sample trial applies RR10 to owned AudioCalc threads
+and RR9 to the owned PipeWire data loop, with a 200000 microsecond realtime limit.
+It completed a three-minute qualification with zero driver/client error increases
+and clean capture/native content. Sustained acceptance remains pending. These
+priorities have not been added to the normal launcher or promoted as a profile.
+
+A split-source ASIO input/output qualification then completed 60 steady seconds
+with verified RR9 asynchronous source and observer clients. Both reference
+streams stayed continuous, 72 finalized native-recording windows were clean,
+and seven MIDI notes plus a Launchpad/Bome inquiry were captured successfully.
+Live writes its recording payload before finalizing the WAV header, so the
+bounded guard checks the known active PCM payload separately from final WAV
+validation. This qualification validates the corrected test setup; a complete
+sustained result is still required.
+
+The measurement confines generated tones to Live and its capture ports. A
+zero-only observer port keeps the hardware audio clock active without sending
+test tones to the speakers. Separate source and observer clients now report
+their own continuity and use verified scheduling; the ASIO input workload does
+not depend on an ordinary-scheduled combined generator/observer. No microphone
+input is used. Native recording growth is
 tracked across all project recording files: Live can preallocate its next-take
 file before Record starts. A prior watcher attempt that selected an empty
 next-take file was stopped, corrected, and preserved with its evidence.
