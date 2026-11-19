@@ -234,11 +234,14 @@ The [Linux scheduler](https://github.com/torvalds/linux/blob/master/kernel/sched
 resets its realtime timeout counter on a realtime wakeup.
 [RTKit 0.11](https://github.com/heftig/rtkit/blob/v0.11/rtkit-daemon.c)
 temporarily promotes its running request handler and then demotes it before
-returning to its event loop. That is consistent with the controlled transition
-pattern, but it does not establish the sender or exact cause of the daemon's
-earlier SIGKILL, Live's older exit 137, or the audio dropout. Read-only kernel
-signal attribution is prepared but remains pending administrator access; it has
-not run. The standalone [comparison procedure](../validation/README.md#realtime-budget-transition-comparison)
+returning to its event loop. A subsequent read-only kernel trace captured
+`SIGKILL` with `SI_KERNEL` for the disposable child in
+`posix_cpu_timers_work`. The child completed six bursts in the ordinary-sleep
+case and the paired realtime-sleep control completed all nine. Together with
+the child's fixed `RLIMIT_RTTIME`, this attributes the reproduced kill to
+Linux's realtime CPU limit. The earlier RTKit and Live exits and the Stop audio
+dropout remain unresolved. The standalone
+[comparison procedure](../validation/README.md#realtime-budget-transition-comparison)
 preserves both outcomes and identifies failed/refused requests as inconclusive.
 It grants priority only to its own new diagnostic children and is never invoked
 by the normal launcher or CI.
