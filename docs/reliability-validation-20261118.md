@@ -272,10 +272,14 @@ times, which can include waits as well as CPU work. Both the hardware driver
 and Live error counters increased. The profile identifies the missed deadline
 during recording. The earlier dropout at Stop remains unresolved.
 
-The next bounded comparison isolates Live's PipeWire callback priority while
-keeping its audio workers at ordinary priority. The comparison was prepared
-with temporary grants and ownership checks. Linux administrator access was
-unavailable for that run, so it remains untested.
+A subsequent bounded comparison moved only Live's PipeWire callback to RR9,
+keeping its 14 audio workers at ordinary priority. The two reference threads
+used the same RR9 policies as before. The comparison failed about 6.18 seconds
+after Record, when the hardware and Live error counts increased. Live then
+exited with code 137 before the planned Stop. The session supervisor cleaned up
+and the temporary grants ended. RTKit remained active. This result rules out
+the callback-only profile as an accepted candidate. The source of this SIGKILL
+and the earlier failure at Stop remain unresolved.
 
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
