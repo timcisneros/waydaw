@@ -297,6 +297,23 @@ all 14 AudioCalc threads in both reversed trials, providing clean reference
 captures for a future fault. The analyzer's original state was restored in
 the saved test set. Sustained audio acceptance remains failed.
 
+The normal hardware graph also recorded Live and driver errors while transport
+was stopped and the generated source and observer were absent. The controlled
+idle comparison recorded five new Live errors with the analyzer bypassed and
+three after restoring it. Bypass did not eliminate the idle failure. A matched
+cycle in a separate idle trace took 11.45 ms from signal to wakeup and 10.47 ms
+from wakeup to finish, exceeding the nominal 21.33 ms period. The surrounding
+scheduler samples include time on either side of that cycle.
+
+The earlier terminal launch inherited the agent's CPU group with weight 10
+under the desktop application group. The same saved owned set was reopened
+through the normal launcher in a separate desktop application scope, with
+ordinary scheduling. Its first 2700-cycle idle check recorded no errors; the
+second recorded two Live errors and one driver error. A 75-second recording
+then completed through Stop and Save, with 71 clean native PCM windows. The
+desktop scope eliminates the inherited weight difference from later tests
+but did not eliminate idle errors. Neither change passed sustained acceptance.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
