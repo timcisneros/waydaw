@@ -440,6 +440,15 @@ part of the record, and neither setting advances to sustained testing from
 this comparison. The original weight and its runtime drop-in were verified
 after restoration.
 
+A bounded follow-up ran both weights against the same duty-cycled workers
+in a separate user service. The workers averaged 1.50 logical CPUs in each
+case. Both checks completed 73 measured seconds per reference, 75 native
+WAV windows, two hardware replies, 14 saved MIDI notes, and observed Stop
+and Save. The retained scheduler windows showed negligible overlap between
+the load workers and the runnable Live callback. The workload therefore
+did not reproduce the contention seen in the earlier dropout. The load
+service stopped and the original weight was verified after restoration.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
