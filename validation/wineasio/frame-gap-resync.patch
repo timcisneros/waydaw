@@ -10,14 +10,14 @@
 
      /* WineASIO configuration options */
      int                         wineasio_number_inputs;
-@@ -621,6 +624,7 @@
-     /* prime the callback by preprocessing one outbound host bufffer */
-     This->host_buffer_index =  0;
-     This->host_num_samples.hi = This->host_num_samples.lo = 0;
-+    This->jack_frame_seen = false;
+@@ -651,6 +654,7 @@
+     /* switch host buffer */
+     This->host_buffer_index = This->host_buffer_index ? 0 : 1;
 
-     time = timeGetTime();
-     This->host_time_stamp.lo = time * 1000000;
++    This->jack_frame_seen = false;
+     This->host_driver_state = Running;
+     TRACE("WineASIO successfully loaded\n");
+     return 0;
 @@ -1005,6 +1009,8 @@
      }
 
@@ -27,31 +27,27 @@
      This->host_time_info_mode = This->host_can_time_code = FALSE;
 
      if (This->host_callbacks->sendNotification(7, 0, 0, 0))
-@@ -1284,6 +1290,7 @@
-     jack_transport_state_t      jack_transport_state;
-     jack_position_t             jack_position;
-     DWORD                       time;
-+    jack_nframes_t              frame;
-
-     /* output silence if the host callback isn't running yet */
-     if (This->host_driver_state != Running)
-@@ -1292,6 +1299,16 @@
-             memset(jackbridge_port_get_buffer(This->output_channel[i].port, nframes),
-                    0, sizeof (jack_default_audio_sample_t) * nframes);
+@@ -1294,6 +1300,20 @@
          return 0;
-+    }
-+
-+    if (This->host_supports_resync && jackbridge_get_last_frame_time(This->jack_client, &frame))
-+    {
-+        bool missed_cycle = This->jack_frame_seen && frame != This->next_jack_frame;
-+
-+        This->next_jack_frame = frame + nframes;
-+        This->jack_frame_seen = true;
-+        if (missed_cycle)
-+            This->host_callbacks->sendNotification(5, 0, NULL, NULL);
      }
 
++    {
++        jack_nframes_t frame;
++
++        if (This->host_supports_resync && jackbridge_get_last_frame_time(This->jack_client, &frame))
++        {
++            bool missed_cycle = This->jack_frame_seen && frame != This->next_jack_frame;
++
++            This->next_jack_frame = frame + nframes;
++            This->jack_frame_seen = true;
++            if (missed_cycle)
++                This->host_callbacks->sendNotification(5, 0, NULL, NULL);
++        }
++    }
++
      /* copy jack to host buffers */
+     for (i = 0; i < This->wineasio_number_inputs; i++)
+         if (This->input_channel[i].active)
 --- a/jackbridge.c
 +++ b/jackbridge.c
 @@ -172,6 +172,7 @@

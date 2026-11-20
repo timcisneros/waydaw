@@ -72,6 +72,7 @@ WineASIO 1.3.0 tree from the revision above. Use unseeded driver builds,
 the disposable prefix, and the private timer server described above.
 Set `PIPEWIRE_PROPS='{ node.always-process = true node.async = true }'` for
 the test host so the private clock can advance during the injected delay.
+The sample-position and resync patches can be applied in either order.
 
 Run the Windows executable with `basic 0 gap supported` and
 `time 0 gap supported`. The host delays one callback in each run, prints
