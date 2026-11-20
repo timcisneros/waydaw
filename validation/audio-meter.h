@@ -7,12 +7,25 @@
 #include <string.h>
 
 /* One-second measurements. No allocation, locking or I/O in the audio path. */
+struct audio_callback_point {
+    uint32_t frame, expected_frame, count;
+    uint64_t monotonic_ns, previous_monotonic_ns;
+};
+
+struct audio_sample_point {
+    uint32_t frame;
+    uint64_t callback_monotonic_ns;
+    bool known;
+};
+
 struct audio_observation {
     unsigned second, max_zero_run, nonfinite, clock_discontinuities;
     uint32_t graph_frame;
     uint64_t monotonic_ns, graph_position;
     double rms, right_rms, tone_fraction, channel_difference_rms;
     double phase_step_radians, longest_callback_interval_us;
+    struct audio_callback_point first_clock_jump, longest_interval;
+    struct audio_sample_point longest_zero_run_start;
 };
 
 struct audio_meter {
@@ -21,7 +34,9 @@ struct audio_meter {
     uint64_t prior_ns, monotonic_ns, graph_position;
     bool clock_seen, phase_seen[2];
     double energy, right_energy, difference, c[2], s[2], re[2], im[2];
-    double rotation_re[2], rotation_im[2], prior_phase[2], longest_interval_us;
+    double rotation_re[2], rotation_im[2], prior_phase[2];
+    struct audio_callback_point first_clock_jump, longest_interval;
+    struct audio_sample_point zero_run_start, longest_zero_run_start;
 };
 
 static inline void audio_meter_init(struct audio_meter *m, unsigned rate)
@@ -42,9 +57,15 @@ static inline void audio_meter_clock(struct audio_meter *m, uint32_t frame,
 {
     if (m->clock_seen) {
         m->graph_position += (uint32_t)(frame - m->prior_frame);
-        if (frame != (uint32_t)(m->prior_frame + m->prior_count)) ++m->clock_gaps;
-        double interval = (double)(ns - m->prior_ns) / 1000;
-        if (interval > m->longest_interval_us) m->longest_interval_us = interval;
+        struct audio_callback_point point = {
+            .frame = frame, .expected_frame = m->prior_frame + m->prior_count,
+            .count = count, .monotonic_ns = ns, .previous_monotonic_ns = m->prior_ns
+        };
+        if (point.frame != point.expected_frame && ++m->clock_gaps == 1)
+            m->first_clock_jump = point;
+        uint64_t longest_ns = m->longest_interval.monotonic_ns - m->longest_interval.previous_monotonic_ns;
+        if (ns - m->prior_ns > longest_ns)
+            m->longest_interval = point;
     } else m->graph_position = frame;
     m->clock_seen = true;
     m->prior_frame = m->graph_frame = frame;
@@ -52,15 +73,28 @@ static inline void audio_meter_clock(struct audio_meter *m, uint32_t frame,
     m->prior_ns = m->monotonic_ns = ns;
 }
 
-static inline bool audio_meter_sample(struct audio_meter *m, double a, double b,
+static inline bool audio_meter_sample(struct audio_meter *m, double a, double b, unsigned offset,
                                       struct audio_observation *out)
 {
     if (!isfinite(a) || !isfinite(b)) { ++m->nonfinite; a = b = 0; }
     m->energy += a * a;
     m->right_energy += b * b;
     m->difference += (a - b) * (a - b);
-    m->zero_run = fabs(a) < 0.000001 ? m->zero_run + 1 : 0;
-    if (m->zero_run > m->max_zero_run) m->max_zero_run = m->zero_run;
+    if (fabs(a) < 0.000001) {
+        if (m->zero_run++ == 0) {
+            m->zero_run_start = (struct audio_sample_point){
+                .frame = m->graph_frame + offset,
+                .callback_monotonic_ns = m->monotonic_ns,
+                .known = m->clock_seen
+            };
+        }
+        if (m->zero_run > m->max_zero_run) {
+            m->max_zero_run = m->zero_run;
+            m->longest_zero_run_start = m->zero_run_start;
+        }
+    } else {
+        m->zero_run = 0;
+    }
     for (unsigned j = 0; j < 2; ++j) {
         m->c[j] += a * m->re[j];
         m->s[j] += a * m->im[j];
@@ -91,10 +125,17 @@ static inline bool audio_meter_sample(struct audio_meter *m, double a, double b,
         .tone_fraction = m->energy > 0 ? explained / m->energy : 0,
         .channel_difference_rms = sqrt(m->difference / m->rate),
         .phase_step_radians = phase_step,
-        .longest_callback_interval_us = m->longest_interval_us
+        .longest_callback_interval_us =
+            (double)(m->longest_interval.monotonic_ns - m->longest_interval.previous_monotonic_ns) / 1000,
+        .first_clock_jump = m->first_clock_jump,
+        .longest_interval = m->longest_interval,
+        .longest_zero_run_start = m->longest_zero_run_start
     };
     m->position = m->max_zero_run = m->nonfinite = m->clock_gaps = 0;
-    m->energy = m->right_energy = m->difference = m->longest_interval_us = 0;
+    m->energy = m->right_energy = m->difference = 0;
+    m->first_clock_jump = (struct audio_callback_point){0};
+    m->longest_interval = (struct audio_callback_point){0};
+    m->longest_zero_run_start = (struct audio_sample_point){0};
     return true;
 }
 #endif

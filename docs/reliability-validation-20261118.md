@@ -485,6 +485,21 @@ clock discontinuities. The scheduler trace covers the initial counter
 increase. It ends before the flagged hold rows were emitted, so the exact
 cause of the gaps remains unresolved.
 
+Comparing the start and end graph positions of the archived fault windows
+found more missing callback frames than recorded silence. The two
+normal-affinity hold gaps each skipped 3,072 graph frames, and the V2 hold
+gap skipped 5,120. Each contained 1,024 captured silent samples. The source
+clock and waveform stayed continuous in the corresponding intervals.
+
+The source and observer now retain the graph frame and monotonic callback
+time for the first clock discontinuity, the longest callback interval, and
+the first sample of the longest silent run in each window. On an isolated
+PipeWire timer, pausing only the observer caused a 7,168-frame clock skip
+while the source stayed continuous. The callback timestamp located the skip
+957 ms before the observer's one-second window ended. A separate input
+unlink located the first silent sample. Both checks used the private timer
+and a generated signal.
+
 The MIDI bus recorded all 240 hardware replies and 1,680 note-on/off pairs.
 Live's new take contains 217 positive-duration notes and seven zero-duration
 notes. The complete native MIDI sequence stopped after the first 31 batches.

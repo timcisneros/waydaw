@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <time.h>
-#include "audio-meter.h"
+#include "audio-observation-json.h"
 
 /* Capture-only observer. The sole output contains zeros to anchor the real
  * hardware clock while the application's physical outputs are disconnected. */
@@ -42,7 +42,7 @@ static int process(jack_nframes_t count, void *unused)
     memset(jack_port_get_buffer(silence, count), 0, count * sizeof(float));
     for (unsigned i = 0; i < count; ++i) {
         struct audio_observation observation;
-        if (audio_meter_sample(&meter, left[i], right[i], &observation) && completed < capacity) {
+        if (audio_meter_sample(&meter, left[i], right[i], i, &observation) && completed < capacity) {
             records[completed++] = observation;
             atomic_store_explicit(&published, completed, memory_order_release);
         }
@@ -89,12 +89,7 @@ int main(int argc, char **argv)
         unsigned ready = atomic_load_explicit(&published, memory_order_acquire);
         while (consumed < ready) {
             const struct audio_observation *s = &records[consumed++];
-            printf("{\"second\":%u,\"phase\":\"%s\",\"graph_frame\":%u,\"monotonic_ns\":%llu,\"rms\":%.10f,\"right_rms\":%.10f,\"tone_energy_fraction\":%.12f,\"max_zero_run\":%u,\"nonfinite_samples\":%u,\"clock_discontinuities\":%u,\"phase_step_radians\":%.10g,\"longest_callback_interval_us\":%.3f,\"channel_difference_rms\":%.10g,\"driver_notifications_seen_by_reader\":%u}\n",
-                s->second, s->second <= limit ? "measurement" : "hold",
-                s->graph_frame, (unsigned long long)s->monotonic_ns, s->rms,
-                s->right_rms, s->tone_fraction, s->max_zero_run, s->nonfinite,
-                s->clock_discontinuities, s->phase_step_radians, s->longest_callback_interval_us,
-                s->channel_difference_rms, atomic_load(&driver_notifications));
+            audio_observation_write(stdout, s, limit, atomic_load(&driver_notifications));
             if (consumed == limit) {
                 complete_ns = monotonic_ns();
                 printf("{\"event\":\"measurement_complete\",\"seconds_observed\":%u,\"measurement_end_monotonic_ns\":%llu}\n",

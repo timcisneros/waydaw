@@ -101,6 +101,16 @@ driver-notification count is sampled by the reader and is not an application-onl
 error count. Missing observer callbacks also make captured-sample duration differ
 from elapsed wall time; preserve both time bases.
 
+To align a failure with a PipeWire profiler or scheduler trace, use
+`first_clock_discontinuity` for the first skipped or repeated frame in a
+window and `longest_callback_interval_end` for the two callback timestamps
+bounding its largest interval. Each reports the actual and expected 32-bit
+graph frames together with the callback timestamps. `longest_zero_run_start`
+identifies the first silent sample of the longest left-channel run and the
+timestamp of the callback that carried it. A run can begin in an earlier
+window. These points locate the observations in the graph; the return
+client's latency and graph position still matter when attributing a cause.
+
 The optional `--hold` argument emits `measurement_complete` after the requested
 observations, then retains its ports until SIGTERM or another 30 seconds. It
 continues publishing observations with `phase: "hold"`; earlier rows have

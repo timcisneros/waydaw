@@ -64,6 +64,8 @@ static void *feed(void *unused) {
     while (atomic_load(&running)) {
         process_callback(48000, process_arg);
         frame += 48000;
+        /* The first HOLD callback skips a quantum. */
+        if (cycles == 0) frame += 48000;
         /* A report after the requested one-second measurement must remain visible. */
         if (++cycles == 2) xrun_callback(xrun_arg);
         struct timespec pause = {0, 1000000};
@@ -131,10 +133,17 @@ class AudioDiagnosticProtocolTest(unittest.TestCase):
                 self.assertEqual(len(completion), 1)
                 self.assertEqual(rows[completion[0]]["seconds_observed"], 1)
                 self.assertGreater(rows[completion[0]]["measurement_end_monotonic_ns"], 0)
+                self.assertIsNone(rows[completion[0] - 1]["first_clock_discontinuity"])
                 held = [row for row in rows[completion[0] + 1:] if row.get("phase") == "hold"]
                 self.assertGreater(len(held), 0)
                 self.assertLessEqual(len(held), 30)
                 self.assertTrue(all(row["second"] > 1 for row in held))
+                jump = held[0]["first_clock_discontinuity"]
+                self.assertEqual(jump["graph_frame"], 96000)
+                self.assertEqual(jump["expected_graph_frame"], 48000)
+                self.assertEqual(jump["frames"], 48000)
+                self.assertEqual(jump["previous_monotonic_ns"], rows[completion[0]]["measurement_end_monotonic_ns"])
+                self.assertEqual(jump["monotonic_ns"], held[0]["monotonic_ns"])
                 self.assertGreaterEqual(held[-1]["driver_notifications_seen_by_reader"], 1)
                 self.assertEqual(rows[-1]["event"], "finished")
                 self.assertEqual(rows[-1]["requested_seconds"], 1)
