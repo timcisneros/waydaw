@@ -431,6 +431,15 @@ Save passed. The original CPU weight and runtime drop-in were verified after
 restoration. The result supports a reverse-order qualification before any
 sustained test or persistent profile change.
 
+The reverse-order check at weights 400 then 100 passed both recordings.
+Each case completed 133 measured seconds per reference, 135 native WAV
+windows, three hardware replies, 21 native MIDI notes, and observed Stop and
+Save. Callback timing was similar at the two weights. CPU pressure was lower
+than at the original baseline failure. The earlier failure therefore remains
+part of the record, and neither setting advances to sustained testing from
+this comparison. The original weight and its runtime drop-in were verified
+after restoration.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
