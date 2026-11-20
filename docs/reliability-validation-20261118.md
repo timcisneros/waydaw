@@ -449,6 +449,20 @@ the load workers and the runnable Live callback. The workload therefore
 did not reproduce the contention seen in the earlier dropout. The load
 service stopped and the original weight was verified after restoration.
 
+The next comparison placed Live's audio callback and one temporary test
+worker on the same logical CPU. The scheduler trace confirmed the worker ran
+while Live was waiting to be dispatched. Both weights passed the audio, MIDI,
+and Stop/Save checks in each test order. Weight 400 reduced Live's matched
+99th-percentile and longest signal-to-finish times in both orders.
+
+A five-minute weight-400 qualification with that same CPU placement and
+workload passed 313 measured seconds per reference, 315 native WAV windows,
+six hardware replies, and 42 positive-duration native MIDI notes. Stop and
+Save kept the error counters unchanged. The result qualifies the bounded
+same-CPU condition. Normal-affinity and sustained validation remain open.
+The test worker stopped and the original affinity, CPU weight, and power
+state were verified after restoration.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
