@@ -406,6 +406,13 @@ seconds per reference, 135 native WAV windows, three hardware replies, and
 observed Stop and Save. Restricting the mask did not improve callback timing
 in this pair. The original mask was restored, and no dropout was captured.
 
+A bounded scheduler trace filtered to Live's audio callback identified the
+PipeWire hardware-driver thread as the immediate successor in four of the
+eight preemptions lasting at least 1 ms during the measured recording. The
+trace identifies each immediate successor. Other threads can run before Live
+resumes. The recording, saved WAV, MIDI, and observed Stop and Save all
+passed. The trace instance was removed after the run.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
