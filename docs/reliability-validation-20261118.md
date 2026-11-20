@@ -388,8 +388,14 @@ completed 133 measured seconds after Record, all 135 native WAV windows,
 three hardware replies, 21 native MIDI notes, and observed Stop and Save.
 Live's 99th-percentile signal-to-finish time was 1.24 ms under performance
 and 3.62 ms under power-saver across more than 6200 matched recording cycles
-per run. Both graph traces had zero counter increases. The matched RR9
-reference diagnostic remains pending. Sustained acceptance is still open.
+per run. Both graph traces had zero counter increases.
+
+Repeating the pair with both independent reference threads at RR9 also
+completed 133 measured seconds per reference and all 135 native WAV windows
+in each power profile. Both runs saved 21 native MIDI notes from three
+hardware inquiries and kept their error counters steady through Stop and
+Save. Neither dual-thread trace captured a dropout. The fault's cause and
+sustained audio acceptance remain open.
 
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
