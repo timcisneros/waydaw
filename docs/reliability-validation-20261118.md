@@ -593,6 +593,18 @@ two words expected by the ASIO interface. The active driver and launch profile
 retain their previous configuration. The earlier native MIDI loss and audio
 Stop failure still require separate diagnosis.
 
+A 64-bit WineASIO test on a private PipeWire timer reproduced a separate
+failure to notify the host of lost frames. After an injected callback delay,
+the stock driver reported continuous ASIO sample positions and sent no
+resync request even though JACK's frame clock skipped ahead. The
+[resync candidate](../validation/wineasio/frame-gap-resync.patch) sent one
+request after a verified gap to a compatible test host in both callback
+modes. Healthy runs, restarts, and hosts that declined the capability
+received no new requests. The test host also used the request to stop
+and reopen its buffers, then resumed clean callbacks from sample zero.
+The candidate's applicability to Live and the underlying causes of the
+sustained failures remain open.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report

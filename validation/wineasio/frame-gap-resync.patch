@@ -1,0 +1,100 @@
+--- a/asio.c
++++ b/asio.c
+@@ -206,6 +206,9 @@
+     BOOL                        host_time_info_mode;
+     w_int64_t                   host_time_stamp;
+     LONG                        host_version;
++    bool                        host_supports_resync;
++    bool                        jack_frame_seen;
++    jack_nframes_t              next_jack_frame;
+
+     /* WineASIO configuration options */
+     int                         wineasio_number_inputs;
+@@ -621,6 +624,7 @@
+     /* prime the callback by preprocessing one outbound host bufffer */
+     This->host_buffer_index =  0;
+     This->host_num_samples.hi = This->host_num_samples.lo = 0;
++    This->jack_frame_seen = false;
+
+     time = timeGetTime();
+     This->host_time_stamp.lo = time * 1000000;
+@@ -1005,6 +1009,8 @@
+     }
+
+     This->host_callbacks = callbacks;
++    /* kAsioSelectorSupported, kAsioResyncRequest. */
++    This->host_supports_resync = callbacks->sendNotification(1, 5, NULL, NULL) != 0;
+     This->host_time_info_mode = This->host_can_time_code = FALSE;
+
+     if (This->host_callbacks->sendNotification(7, 0, 0, 0))
+@@ -1284,6 +1290,7 @@
+     jack_transport_state_t      jack_transport_state;
+     jack_position_t             jack_position;
+     DWORD                       time;
++    jack_nframes_t              frame;
+
+     /* output silence if the host callback isn't running yet */
+     if (This->host_driver_state != Running)
+@@ -1292,6 +1299,16 @@
+             memset(jackbridge_port_get_buffer(This->output_channel[i].port, nframes),
+                    0, sizeof (jack_default_audio_sample_t) * nframes);
+         return 0;
++    }
++
++    if (This->host_supports_resync && jackbridge_get_last_frame_time(This->jack_client, &frame))
++    {
++        bool missed_cycle = This->jack_frame_seen && frame != This->next_jack_frame;
++
++        This->next_jack_frame = frame + nframes;
++        This->jack_frame_seen = true;
++        if (missed_cycle)
++            This->host_callbacks->sendNotification(5, 0, NULL, NULL);
+     }
+
+     /* copy jack to host buffers */
+--- a/jackbridge.c
++++ b/jackbridge.c
+@@ -172,6 +172,7 @@
+
+ typedef jack_nframes_t (*jacksym_port_get_latency)(jack_port_t*);
+ typedef jack_nframes_t (*jacksym_frame_time)(const jack_client_t*);
++typedef jacksym_frame_time jacksym_last_frame_time;
+
+ // --------------------------------------------------------------------------------------------------------------------
+
+@@ -301,6 +302,7 @@
+
+     jacksym_port_get_latency port_get_latency_ptr;
+     jacksym_frame_time frame_time_ptr;
++    jacksym_frame_time last_frame_time_ptr;
+ } JackBridge;
+
+ static void jackbridge_init(JackBridge* const bridge)
+@@ -443,6 +445,7 @@
+
+     LIB_SYMBOL(port_get_latency)
+     LIB_SYMBOL(frame_time)
++    LIB_SYMBOL(last_frame_time)
+
+     #undef JOIN
+     #undef LIB_SYMBOL
+@@ -1213,3 +1216,12 @@
+         jackbridge_instance()->frame_time_ptr(client);
+     return 0;
+ }
++
++bool jackbridge_get_last_frame_time(const jack_client_t* client, jack_nframes_t* frame)
++{
++    const JackBridge* bridge = jackbridge_instance();
++    if (bridge->last_frame_time_ptr == NULL)
++        return false;
++    *frame = bridge->last_frame_time_ptr(client);
++    return true;
++}
+--- a/jackbridge.h
++++ b/jackbridge.h
+@@ -353,3 +353,4 @@
+
+ jack_nframes_t jackbridge_port_get_latency(jack_port_t* port);
+ jack_nframes_t jackbridge_frame_time(const jack_client_t* client);
++bool jackbridge_get_last_frame_time(const jack_client_t* client, jack_nframes_t* frame);

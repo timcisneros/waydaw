@@ -5,7 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-enum { PERIOD = 1024, OBSERVATIONS = 8, SUPPORTS_TIME_INFO = 7 };
+enum {
+    PERIOD = 1024, COUNTER_OBSERVATIONS = 8, RESYNC_OBSERVATIONS = 24,
+    SELECTOR_SUPPORTED = 1, RESYNC_REQUEST = 5, SUPPORTS_TIME_INFO = 7
+};
 
 typedef struct {
     ULONG hi, lo;
@@ -55,12 +58,14 @@ struct Driver {
 static Driver *driver;
 static HANDLE complete;
 static LONG time_info_mode;
-static LONG written;
+static LONG written, resyncs;
+static unsigned observation_count = COUNTER_OBSERVATIONS;
+static BOOL test_resync, supports_resync, introduce_gap;
 static struct {
     uint64_t getter, notification;
-    LONG result;
+    LONG result, resyncs;
     int has_notification;
-} observations[OBSERVATIONS];
+} observations[RESYNC_OBSERVATIONS];
 
 static uint64_t decode(AsioWords words)
 {
@@ -70,14 +75,17 @@ static uint64_t decode(AsioWords words)
 static void observe(const AsioTime *time)
 {
     LONG index = InterlockedIncrement(&written) - 1;
-    if (index >= OBSERVATIONS)
+    if ((unsigned)index >= observation_count)
         return;
     AsioWords position = {0}, timestamp = {0};
     observations[index].result = driver->methods->position(driver, &position, &timestamp);
     observations[index].getter = decode(position);
     observations[index].has_notification = time != NULL;
     observations[index].notification = time ? decode(time->position) : 0;
-    if (index == OBSERVATIONS - 1)
+    observations[index].resyncs = InterlockedCompareExchange(&resyncs, 0, 0);
+    if (introduce_gap && index == 5)
+        Sleep(185);
+    if ((unsigned)index == observation_count - 1)
         SetEvent(complete);
 }
 
@@ -103,9 +111,14 @@ static void CALLBACK rate_changed(double rate)
 
 static LONG CALLBACK message(LONG selector, LONG value, void *data, double *options)
 {
-    (void)value;
     (void)data;
     (void)options;
+    if (selector == SELECTOR_SUPPORTED)
+        return value == RESYNC_REQUEST && supports_resync;
+    if (selector == RESYNC_REQUEST) {
+        InterlockedIncrement(&resyncs);
+        return supports_resync;
+    }
     return selector == SUPPORTS_TIME_INFO ? time_info_mode : 0;
 }
 
@@ -126,11 +139,14 @@ static int run_cycle(const char *seed_text, uint64_t seed)
         return 1;
     }
     int wrong = 0;
-    for (unsigned int i = 0; i < OBSERVATIONS; i++) {
+    for (unsigned i = 0; i < observation_count; i++) {
         uint64_t expected = seed + i * PERIOD;
-        printf("%s,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%d,%ld\n",
+        printf("%s,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%d,%ld",
                seed_text ? seed_text : "restart", i, expected, observations[i].getter,
                observations[i].notification, observations[i].has_notification, observations[i].result);
+        if (test_resync)
+            printf(",%ld", observations[i].resyncs);
+        putchar('\n');
         if (observations[i].result || observations[i].getter != expected ||
             observations[i].has_notification != time_info_mode ||
             (time_info_mode && observations[i].notification != expected))
@@ -141,11 +157,21 @@ static int run_cycle(const char *seed_text, uint64_t seed)
 
 int main(int argc, char **argv)
 {
-    if (argc != 3 ||
+    test_resync = argc == 5;
+    if ((argc != 3 && !test_resync) ||
         (strcmp(argv[1], "basic") && strcmp(argv[1], "time")) ||
-        (strcmp(argv[2], "0") && strcmp(argv[2], "2147481600") && strcmp(argv[2], "4294965248"))) {
-        fprintf(stderr, "usage: wineasio-clock-host basic|time 0|2147481600|4294965248\n");
+        (strcmp(argv[2], "0") && strcmp(argv[2], "2147481600") && strcmp(argv[2], "4294965248")) ||
+        (test_resync && (strcmp(argv[2], "0") ||
+                         (strcmp(argv[3], "clean") && strcmp(argv[3], "gap")) ||
+                         (strcmp(argv[4], "supported") && strcmp(argv[4], "unsupported"))))) {
+        fprintf(stderr, "usage: wineasio-clock-host basic|time 0|2147481600|4294965248\n"
+                        "       wineasio-clock-host basic|time 0 clean|gap supported|unsupported\n");
         return 1;
+    }
+    if (test_resync) {
+        observation_count = RESYNC_OBSERVATIONS;
+        introduce_gap = strcmp(argv[3], "gap") == 0;
+        supports_resync = strcmp(argv[4], "supported") == 0;
     }
     const CLSID id = {0x48d0c522, 0xbfcc, 0x45cc, {0x8b, 0x84, 0x17, 0xf2, 0x5f, 0x33, 0xe6, 0xe8}};
     if (FAILED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)))
@@ -167,8 +193,13 @@ int main(int argc, char **argv)
         driver->methods->create_buffers(driver, &buffer, 1, PERIOD, &callbacks) == 0) {
         /* Recreate the driver in each process. A replay within the same prepared driver
          * verifies that a new Start resets the sample position. */
-        puts("seed,callback,expected,getter,notification,has_notification,result");
+        const char *columns = "seed,callback,expected,getter,notification,has_notification,result";
+        printf("%s%s\n", columns, test_resync ? ",resync" : "");
         int boundary = run_cycle(argv[2], strtoull(argv[2], NULL, 10));
+        if (test_resync) {
+            introduce_gap = FALSE;
+            Sleep(90);
+        }
         int restart = boundary == 1 ? 1 : run_cycle(NULL, 0);
         if (driver->methods->dispose_buffers(driver) == 0)
             outcome = boundary == 1 || restart != 0 ? 1 : boundary;

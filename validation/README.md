@@ -64,6 +64,27 @@ Start resets the same driver instance to zero. Exit status 2 reports a
 boundary mismatch. Any other nonzero status indicates a setup, restart or
 runtime error. The seed script is for disposable builds only.
 
+## WineASIO resync requests
+
+The same Windows host can check how WineASIO reports a missed JACK cycle.
+Apply [the resync candidate](wineasio/frame-gap-resync.patch) to a scratch
+WineASIO 1.3.0 tree from the revision above. Use unseeded driver builds,
+the disposable prefix, and the private timer server described above.
+Set `PIPEWIRE_PROPS='{ node.always-process = true node.async = true }'` for
+the test host so the private clock can advance during the injected delay.
+
+Run the Windows executable with `basic 0 gap supported` and
+`time 0 gap supported`. The host delays one callback in each run, prints
+the cumulative resync requests, then starts the same driver again without
+the delay. Repeat with `clean` in place of `gap` and `unsupported` in
+place of `supported` to check the control cases. A patched driver should
+request resync on the first resumed callback after a verified gap. Clean
+or unsupported runs should report zero requests. This comparison uses
+[JACK's process-cycle frame time](https://jackaudio.org/api/group__TimeFunctions.html).
+
+The resync request gives a compatible host a chance to recover synchronization
+after data loss. Its handling in the production application remains open.
+
 ## Controlled comparison
 
 1. In an owned test project, loop known 440 Hz audio, optionally with a 997 Hz
