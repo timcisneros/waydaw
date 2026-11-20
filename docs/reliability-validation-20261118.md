@@ -84,6 +84,16 @@ error counts on both Ableton and the measurement client. The saved native
 recording also contains a discontinuity around that event. All 125 hardware MIDI
 inquiries succeeded, but sustained audio acceptance failed.
 
+An exact waveform check of the stopped, backed-up input WAV found one
+2,048-frame advance at 7,589.973 seconds after recording began. The
+remaining captured input follows the same two-tone signal with the new
+phase. The saved track takes its audio directly from ASIO input 1.
+The return monitor retained aggregate statistics. A single silent block
+aligned to the measured 2,048-frame graph quantum reproduces those
+statistics and matches the phase of the missing native input. This
+localizes signal loss to the input recording as well as the return.
+The origin of the missed cycle remains unresolved.
+
 The measurement client was still explicitly using ordinary scheduling while
 Ableton's selected audio threads had realtime priorities. Its contribution to
 the failure needs isolation before attributing the cause to Ableton. Volume-key
@@ -483,6 +493,12 @@ configuration with ordinary Live thread scheduling, temporary CPU weight 400,
 an AC performance hold, and bounded load bursts. Both reference streams passed
 14,413 steady seconds after the recording boundary. The saved 24-bit mono WAV
 lasts 14,415.275 seconds and passed all 14,415 whole-second content checks.
+
+A sample-by-sample audit of the archived input also matched the continuous
+reference waveform across all 691,933,184 frames, including the final
+fractional second, within one 24-bit quantization step. A periodic
+reference can hide a shift by an integer number of seconds, so the
+input content check is used alongside the independent timing evidence.
 
 Full acceptance failed during finalization. The first active `pw-top`
 snapshot collected after the Stop command returned still showed hardware
