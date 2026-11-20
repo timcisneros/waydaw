@@ -413,6 +413,24 @@ trace identifies each immediate successor. Other threads can run before Live
 resumes. The recording, saved WAV, MIDI, and observed Stop and Save all
 passed. The trace instance was removed after the run.
 
+A rolling scheduler trace then froze on a real return dropout during
+pre-roll. At the first affected cycle the hardware-driver thread ran within
+8 microseconds of waking. Live waited about 3.9 ms from wakeup to being
+scheduled, slept about 10.6 ms before an AudioCalc thread woke it, and later
+spent about 10.1 ms runnable off CPU across the next graph deadline. The
+source waveform stayed continuous. The return had 1024 consecutive zero
+samples and two frame-clock jumps. This trace documents the pre-roll failure.
+The earlier untraced recording dropout remains unattributed.
+
+A bounded comparison kept the 1024-frame graph, performance hold, and
+RR9 reference policies fixed while varying only the guarded session's CPU
+weight. At its original weight of 100, the return and saved WAV both failed.
+At weight 400, both references completed 133 measured seconds. All 135
+native windows, three hardware replies, 21 MIDI notes, and observed Stop and
+Save passed. The original CPU weight and runtime drop-in were verified after
+restoration. The result supports a reverse-order qualification before any
+sustained test or persistent profile change.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
