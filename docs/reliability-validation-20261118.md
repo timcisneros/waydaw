@@ -499,6 +499,22 @@ The trial ended, the original CPU weight, all-CPU affinity and power settings
 were verified, and the stopped project and raw evidence were backed up.
 The normal launch profile remains unchanged.
 
+A bounded follow-up compared combined Stop with ending Record before stopping
+playback, then reversed the order. Both comparisons used ordinary scheduling
+for Live and the independent reference clients at 1,024 samples and 48 kHz.
+All four WAVs passed their 84 whole-second content checks. The reference
+streams and client counters stayed clean through each Stop and Save. The
+maximum Live signal-to-finish time was 19.96 ms and 6.63 ms for combined Stop
+and at most 6.89 ms for either of the split steps. The largest combined Stop
+cycle approached the 21.33 ms graph period. The sustained Stop failure remains
+unresolved.
+
+The restarted session still captured 42 of 42 test notes after more than three
+hours. A separate read-only probe confirmed that Wine's MIDI notification queue
+produced and consumed all 14 events in a test burst. The earlier failure began
+near the session age corresponding to a signed 32-bit sample count at 48 kHz.
+That timing is a hypothesis for a boundary comparison.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
