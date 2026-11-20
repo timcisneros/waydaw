@@ -422,6 +422,12 @@ source waveform stayed continuous. The return had 1024 consecutive zero
 samples and two frame-clock jumps. This trace documents the pre-roll failure.
 The earlier untraced recording dropout remains unattributed.
 
+From the Live callback's first wakeup to the missed deadline, the trace
+accounts for 2.02 ms on CPU, 8.15 ms runnable off CPU, and 11.05 ms asleep.
+The PipeWire profiler still showed the callback unfinished at that
+deadline. Those observations localize the pre-roll miss to the graph cycle
+while the hardware-driver thread remained responsive.
+
 A bounded comparison kept the 1024-frame graph, performance hold, and
 RR9 reference policies fixed while varying only the guarded session's CPU
 weight. At its original weight of 100, the return and saved WAV both failed.
@@ -478,12 +484,18 @@ an AC performance hold, and bounded load bursts. Both reference streams passed
 14,413 steady seconds after the recording boundary. The saved 24-bit mono WAV
 lasts 14,415.275 seconds and passed all 14,415 whole-second content checks.
 
-Full acceptance failed at native Stop. The hardware error count increased
-from 424 to 425 and Live's count from 229 to 232 before the planned Save.
-During recovery, the held return stream reported two 1,024-frame gaps with
-clock discontinuities. The scheduler trace covers the initial counter
-increase. It ends before the flagged hold rows were emitted, so the exact
-cause of the gaps remains unresolved.
+Full acceptance failed during finalization. The first active `pw-top`
+snapshot collected after the Stop command returned still showed hardware
+424 and Live 229. The following sample showed hardware 425 and Live 232.
+The sampling process finished about one second after Stop returned.
+The planned Save was skipped. The staged counts narrow the investigation
+to the period after the command returned, with the exact graph cycle
+still unknown. [PipeWire 1.6.11 sampling code](https://github.com/PipeWire/pipewire/blob/1.6.11/src/tools/pw-top.c)
+
+During recovery, the held return stream reported two gaps with 1,024
+captured silent samples and clock discontinuities. The scheduler trace
+ends before those hold rows were emitted. The cause of the gaps remains
+unresolved.
 
 Comparing the start and end graph positions of the archived fault windows
 found more missing callback frames than recorded silence. The two
