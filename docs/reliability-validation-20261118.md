@@ -397,6 +397,15 @@ hardware inquiries and kept their error counters steady through Stop and
 Save. Neither dual-thread trace captured a dropout. The fault's cause and
 sustained audio acceptance remain open.
 
+In the preceding matched power-saver trace, Live's slowest completed cycle
+spent 11.79 ms preempted on a single logical CPU. The cycle still finished
+within its 21.33 ms period. A follow-up on power-saver compared Live's normal
+CPU mask with a temporary restriction of its audio callback to the two
+logical CPUs of a different physical core. Both checks passed 133 measured
+seconds per reference, 135 native WAV windows, three hardware replies, and
+observed Stop and Save. Restricting the mask did not improve callback timing
+in this pair. The original mask was restored, and no dropout was captured.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
