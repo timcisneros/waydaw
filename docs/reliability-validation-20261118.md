@@ -525,6 +525,21 @@ position and at 4 hours 6 minutes passed Record, Stop, Save and all 42 native
 whole-second PCM windows. The saved clips verify both timeline positions.
 The intermittent gap remains part of the failure record.
 
+A clock comparison used a temporary timer-backed PipeWire node for one take
+and the physical ALSA device for the other. The disconnected reference-client
+preflight still followed the existing hardware driver. The recorded comparison
+therefore verified the assigned driver for Live and both references in each
+take. Only the three test clients followed the timer node.
+
+Both takes started at the same verified Arrangement position and used 1,024
+frames at 48 kHz. The 94 whole-second native PCM checks per take passed.
+Both reference clients stayed clean for 105 observed windows per take through
+Record, Stop and Save. PipeWire retained 4,916 matched cycles with the timer
+and 4,918 with the physical device, with no counter increases. Live's
+99th-percentile signal-to-finish times were 3.61 ms and 3.67 ms, respectively.
+The timer was removed, and Live's original physical links and the desktop
+default output were verified. The intermittent fault remains unresolved.
+
 The restarted session still captured 42 of 42 test notes after more than three
 hours. A separate read-only probe confirmed that Wine's MIDI notification queue
 produced and consumed all 14 events in a test burst. The earlier failure began
