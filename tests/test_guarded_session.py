@@ -1349,6 +1349,19 @@ raise SystemExit(0 if Path(os.environ["TEST_MIDI_READY"]).exists() else 1)
             self.wait_for(lambda: Path(self.env["TEST_BRIDGE"]).is_file(), process)
             process.kill()
             process.wait(timeout=2)
+
+            def session_lock_released():
+                path = Path(self.env["XDG_RUNTIME_DIR"]) / "waydaw/session.lock"
+                with path.open("r") as lock:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return False
+                return True
+
+            # A child can briefly hold the inherited lock after the supervisor
+            # dies. Exercise the stale-session check once that handoff is over.
+            self.wait_for(session_lock_released)
             before = self.snapshot()
             result = self.run_command("start")
             self.assertNotEqual(result.returncode, 0, result.stdout)
