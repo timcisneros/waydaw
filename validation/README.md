@@ -35,6 +35,35 @@ The monitor uses a bounded, prefaulted observation array and
 reports whether its measurement memory was locked. Its audio callback performs
 no allocation, locking or file I/O.
 
+## WineASIO sample position
+
+The optional clock test exercises the actual ASIO callbacks and
+`GetSamplePosition` in the 64-bit WineASIO 1.3.0 build. Use a disposable Wine
+prefix, a private Wine runtime, and a private PipeWire server with a timer
+driver at 1,024 frames and 48 kHz. Mark the JACK client with
+`PIPEWIRE_PROPS='{ node.always-process = true }'` so the timer advances without
+hardware ports. Keep WineASIO hardware autoconnection and JACK server
+autostart off.
+
+Use two scratch source trees from [WineASIO commit b5e6681](https://github.com/wineasio/wineasio/tree/b5e668103ad13e6f51f4118ed7090592213e5ca2).
+Apply [the candidate patch](wineasio/sample-position.patch) to one tree.
+Run `python3 validation/wineasio/seed-clock.py /path/to/scratch/asio.c` on
+each tree after applying the patch. It lets the test host initialize the
+counter two callbacks before each boundary. Build and register each driver
+in the disposable environment. Build the Windows test host with MinGW.
+
+```sh
+x86_64-w64-mingw32-gcc -std=c17 -O2 -Wall -Wextra -Werror \
+  validation/wineasio/clock-host.c -lole32 -luuid -o /tmp/wineasio-clock-host.exe
+```
+
+Run the executable with `basic` and `time` modes and starting positions
+`2147481600` and `4294965248` for each mode. Pass `0` to check an unseeded
+build. It prints actual and expected positions, then verifies that a second
+Start resets the same driver instance to zero. Exit status 2 reports a
+boundary mismatch. Any other nonzero status indicates a setup, restart or
+runtime error. The seed script is for disposable builds only.
+
 ## Controlled comparison
 
 1. In an owned test project, loop known 440 Hz audio, optionally with a 997 Hz

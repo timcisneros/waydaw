@@ -546,6 +546,20 @@ produced and consumed all 14 events in a test burst. The earlier failure began
 near the session age corresponding to a signed 32-bit sample count at 48 kHz.
 That timing is a hypothesis for a boundary comparison.
 
+A separate WineASIO regression test used a blank Wine prefix and a private
+PipeWire timer at 1,024 frames and 48 kHz. The stock 64-bit WineASIO 1.3.0
+build crossed the signed 32-bit sample boundary cleanly. At the unsigned
+32-bit boundary, both the ASIO time-info callback and `GetSamplePosition`
+reported zero. At 48 kHz this rollover occurs after about 24 hours and
+51 minutes of continuous driver operation.
+
+The [candidate patch](../validation/wineasio/sample-position.patch) passed
+both boundaries in both callback modes and reset the counter to zero on
+restart. It uses one atomic 64-bit sample position internally and returns the
+two words expected by the ASIO interface. The active driver and launch profile
+retain their previous configuration. The earlier native MIDI loss and audio
+Stop failure still require separate diagnosis.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report

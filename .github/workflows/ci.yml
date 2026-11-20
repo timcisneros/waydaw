@@ -40,6 +40,7 @@ jobs:
           cc -std=c11 -O2 -Wall -Wextra -Werror validation/audio-source.c -ljack -lm -o /tmp/waydaw-audio-source
           cc -std=c11 -O2 -Wall -Wextra -Werror validation/rt-budget-transition.c -o /tmp/waydaw-rt-budget-transition
           python3 -c 'from pathlib import Path; p = Path("validation/rt-budget-transition.py"); compile(p.read_text(), str(p), "exec")'
+          x86_64-w64-mingw32-gcc -std=c17 -O2 -Wall -Wextra -Werror validation/wineasio/clock-host.c -lole32 -luuid -o /tmp/wineasio-clock-host.exe
       - name: Verify sizing shim builds reproducibly
         run: |
           ./compat/ableton-sizing-shim/build.sh

@@ -1,0 +1,89 @@
+--- a/asio.c
++++ b/asio.c
+@@ -27,7 +27,8 @@
+ #include <stdbool.h>
+ #include <stdio.h>
+ #include <errno.h>
+-#include <limits.h>
++#include <stdatomic.h>
++#include <stdint.h>
+ #include <unistd.h>
+ #include <sys/mman.h>
+ #include <sys/resource.h>
+@@ -200,7 +201,7 @@
+     BOOL                        host_can_time_code;
+     LONG                        host_current_buffersize;
+     INT                         host_driver_state;
+-    w_int64_t                   host_num_samples;
++    _Atomic uint64_t            host_num_samples;
+     double                      host_sample_rate;
+     TimeInformation             host_time;
+     BOOL                        host_time_info_mode;
+@@ -620,7 +621,7 @@
+
+     /* prime the callback by preprocessing one outbound host bufffer */
+     This->host_buffer_index =  0;
+-    This->host_num_samples.hi = This->host_num_samples.lo = 0;
++    atomic_store_explicit(&This->host_num_samples, 0, memory_order_relaxed);
+
+     time = timeGetTime();
+     This->host_time_stamp.lo = time * 1000000;
+@@ -879,6 +880,7 @@
+ HIDDEN LONG STDMETHODCALLTYPE GetSamplePosition(LPWINEASIO iface, w_int64_t *sPos, w_int64_t *tStamp)
+ {
+     IWineASIOImpl   *This = (IWineASIOImpl*)iface;
++    uint64_t        samples;
+
+     TRACE("iface: %p, sPos: %p, tStamp: %p\n", iface, sPos, tStamp);
+
+@@ -887,8 +889,9 @@
+
+     tStamp->lo = This->host_time_stamp.lo;
+     tStamp->hi = This->host_time_stamp.hi;
+-    sPos->lo = This->host_num_samples.lo;
+-    sPos->hi = 0; /* FIXME */
++    samples = atomic_load_explicit(&This->host_num_samples, memory_order_relaxed);
++    sPos->lo = (ULONG)samples;
++    sPos->hi = (ULONG)(samples >> 32);
+
+     return 0;
+ }
+@@ -1283,6 +1286,7 @@
+     int                         i;
+     jack_transport_state_t      jack_transport_state;
+     jack_position_t             jack_position;
++    uint64_t                    samples;
+     DWORD                       time;
+
+     /* output silence if the host callback isn't running yet */
+@@ -1301,9 +1305,8 @@
+                     jackbridge_port_get_buffer(This->input_channel[i].port, nframes),
+                     sizeof (jack_default_audio_sample_t) * nframes);
+
+-    if (This->host_num_samples.lo > ULONG_MAX - nframes)
+-        This->host_num_samples.hi++;
+-    This->host_num_samples.lo += nframes;
++    /* Publish the two ASIO words together for GetSamplePosition callers. */
++    samples = atomic_fetch_add_explicit(&This->host_num_samples, nframes, memory_order_relaxed) + nframes;
+
+     time = timeGetTime();
+     This->host_time_stamp.lo = time * 1000000;
+@@ -1311,8 +1314,8 @@
+
+     if (This->host_time_info_mode) /* use the newer swapBuffersWithTimeInfo method if supported */
+     {
+-        This->host_time.numSamples.lo = This->host_num_samples.lo;
+-        This->host_time.numSamples.hi = This->host_num_samples.hi;
++        This->host_time.numSamples.lo = (ULONG)samples;
++        This->host_time.numSamples.hi = (ULONG)(samples >> 32);
+         This->host_time.timeStamp.lo = This->host_time_stamp.lo;
+         This->host_time.timeStamp.hi = This->host_time_stamp.hi;
+         This->host_time.sampleRate = This->host_sample_rate;
+@@ -1634,6 +1637,7 @@
+     }
+
+     pobj->lpVtbl = &WineASIO_Vtbl;
++    atomic_init(&pobj->host_num_samples, 0);
+     pobj->ref = 1;
+     TRACE("pobj = %p\n", pobj);
+     *ppobj = pobj;
