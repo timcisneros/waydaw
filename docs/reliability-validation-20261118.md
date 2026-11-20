@@ -472,6 +472,33 @@ passed, and Live saved 42 notes from six hardware replies. Stop and Save kept
 the error counters steady. The original CPU weight and power state were
 restored. This qualifies the candidate for sustained validation.
 
+The four-hour normal-affinity trial used that same 1,024-sample, 48 kHz
+configuration with ordinary Live thread scheduling, temporary CPU weight 400,
+an AC performance hold, and bounded load bursts. Both reference streams passed
+14,413 steady seconds after the recording boundary. The saved 24-bit mono WAV
+lasts 14,415.275 seconds and passed all 14,415 whole-second content checks.
+
+Full acceptance failed at native Stop. The hardware error count increased
+from 424 to 425 and Live's count from 229 to 232 before the planned Save.
+During recovery, the held return stream reported two 1,024-frame gaps with
+clock discontinuities. The scheduler trace covers the initial counter
+increase. It ends before the flagged hold rows were emitted, so the exact
+cause of the gaps remains unresolved.
+
+The MIDI bus recorded all 240 hardware replies and 1,680 note-on/off pairs.
+Live's new take contains 217 positive-duration notes and seven zero-duration
+notes. The complete native MIDI sequence stopped after the first 31 batches.
+In a disposable copy of the set, a short replay in the same session delivered
+336 note-on/off pairs and 36 hardware replies but produced an empty native
+take. ALSA accepted the events at Live's Wine input with zero allocation
+failures. After a guarded session restart, the same replay saved all 336
+positive-duration notes. A restart recovered MIDI recording. The specific
+failure mechanism within the session remains unresolved.
+
+The trial ended, the original CPU weight, all-CPU affinity and power settings
+were verified, and the stopped project and raw evidence were backed up.
+The normal launch profile remains unchanged.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
@@ -488,9 +515,10 @@ Ableton open, saves the owned project when it can verify it, and removes its
 own audio/MIDI clients when finished. It does not close another project.
 
 Evidence, source and build provenance are under
-`~/.local/state/waydaw/reliability-validation-20261118/`. The corrected run's
-status is `native-isolation/io-soak-status.json` there. The root `soak-status.json`
-and earlier attempt directories preserve the prior failed measurement.
+`~/.local/state/waydaw/reliability-validation-20261118/`. The normal-affinity
+trial's status is `native-isolation/io-weighted-normal-affinity-sustained-status.json`.
+The earlier `native-isolation/io-soak-status.json`, root `soak-status.json` and
+attempt directories preserve preceding measurements.
 No representative third-party plugin collection or external audio interface
 was available for this test. Those combinations and physical round-trip latency
 remain separate acceptance work when that production equipment is available.
