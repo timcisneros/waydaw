@@ -463,6 +463,15 @@ same-CPU condition. Normal-affinity and sustained validation remain open.
 The test worker stopped and the original affinity, CPU weight, and power
 state were verified after restoration.
 
+Weight 400 also passed a five-minute check with Live's original CPU mask.
+The single test worker produced no measured contention in the retained
+scheduler window. A second five-minute check used synchronized bursts across
+the CPUs. Its trace confirmed that test workers ran while Live was runnable.
+Both references completed 313 measured seconds, all 315 native WAV windows
+passed, and Live saved 42 notes from six hardware replies. Stop and Save kept
+the error counters steady. The original CPU weight and power state were
+restored. This qualifies the candidate for sustained validation.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
