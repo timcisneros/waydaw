@@ -509,6 +509,22 @@ and at most 6.89 ms for either of the split steps. The largest combined Stop
 cycle approached the 21.33 ms graph period. The sustained Stop failure remains
 unresolved.
 
+A later comparison applied short, matched CPU-load bursts around each Stop
+action at the beginning of the set. Combined Stop and both split steps kept
+the counters steady. All 44 whole-second native PCM windows passed. The load
+averaged about 1.95 logical cores across the eight workers during each action.
+Live's peak signal-to-finish time was 8.25 ms for combined Stop and 8.61 ms for
+the slower split step. Splitting Stop did not produce a consistent timing
+advantage across the comparisons.
+
+A separate take near 4 hours 3 minutes on the Arrangement timeline stopped
+early during recording, before the planned Stop. The return monitor observed
+a 1,024-frame gap and a clock discontinuity. The finalized 0.96-second native
+input WAV retained the two test tones. Instrumented repeats at the same
+position and at 4 hours 6 minutes passed Record, Stop, Save and all 42 native
+whole-second PCM windows. The saved clips verify both timeline positions.
+The intermittent gap remains part of the failure record.
+
 The restarted session still captured 42 of 42 test notes after more than three
 hours. A separate read-only probe confirmed that Wine's MIDI notification queue
 produced and consumed all 14 events in a test burst. The earlier failure began
