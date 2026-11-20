@@ -97,16 +97,10 @@ int main(int argc, char **argv)
     unsigned consumed = 0;
     while (!stopped) {
         unsigned ready = atomic_load_explicit(&published, memory_order_acquire);
-        while (consumed < ready) {
-            const struct audio_observation *s = &records[consumed++];
-            audio_observation_write(stdout, s, limit, atomic_load(&driver_notifications));
-            if (consumed == limit) {
-                complete_ns = monotonic_ns();
-                printf("{\"event\":\"measurement_complete\",\"seconds_observed\":%u,\"measurement_end_monotonic_ns\":%llu}\n",
-                    limit, (unsigned long long)s->monotonic_ns);
-            }
-        }
+        consumed = audio_observations_drain(stdout, records, consumed, ready, limit,
+                                            &driver_notifications);
         uint64_t now = monotonic_ns();
+        if (!complete_ns && consumed >= limit) complete_ns = now;
         if (complete_ns && (!hold || now - complete_ns >= UINT64_C(30000000000))) break;
         if (now - started_ns > (limit + UINT64_C(60)) * 1000000000) {
             fprintf(stderr, "Measurement exceeded wall-clock deadline\n");
@@ -115,8 +109,16 @@ int main(int argc, char **argv)
         struct timespec pause = {0, 100000000};
         nanosleep(&pause, NULL);
     }
+    int deactivate = jack_deactivate(client);
+    unsigned ready = atomic_load_explicit(&published, memory_order_acquire);
+    consumed = audio_observations_drain(stdout, records, consumed, ready, limit, &driver_notifications);
     unsigned final_notifications = atomic_load(&driver_notifications);
-    jack_deactivate(client);
+    if (deactivate) {
+        fprintf(stderr, "JACK deactivation failed: %d\n", deactivate);
+        if (!result) result = 9;
+    } else if (meter.position && consumed < capacity) {
+        audio_partial_observation_write(stdout, &meter, consumed < limit, final_notifications);
+    }
     printf("{\"event\":\"finished\",\"seconds_observed\":%u,\"requested_seconds\":%u,\"hold_seconds_observed\":%u,\"driver_notifications_seen_by_reader\":%u,\"interrupted\":%s}\n",
         consumed, limit, consumed > limit ? consumed - limit : 0,
         final_notifications, consumed < limit ? "true" : "false");

@@ -500,6 +500,12 @@ while the source stayed continuous. The callback timestamp located the skip
 unlink located the first silent sample. Both checks used the private timer
 and a generated signal.
 
+The clients also retain the captured portion of a window when a failure ends
+a trial early. In a private timer check the observer resumed after a
+deliberate pause and was told to exit before another full second elapsed.
+Its final partial report retained the 6,144-frame clock skip. The source
+stayed continuous and the complete window counts remained accurate.
+
 The MIDI bus recorded all 240 hardware replies and 1,680 note-on/off pairs.
 Live's new take contains 217 positive-duration notes and seven zero-duration
 notes. The complete native MIDI sequence stopped after the first 31 batches.

@@ -1,6 +1,7 @@
 """Exercise diagnostic completion/hold output without an audio server or RT grants."""
 from pathlib import Path
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -31,8 +32,11 @@ FAKE_JACK = r'''
 #define _POSIX_C_SOURCE 200809L
 #include <jack/jack.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 static jack_client_t client;
 static jack_port_t ports[3];
@@ -41,6 +45,7 @@ static int (*process_callback)(jack_nframes_t, void *), (*xrun_callback)(void *)
 static void *process_arg, *xrun_arg;
 static pthread_t worker;
 static atomic_bool running;
+static const char *stop_case;
 jack_client_t *jack_client_open(const char *name, unsigned options, jack_status_t *status, ...) {
     (void)name; (void)options; *status = 0; return &client;
 }
@@ -74,10 +79,29 @@ static void *feed(void *unused) {
     return 0;
 }
 int jack_activate(jack_client_t *c) {
-    (void)c; atomic_store(&running, true); return pthread_create(&worker, 0, feed, 0);
+    (void)c;
+    stop_case = getenv("FAKE_JACK_STOP_CASE");
+    if (stop_case) {
+        unsigned count = strcmp(stop_case, "measurement") == 0 ? 1024 : 48000;
+        process_callback(count, process_arg);
+        frame = count + 1024;
+        process_callback(1024, process_arg);
+        xrun_callback(xrun_arg);
+        /* Deliver shutdown before the reader sees any queued observations. */
+        raise(SIGTERM);
+        return 0;
+    }
+    atomic_store(&running, true);
+    return pthread_create(&worker, 0, feed, 0);
 }
 int jack_deactivate(jack_client_t *c) {
-    (void)c; atomic_store(&running, false); return pthread_join(worker, 0);
+    (void)c;
+    if (stop_case) {
+        xrun_callback(xrun_arg);
+        return strcmp(stop_case, "deactivate-failure") == 0 ? 1 : 0;
+    }
+    atomic_store(&running, false);
+    return pthread_join(worker, 0);
 }
 '''
 
@@ -150,6 +174,56 @@ class AudioDiagnosticProtocolTest(unittest.TestCase):
                 self.assertEqual(rows[-1]["hold_seconds_observed"], len(held))
                 self.assertGreaterEqual(rows[-1]["driver_notifications_seen_by_reader"], 1)
                 self.assertFalse(rows[-1]["interrupted"])
+
+    def observe_early_stop(self, binary, stop_case, result):
+        completed = subprocess.run([str(binary), "1", "--hold"], capture_output=True, text=True,
+                                   timeout=5, env={**os.environ, "FAKE_JACK_STOP_CASE": stop_case})
+        self.assertEqual(completed.returncode, result, completed.stderr)
+        return [json.loads(line) for line in completed.stdout.splitlines()]
+
+    def test_interrupted_measurement_preserves_partial_fault_without_counting_a_second(self):
+        for binary in self.binaries:
+            with self.subTest(binary=binary.name):
+                started, partial, finished = self.observe_early_stop(binary, "measurement", 130)
+                self.assertEqual(started["event"], "started")
+                self.assertEqual(partial["event"], "partial_observation")
+                self.assertEqual(partial["window_phase"], "measurement")
+                self.assertEqual(partial["samples"], 2048)
+                jump = partial["first_clock_discontinuity"]
+                self.assertEqual(jump["expected_graph_frame"], 1024)
+                self.assertEqual(jump["graph_frame"], 2048)
+                self.assertEqual(partial["clock_discontinuities"], 1)
+                self.assertEqual(finished["seconds_observed"], 0)
+                self.assertTrue(finished["interrupted"])
+
+    def test_shutdown_drains_complete_observation_before_partial_hold_fault(self):
+        for binary in self.binaries:
+            with self.subTest(binary=binary.name):
+                _, row, complete, partial, finished = self.observe_early_stop(binary, "hold", 0)
+                self.assertEqual(row["second"], 1)
+                self.assertEqual(complete["event"], "measurement_complete")
+                self.assertEqual(partial["event"], "partial_observation")
+                self.assertNotIn("second", partial)
+                self.assertNotIn("phase", partial)
+                self.assertEqual(partial["window_phase"], "hold")
+                self.assertEqual(partial["samples"], 1024)
+                jump = partial["first_clock_discontinuity"]
+                self.assertEqual(jump["expected_graph_frame"], 48000)
+                self.assertEqual(jump["graph_frame"], 49024)
+                self.assertEqual(jump["previous_monotonic_ns"], complete["measurement_end_monotonic_ns"])
+                self.assertEqual(partial["driver_notifications_seen_by_reader"], 2)
+                self.assertEqual(finished["driver_notifications_seen_by_reader"], 2)
+                self.assertEqual(finished["seconds_observed"], 1)
+                self.assertEqual(finished["hold_seconds_observed"], 0)
+                self.assertFalse(finished["interrupted"])
+
+    def test_deactivation_error_reports_only_completed_windows(self):
+        for binary in self.binaries:
+            with self.subTest(binary=binary.name):
+                _, row, complete, finished = self.observe_early_stop(binary, "deactivate-failure", 9)
+                self.assertEqual(row["second"], 1)
+                self.assertEqual(complete["event"], "measurement_complete")
+                self.assertEqual(finished["event"], "finished")
 
 
 if __name__ == "__main__":

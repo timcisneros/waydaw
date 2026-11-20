@@ -115,9 +115,13 @@ The optional `--hold` argument emits `measurement_complete` after the requested
 observations, then retains its ports until SIGTERM or another 30 seconds. It
 continues publishing observations with `phase: "hold"`; earlier rows have
 `phase: "measurement"`. The completion event includes the last measurement's
-monotonic timestamp. The final event includes the notification count sampled
-before client deactivation. The extra observation storage is bounded and locked
-with the measurement storage.
+monotonic timestamp. On graceful shutdown, the reader drains complete windows
+and reports the captured tail as a `partial_observation` event after successful
+JACK deactivation. The event records the sample count, `window_phase`, and
+fault locations for that fragment. Only numbered complete windows contribute
+to acceptance. The final event includes the notification count sampled after
+deactivation. The extra observation storage is bounded and locked with the
+measurement storage.
 
 Keep observing while stopping and saving the native recording, and record each
 action's monotonic interval and before/after client counters. A clean requested
