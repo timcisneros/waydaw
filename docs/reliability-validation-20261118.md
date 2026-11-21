@@ -593,7 +593,24 @@ The restarted session still captured 42 of 42 test notes after more than three
 hours. A separate read-only probe confirmed that Wine's MIDI notification queue
 produced and consumed all 14 events in a test burst. The earlier failure began
 near the session age corresponding to a signed 32-bit sample count at 48 kHz.
-That timing is a hypothesis for a boundary comparison.
+An archived timestamp comparison places the last good note about 12 seconds
+after the boundary projected from Live's MIDI device-open log. The old WinMM
+clock was never sampled, and the test sent bursts about a minute apart.
+
+A one-time replay in the same guarded session recorded six seven-note bursts
+on each side of that age, measured directly from the WinMM input clock. ALSA
+and Wine's notification queue delivered all 168 note-on and note-off events
+in order. The saved take contained 84 new positive-duration notes in order.
+The audit matched and excluded 84 rehearsal notes that Live copied into the
+new take. A subsequent idle sample of WineASIO's callback confirmed that its
+sample count had also exceeded the signed boundary by the time of sampling.
+
+The after-boundary notes had a median onset 41.7 ms earlier relative to Wine's
+timestamps and the before-boundary group. The rehearsal had a 21.3 ms shift
+around a marker well before the boundary. The cause of these timing shifts is
+unresolved. The replay did not reproduce note loss. Live reopened the original
+saved validation set with transport stopped and its file digest unchanged.
+The earlier sustained MIDI loss and audio Stop/HOLD failures remain open.
 
 A separate WineASIO regression test used a blank Wine prefix and a private
 PipeWire timer at 1,024 frames and 48 kHz. The stock 64-bit WineASIO 1.3.0
