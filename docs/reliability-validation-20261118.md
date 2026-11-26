@@ -635,8 +635,22 @@ request after a verified gap to a compatible test host in both callback
 modes. Healthy runs, restarts, and hosts that declined the capability
 received no new requests. The test host also used the request to stop
 and reopen its buffers, then resumed clean callbacks from sample zero.
-The candidate's applicability to Live and the underlying causes of the
-sustained failures remain open.
+
+A later bounded check loaded the resync candidate in Live through a temporary
+mount namespace and used only copies of the validation set. In the steady
+portion of the recording, the independent source reported continuous graph
+frames. Live acknowledged the resync request for a deliberately induced
+8,192-frame skip and continued recording. The finalized WAV advanced by
+exactly 8,192 source frames about 5.16 seconds into the take. A second take
+on the same route without the induced stall matched the reference at every
+sample within one 24-bit PCM step. Both takes used 1,024 frames at 48 kHz.
+
+The candidate reported the missed cycle but the saved take still lost audio.
+It also requested resync on large frame-number changes around test graph
+reconnections, outside the recorded intervals. The test driver was removed
+with its namespace. The deliberate stall shows how a missed callback can
+become a splice in a saved take. The cause of the spontaneous failures and
+sustained recording acceptance remain open.
 
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
