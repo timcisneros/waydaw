@@ -708,6 +708,26 @@ The separate rounds leave the contribution of the launch hierarchy open.
 The desktop-scope runs provide a baseline for further validation. Sustained
 audio and MIDI acceptance remain open.
 
+The stock desktop configuration subsequently failed a sustained recording
+attempt 21 minutes and 30 seconds after Record. The independent return
+captured 1,024 consecutive zero samples and a graph-clock jump. A complete
+sample audit of the finalized native WAV found one 1,024-frame splice at
+21 minutes and 30.155 seconds into the take. All 22 physical Launchpad
+inquiries returned through Bome. The saved set contained all 154 expected
+positive-duration MIDI notes in order.
+
+A bounded stock follow-up captured a second dropout before its first
+planned hostname-service request. During the first missed graph cycle,
+Live was signaled on time, ran for 0.127 ms, then spent 21.106 ms off CPU
+after preemption through the deadline. The PipeWire profiler captured four
+unfinished Live cycles with 1,024-frame skips. The stopped WAV contains four
+1,024-frame splices. The emergency Save did not retain that take in the
+copied set, and the WAV and scheduler trace were preserved independently.
+The trace establishes a CPU scheduling delay for the first missed deadline.
+It leaves the competing task and the trigger for the sustained failure open.
+The hostname-service comparison did not run, and the launch configuration
+remains stock.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
@@ -724,10 +744,10 @@ Ableton open, saves the owned project when it can verify it, and removes its
 own audio/MIDI clients when finished. It does not close another project.
 
 Evidence, source and build provenance are under
-`~/.local/state/waydaw/reliability-validation-20261118/`. The normal-affinity
-trial's status is `native-isolation/io-weighted-normal-affinity-sustained-status.json`.
-The earlier `native-isolation/io-soak-status.json`, root `soak-status.json` and
-attempt directories preserve preceding measurements.
+`~/.local/state/waydaw/reliability-validation-20261118/`. The sustained stock
+desktop trial's status is `native-isolation/desktop-stock-sustained-status.json`.
+The normal-affinity trial, earlier `native-isolation/io-soak-status.json`, root
+`soak-status.json` and attempt directories preserve preceding measurements.
 No representative third-party plugin collection or external audio interface
 was available for this test. Those combinations and physical round-trip latency
 remain separate acceptance work when that production equipment is available.
