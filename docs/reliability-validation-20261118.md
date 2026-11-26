@@ -697,6 +697,17 @@ before that endpoint. All 34 temporary affinity assignments across the
 two protected takes were restored. The allocation failed the bounded
 graph test and remains outside the normal launch profile.
 
+The next comparison moved the entire test workload into a temporary ordinary
+desktop scope with CPU weight 100, outside the preceding test's CPU weight 10
+ancestor. The driver, input route, load shape and
+audio buffer stayed the same. Both unpinned controls and one protected take
+had continuous saved PCM and clean graph and reference observations through
+the full post-Save tail. The delivered load was 5.26 to 5.39 logical CPUs.
+The protected take used more of the callback period than either control.
+The separate rounds leave the contribution of the launch hierarchy open.
+The desktop-scope runs provide a baseline for further validation. Sustained
+audio and MIDI acceptance remain open.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
