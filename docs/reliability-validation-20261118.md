@@ -677,6 +677,26 @@ All seven takes were audited after Live closed. The callback affinity and
 test links were restored. Neither test treatment passed the full graph
 gate. The original spontaneous failure and sustained acceptance remain open.
 
+A following comparison restricted all 15 verified Live audio threads and
+both reference processing threads to the two siblings of one physical
+core. Six ordinary load workers ran only on the other cores in both the
+control and protected takes. Each control/protected pair delivered CPU
+load within 3.5%, and every take used the same physical driver and the
+stock 1,024-frame, 48 kHz configuration.
+
+Both protected WAVs matched the reference throughout, but both runs had
+an unfinished Live callback with a skipped graph cycle after Stop and
+before Save. In one protected run Live was preempted for 17.91 ms up to
+the missed deadline, with 39 runnable task-state samples in that cycle.
+The first unpinned control had five 1,024-frame splices in its WAV. The
+second control's saved PCM and profiler counters were clean. The profiler
+covered the full post-Save tail in all four takes. Three observer logs
+ended up to 0.71 seconds before the intended tail endpoint at their last
+complete observation. The protected runs already had verified failures
+before that endpoint. All 34 temporary affinity assignments across the
+two protected takes were restored. The allocation failed the bounded
+graph test and remains outside the normal launch profile.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
