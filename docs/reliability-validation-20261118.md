@@ -774,6 +774,24 @@ referenced their WAV and contained seven positive-duration MIDI notes.
 The shorter slice failed the finalization gate. The temporary scopes
 and test graph were removed after both cases.
 
+A recording control kept the transport running through the same 1.1-second
+CPU bursts. Before any Stop command, the ninth burst coincided with a
+missed Live deadline, a driver error increase, and 1,024 silent frames in
+the return capture. The saved 54.4-second WAV has an exact 1,024-frame
+splice at 53.312 seconds. The saved set references the WAV and contains
+seven positive-duration notes from the verified Launchpad inquiry.
+
+Two independent takes then ended Record with playback active, stopped
+playback, and saved in separate observed actions. Both passed 38 steady
+seconds per reference, 40 whole-second native PCM checks, seven saved
+MIDI notes, and the Stop, Save and post-Save counter checks. The load
+workers averaged 6.29 to 6.42 logical CPUs during Record Off and 6.45 to
+6.55 during playback Stop. An initial launch with a transient Bome route
+readiness failure ended before recording. The completed retry verified
+three matching readiness checks before enabling the test. The two split
+finalizations passed the bounded gate. The recording-phase dropout and
+sustained recording acceptance remain open.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
