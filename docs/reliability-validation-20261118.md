@@ -807,6 +807,16 @@ overlapped 0.555 ms. The remaining 11.980 ms require a system-wide
 scheduler trace for attribution. The owned graph and temporary workload
 were removed after recording.
 
+An authorized kernel scheduler replay captured all eight logical CPUs
+and wakeups for the 15 verified Live audio threads. The ten-pulse take
+completed with 38 steady reference seconds per stream, 40 whole native
+PCM windows, one Launchpad reply and seven saved MIDI notes. Stop, Save
+and the following observation window kept the counters steady. The last
+three seconds of the kernel trace covered 140 complete Live callbacks.
+The longest callback in the entire replay was 15.343 ms and fell before
+that window. The replay produced no missed deadline to attribute. The
+temporary trace instance was removed after the session.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
