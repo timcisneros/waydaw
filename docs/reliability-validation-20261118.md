@@ -755,6 +755,25 @@ time by 1.0% and 4.6%. The third comparison differed by 16.2% and included
 the weight-400 failure. Weight 400 failed the bounded gate. The temporary
 slice was removed and the normal launch configuration remains stock.
 
+Another comparison changed only the verified WineASIO callback's fair
+scheduling slice, from the host default of 2.8 ms to 0.7 ms. The kernel
+reported ordinary scheduling, the original nice value, and the original
+utilization clamps throughout the take. The test read those attributes
+back after restoring the default. The shorter slice and the control both
+passed 71 steady seconds on each reference, 73 native PCM windows, two
+Launchpad replies, 14 saved notes, and observed Stop and Save. Completion
+latency improved in some bursts and worsened in others.
+
+A second pair moved the load to finalization and reversed the order.
+Both callbacks missed a graph cycle during the third burst, 2.638 and
+2.831 seconds after Stop returned and before the scheduled Save. The
+workers averaged 6.21 and 6.45 logical CPUs during the Stop action. Both
+return captures showed 1,024 silent frames and a clock discontinuity.
+The stopped 40-second WAVs retained continuous PCM and both saved sets
+referenced their WAV and contained seven positive-duration MIDI notes.
+The shorter slice failed the finalization gate. The temporary scopes
+and test graph were removed after both cases.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
