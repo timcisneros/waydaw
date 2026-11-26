@@ -817,6 +817,23 @@ The longest callback in the entire replay was 15.343 ms and fell before
 that window. The replay produced no missed deadline to attribute. The
 temporary trace instance was removed after the session.
 
+A second authorized replay extended the same CPU bursts while Live was
+recording. During the tenth burst, before Stop, the graph skipped one
+1,024-frame cycle and both the hardware and Live error counters increased.
+The saved set references a 55.27-second native WAV with an exact
+1,024-frame phase advance at 54.293 seconds. Its single Launchpad inquiry
+and all seven saved MIDI notes passed.
+
+The kernel trace accounts for 15.190 ms that the Live callback spent
+preempted before its deadline. An ordinary-priority container-runtime
+task ran for 10.837 ms on the callback's previous CPU during that interval.
+The controlled load workers accounted for zero time on that CPU during
+the same interval. Container execution events overlapped the miss. The
+originating container and the causes of earlier misses remain unknown.
+The owned session closed normally. The temporary trace, load, graph, and
+sleep inhibitor were removed. The recording gate remains failed, with the
+stock launch profile still active.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
