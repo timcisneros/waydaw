@@ -652,6 +652,31 @@ with its namespace. The deliberate stall shows how a missed callback can
 become a splice in a saved take. The cause of the spontaneous failures and
 sustained recording acceptance remain open.
 
+Another bounded series used the installed driver, ordinary scheduling,
+and the physical 1,024-frame, 48 kHz graph. A per-thread context-switch
+trace and the PipeWire profiler shared a monotonic clock. The unloaded
+take and a take with about 3.69 logical CPUs of synthetic load passed
+Record, Stop, Save and the observed tail. Live's longest callback rose
+from 3.74 ms to 18.98 ms in the 21.33 ms period.
+
+At about 5.19 logical CPUs of load, reference-client errors started after
+Stop and before Save. The first observed unfinished Live callback skipped a
+graph cycle while Save was settling. Live spent 20.90 ms off-CPU after
+non-preemptive switches during that callback. A second run at comparable
+load with lower-priority workers still missed a Live deadline after Save
+had settled. The switch trace placed Live off-CPU after preemption at the
+deadline. All 43 task-state samples from that cycle reported runnable.
+This establishes a scheduling contribution for that reproduced miss.
+
+A separate take saved exactly 1,024 silent samples during a source-client
+clock skip. The surrounding samples retained the reference phase, and
+Live's error counter stayed steady during the take. Restricting only Live's
+callback to a core outside the synthetic load yielded clean saved PCM but
+left an observer cycle miss. The equivalent unpinned control was clean.
+All seven takes were audited after Live closed. The callback affinity and
+test links were restored. Neither test treatment passed the full graph
+gate. The original spontaneous failure and sustained acceptance remain open.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
