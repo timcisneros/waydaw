@@ -834,6 +834,27 @@ The owned session closed normally. The temporary trace, load, graph, and
 sleep inhibitor were removed. The recording gate remains failed, with the
 stock launch profile still active.
 
+The following desktop qualification temporarily assigned round-robin priority
+10 to Live's 14 AudioCalc threads, 9 to its callback, and 8 to each independent
+reference client. The graph stayed at 1,024 frames and 48 kHz with ordinary
+CPU weight and the original affinity. A bounded loaded run passed Stop,
+Save, and the post-Save hold, with 58.197 seconds of continuous native PCM.
+
+The four-hour run completed 14,426 clean post-Record seconds on the source
+and 14,427 on the return. The return then captured 1,024 silent frames and a
+4,096-frame clock discontinuity 1.773 seconds after Stop returned, before
+the planned Save. Both references reported a new shared-driver notification.
+The last per-node sample preceded the fault, so the component that missed
+its deadline remains unknown.
+
+The emergency save preserved a 14,428.565-second native mono WAV. The audit
+checked all 692,571,136 PCM24 frames and found continuous audio. All 241
+Launchpad inquiries returned, and the saved set contains all 1,687 expected
+positive-duration MIDI notes in order. The post-Stop dropout failed the
+full gate. All 17 temporary priorities were demoted before the reference
+clients closed, and the owned session and sleep inhibitor were released.
+The stock launch profile remains active.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
@@ -845,13 +866,14 @@ file before Record starts. A prior watcher attempt that selected an empty
 next-take file was stopped, corrected, and preserved with its evidence.
 
 The runner stops its measurement if the guarded application, session, or owned
-project changes. A temporary sleep inhibitor lasts only for the test. It leaves
-Ableton open, saves the owned project when it can verify it, and removes its
-own audio/MIDI clients when finished. It does not close another project.
+project changes. The desktop trial saves the verified test set when possible,
+removes its audio/MIDI clients, and closes its owned session. Its temporary
+sleep inhibitor lasts for the test.
 
 Evidence, source and build provenance are under
-`~/.local/state/waydaw/reliability-validation-20261118/`. The sustained stock
-desktop trial's status is `native-isolation/desktop-stock-sustained-status.json`.
+`~/.local/state/waydaw/reliability-validation-20261118/`. The scoped RTKit
+trial's status is `native-isolation/desktop-scoped-rtkit-sustained-20261126.k1iHol/status.json`.
+The stock desktop trial's status is `native-isolation/desktop-stock-sustained-status.json`.
 The normal-affinity trial, earlier `native-isolation/io-soak-status.json`, root
 `soak-status.json` and attempt directories preserve preceding measurements.
 No representative third-party plugin collection or external audio interface
