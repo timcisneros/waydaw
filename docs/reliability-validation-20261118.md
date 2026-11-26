@@ -792,6 +792,21 @@ three matching readiness checks before enabling the test. The two split
 finalizations passed the bounded gate. The recording-phase dropout and
 sustained recording acceptance remain open.
 
+A read-only scheduler replay traced 29 tasks, including Live's 15 audio
+threads, both reference clients, and the PipeWire service and its data
+loop. The graph missed one cycle 29.7 ms before the Stop callback began,
+during the first CPU burst. The next profile cycle showed an increase in
+Live's error count. The saved native WAV contains a 1,024-frame splice at
+40.384 seconds, and the saved set contains all seven expected positive-
+duration MIDI notes.
+
+The per-task trace accounted for 2.443 ms of the 14.423 ms for which
+Live's callback was preempted. Live's other audio threads overlapped
+1.888 ms on its previous logical CPU, and an owned load worker
+overlapped 0.555 ms. The remaining 11.980 ms require a system-wide
+scheduler trace for attribution. The owned graph and temporary workload
+were removed after recording.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
