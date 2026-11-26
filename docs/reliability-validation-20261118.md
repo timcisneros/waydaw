@@ -728,6 +728,33 @@ It leaves the competing task and the trigger for the sustained failure open.
 The hostname-service comparison did not run, and the launch configuration
 remains stock.
 
+A later bounded test reproduced a native 1,024-frame splice during the
+second of three 800 ms CPU-load bursts. Per-task traces recorded 13.869 ms
+of preemption during the missed Live callback. An owned workload thread
+ran on Live's previous logical CPU for 1.988 ms of that interval. The
+remaining off-CPU interval could not be attributed with those traces.
+
+The first weight-400 comparison was excluded. The service launched at 400
+and its effective CPU weight had returned to 100 by Record. A targeted
+D-Bus trace of a disposable GUI service identified Fedora's `uresourced`
+setting CPU and I/O weights to 100 and 300. Moving one level below
+`app.slice` still allowed those rewrites. The same probe held weight 400
+in a separate temporary slice outside `app.slice`.
+
+Both recording cases then ran sequentially in that separate slice with
+ordinary scheduling, verified effective weights, and the same physical
+1,024-frame, 48 kHz graph and owned CPU bursts. The weight-400 take missed
+a Live deadline during the third burst and its native WAV contained one
+1,024-frame splice. Live was off CPU after preemption for 21.021 ms. The
+traced workload threads showed no overlap on Live's previous CPU during
+that interval. The weight-100 control completed 71 steady seconds on
+each reference, all 73 whole-second native PCM windows, two Launchpad
+replies and all 14 saved notes. Stop, Save and the subsequent observation
+window were clean. The first two bursts differed in measured worker CPU
+time by 1.0% and 4.6%. The third comparison differed by 16.2% and included
+the weight-400 failure. Weight 400 failed the bounded gate. The temporary
+slice was removed and the normal launch configuration remains stock.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
