@@ -855,6 +855,40 @@ full gate. All 17 temporary priorities were demoted before the reference
 clients closed, and the owned session and sleep inhibitor were released.
 The stock launch profile remains active.
 
+A follow-up used the existing desktop hardware sink and temporarily added
+1,024 frames of ALSA headroom. Both references recorded 14,417 clean seconds
+after Record. During the third controlled CPU burst in finalization, the
+return contained 1,024 consecutive zero samples and advanced 4,096 frames
+beyond the expected position 2.010 seconds after Stop returned. The guard
+stopped the test before the planned Save. The emergency save preserved
+14,427.925 seconds of continuous mono PCM24. All 241 Launchpad replies and
+1,687 ordered, positive-duration saved MIDI notes passed independent checks.
+
+The PipeWire profiler captured the first missing 1,024-frame cycle. The
+hardware lost-frame and node error counters held steady. Live woke about
+23 microseconds after the graph signaled it and took 84.069 ms to finish,
+including 82.174 ms scheduled on CPU. The graph period was 21.333 ms. The
+generated source continued, and the return observer received no new trigger
+until the stalled callback finished. Live's counter rose from 139 to 144.
+The responsible operation inside that callback remains unidentified. The
+scoped priorities, shared sink settings and owned services were restored.
+The full recording gate remains failed.
+
+Two bounded checks sampled the callback at the same quantum and scoped
+priorities. Combined Stop and a separate Record Off followed by Stop each
+passed the native audio, MIDI, Save, and 30-second hold checks. The longest
+observed callbacks were 3.374 ms and 4.018 ms. An earlier split take saved
+the seven expected notes at the wrong point in the test arrangement and
+failed the fixture check. The repeat checked the position display before
+Record and verified the exact start of the saved clip. These checks did
+not reproduce the sustained callback stall or establish a repair.
+
+A separate diagnostic paused only Live's main thread for 121 ms, starting
+1.865 seconds after combined Stop returned. The Live audio callback finished
+six cycles during the pause, and each reference finished five. Stop, Save,
+the 30-second hold and native content checks passed. The audio path can keep
+running through that main-thread delay in this short test.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
@@ -873,6 +907,8 @@ sleep inhibitor lasts for the test.
 Evidence, source and build provenance are under
 `~/.local/state/waydaw/reliability-validation-20261118/`. The scoped RTKit
 trial's status is `native-isolation/desktop-scoped-rtkit-sustained-20261126.k1iHol/status.json`.
+The shared-sink follow-up is under
+`native-isolation/desktop-native-alsa-headroom-sustained-transport-qdf4v3qp/`.
 The stock desktop trial's status is `native-isolation/desktop-stock-sustained-status.json`.
 The normal-affinity trial, earlier `native-isolation/io-soak-status.json`, root
 `soak-status.json` and attempt directories preserve preceding measurements.
