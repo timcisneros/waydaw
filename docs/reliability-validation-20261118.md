@@ -916,6 +916,43 @@ Stop overrun also appeared in the Record Off overrun. The virtual driver
 counters held steady, and Live's counter rose from 9 to 16. The fault can
 occur when the long take closes during playback.
 
+The four-hour-equivalent Record Off test also failed with Session View active
+and the Arrangement waveform hidden. The return fault followed Record Off by
+1.557 seconds. The callback took 87.072 ms, including 82.956 ms on CPU, with
+unchanged virtual driver errors.
+
+At the same 1,024-frame buffer and 48 kHz clock rate, closing a one-hour-
+equivalent take produced the same sampled Live code locations. The callback
+took 46.850 ms, including 44.225 ms on CPU. The observer detected the first
+fault 51.924 ms after Record Off returned. A 15-minute-equivalent take passed
+Record Off, playback Stop, Save and the 30-second hold. Its longest measured
+callback was 13.546 ms against a 21.333 ms cycle. These observations support
+testing shorter native takes with verified sample coverage across boundaries.
+They do not establish a safe production take length or a physical-clock pass.
+
+An isolated native handoff test kept the MIDI track armed while a second
+muted audio track began recording the same generated input. After both
+files grew, the first track was disarmed and the second kept recording.
+The saved Arrangement positions aligned 237,568 identical mono PCM24
+samples across the two files. The size-matched handoff followed the same
+procedure and closed a take containing 43,968,512 frames. Its native WAVs
+shared 289,792 identical samples at their saved positions. The longest Live
+callback measured around that disarm was 14.911 ms against the 21.333 ms
+cycle. Both tests completed Stop, Save and the 30-second hold on the private
+virtual clock.
+
+A bounded physical-clock test then ran both handoff directions at 1,024
+frames and 48 kHz, using the temporary scoped scheduling and ALSA headroom
+from the preceding shared-sink trial. The independent source and return
+recorded 174 and 175 clean steady seconds respectively. Three saved
+native takes covered 8,569,856 continuous PCM24 frames. The two overlaps
+contained 234,496 and 233,472 identical frames. All three Launchpad
+inquiries returned through Bome and Live saved all 21 expected MIDI notes.
+The test passed the loaded Stop, Save and 30-second hold and verified
+restoration of the original scoped priorities and device headroom.
+The four-hour physical qualification and any default launch change
+remain pending.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
