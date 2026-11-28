@@ -908,6 +908,14 @@ virtual clock transition, before the clean real-time tail. This confirms a
 post-Stop deadline overrun in the size-matched virtual diagnostic. Sustained
 physical-clock qualification and a targeted repair remain open.
 
+The size-matched split comparison sent Record Off while playback continued.
+The same return fault appeared 1.584 seconds later, before the planned
+playback Stop. Live's callback took 98.770 ms, including 93.458 ms scheduled
+on CPU. The three most frequently sampled Live locations from the combined
+Stop overrun also appeared in the Record Off overrun. The virtual driver
+counters held steady, and Live's counter rose from 9 to 16. The fault can
+occur when the long take closes during playback.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
