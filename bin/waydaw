@@ -20,6 +20,9 @@ state_file="$runtime_dir/session.state"
 bridge_file="$runtime_dir/bridge.state"
 ableton_file="$runtime_dir/ableton.state"
 bome_file="$runtime_dir/bome.state"
+recording_profile="${XDG_CONFIG_HOME:-$HOME/.config}/waydaw/recording-profile.json"
+recording_lease="$runtime_dir/recording-lease.json"
+recording_realtime="$runtime_dir/recording-realtime.json"
 command="${1:-start}"
 [[ $# -eq 0 ]] || shift
 with_bome=0
@@ -34,6 +37,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+recording_settings() {
+  python3 "$ROOT_DIR/config/recording_profile.py" "$1" "$runtime_dir" "${@:2}"
+}
+has_recording_settings() {
+  [[ -e "$recording_lease" || -e "$recording_realtime" ]]
+}
 stop_workers() {
   local name result=0
   for name in authorization ableton bome bridge; do
@@ -145,11 +154,18 @@ case "$command" in
         [[ "$bome_exit" == 0 ]] || session_health=degraded
       fi
       printf 'session=%s\npid=%s\nprefix=%s\ncheckout=%s\n' "$session_health" "${session[0]}" "${session[2]}" "${session[3]}"
+      if [[ -f "$recording_realtime" && -n "${session[4]:-}" ]]; then
+        if recording_state="$(recording_settings status 2>/dev/null)"; then
+          printf '%s\n' "$recording_state"
+        else
+          printf 'recording_profile=unverified\n'
+        fi
+      fi
       if [[ -n "$bome_exit" ]]; then
         if [[ "$bome_exit" == 0 ]]; then printf 'bome=stopped\n'; else printf 'bome=failed\n'; fi
         printf 'bome_exit=%s\nsession_log=%s\n' "$bome_exit" "${session[4]}"
       fi
-    elif [[ -e "$state_file" || -e "$bridge_file" || -e "$ableton_file" || -e "$bome_file" || -e "$runtime_dir/authorization.state" ]]; then
+    elif [[ -e "$state_file" || -e "$bridge_file" || -e "$ableton_file" || -e "$bome_file" || -e "$runtime_dir/authorization.state" ]] || has_recording_settings; then
       printf 'session=recovery-required\nprefix=%s\n' "$prefix"
       if read_session; then
         printf 'recorded_prefix=%s\nrecorded_checkout=%s\n' "${session[2]}" "${session[3]}"
@@ -201,8 +217,10 @@ case "$command" in
       if read_session && [[ -n "${session[4]:-}" ]]; then
         waydaw_cancel_authorization "${session[4]%/*}" || recovery_result=1
       fi
+      if has_recording_settings; then recording_settings demote || recovery_result=1; fi
       stop_workers || recovery_result=1
       "$ROOT_DIR/bin/ableton-proton-cleanup" || recovery_result=1
+      if has_recording_settings; then recording_settings restore || recovery_result=1; fi
       [[ "$recovery_result" == 0 ]] || fail 'Session cleanup failed; recovery required. Retry Stop after resolving the logged error.'
       rm -f "$state_file"
     fi
@@ -220,7 +238,9 @@ umask 077
 mkdir -p "$runtime_dir"
 exec 9>"$lock_file"
 flock -n 9 || fail 'A guarded WayDAW session is already starting, running, or stopping.'
-[[ ! -e "$state_file" && ! -e "$bridge_file" && ! -e "$ableton_file" && ! -e "$bome_file" && ! -e "$runtime_dir/authorization.state" ]] || fail 'Session recovery required; run waydaw stop with the recorded checkout and prefix before starting again.'
+if [[ -e "$state_file" || -e "$bridge_file" || -e "$ableton_file" || -e "$bome_file" || -e "$runtime_dir/authorization.state" ]] || has_recording_settings; then
+  fail 'Session recovery required; run waydaw stop with the recorded checkout and prefix before starting again.'
+fi
 preflight "$@"
 log_root="${XDG_STATE_HOME:-$HOME/.local/state}/waydaw/logs"
 mkdir -p "$log_root"
@@ -231,6 +251,7 @@ birth_time="$(waydaw_process_start "$$")"
 completion_file="$runtime_dir/session-$$-$birth_time.result"
 cancelled="$log_dir/cancelled"
 worker_pids=()
+recording_setup_pid=
 cleanup() {
   local result=$? cleanup_result=0 pid
   trap - EXIT INT TERM HUP PIPE
@@ -238,12 +259,15 @@ cleanup() {
   exec >>"$log_dir/session.log" 2>&1
   # Publish cancellation first: even a child not yet scheduled cannot exec.
   touch "$cancelled"
+  if [[ -n "$recording_setup_pid" ]]; then wait "$recording_setup_pid" || true; fi
+  if has_recording_settings; then recording_settings demote || cleanup_result=1; fi
   stop_workers || cleanup_result=1
   waydaw_cancel_authorization "$log_dir" || cleanup_result=1
   for pid in "${worker_pids[@]}"; do
     if ! waydaw_process_start "$pid" >/dev/null; then wait "$pid" || true; fi
   done
   "$ROOT_DIR/bin/ableton-proton-cleanup" 9>&- || cleanup_result=$?
+  if has_recording_settings; then recording_settings restore || cleanup_result=1; fi
   if [[ "$cleanup_result" == 0 ]]; then
     rm -f "$state_file"
   else
@@ -325,6 +349,16 @@ check_bome_runtime() {
 
 waydaw_prepare_proton_prefix
 export WAYDAW_PREFIX_PREPARED=1
+recording_enabled=0
+if [[ -e "$recording_profile" || -L "$recording_profile" ]]; then
+  if recording_settings acquire "$recording_profile"; then
+    recording_enabled=1
+  elif [[ "$?" != 3 ]]; then
+    fail 'Could not acquire the guarded recording profile.'
+  else
+    printf 'recording_profile=stock\n'
+  fi
+fi
 if command -v a2jmidid >/dev/null && ! pgrep -x a2jmidid >/dev/null; then
   launch_worker bridge pw-jack a2jmidid -e >"$log_dir/midi-bridge.log" 2>&1
 fi
@@ -348,7 +382,15 @@ fi
 bome_runtime_exit=""
 bome_owner_check=$SECONDS
 printf 'Starting guarded Ableton session; close Ableton normally to save your work.\n'
-launch_worker ableton pw-jack "$ROOT_DIR/bin/ableton" "$@"
+if [[ "$recording_enabled" == 1 ]]; then
+  launch_worker ableton env PIPEWIRE_LATENCY=1024/48000 pw-jack "$ROOT_DIR/bin/ableton" "$@"
+  recording_settings activate &
+  recording_setup_pid=$!
+  wait "$recording_setup_pid" || fail 'Could not verify the guarded recording profile during startup.'
+  recording_setup_pid=
+else
+  launch_worker ableton pw-jack "$ROOT_DIR/bin/ableton" "$@"
+fi
 result=0
 wait_worker_result ableton "$worker_pid" || result=$?
 if [[ -n "$bome_runtime_exit" && "$bome_runtime_exit" != 0 ]]; then

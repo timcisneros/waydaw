@@ -673,6 +673,32 @@ exec "$@"
         self.assertTrue(any(expected in line for line in self.event_text().splitlines()
                             if line.startswith("wine:")))
 
+    def test_recording_profile_releases_before_returning_a_failed_launch(self):
+        profile = Path(self.env["XDG_CONFIG_HOME"]) / "waydaw/recording-profile.json"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("{}")
+        (self.root / "config/recording_profile.py").write_text('''
+import os
+from pathlib import Path
+import sys
+action, runtime = sys.argv[1:3]
+with Path(os.environ["TEST_EVENTS"]).open("a") as out:
+    out.write("recording:" + action + "\\n")
+receipt = Path(runtime) / "recording-lease.json"
+if action == "acquire":
+    receipt.touch()
+elif action == "activate":
+    sys.exit(1)
+elif action == "restore":
+    receipt.unlink()
+''')
+        result = self.run_command("start")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual([line for line in self.event_text().splitlines() if line.startswith("recording:")],
+                         ["recording:acquire", "recording:activate", "recording:demote", "recording:restore"])
+        recovered = self.run_command("status")
+        self.assertIn("session=stopped", recovered.stdout)
+
     def test_local_pipewire_configuration_reaches_the_child(self):
         self.env.pop("PIPEWIRE_CONFIG_DIR", None)
         profile = Path(self.env["XDG_CONFIG_HOME"]) / "waydaw/pipewire"

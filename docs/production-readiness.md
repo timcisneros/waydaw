@@ -2,8 +2,9 @@
 
 The first release target is the measured KDE Plasma Wayland/XWayland setup,
 with the pinned Proton/DXVK path, PipeWire JACK compatibility, and WineASIO.
-The completed launcher work does not certify recording performance or broaden
-support to other compositors, display layouts, or Wine builds.
+The recording qualification below applies to this setup and its tested
+recording workflow. Other compositors, display layouts, and Wine builds
+require separate validation.
 
 ## Implementation sequence
 
@@ -34,12 +35,12 @@ validation used authorized Live 12.4.16 and confirmed a real 48 kHz recording,
 Max for Live signal processing, native save/reopen/export, and seven physical
 Launchpad pad pairs forwarded unchanged through Bome. Later reboot/reconnect recovery checks and isolated source/project restoration
 are recorded in [reliability validation](reliability-validation-20261118.md).
-Sustained testing exposed audio gaps with ordinary scheduling at both 1024 and
-2048 samples. A scoped realtime 2048-sample trial also stopped after about two
-hours and six minutes on a signal/clock discontinuity; the measurement client's
-contribution remains under investigation. The production plugin set and
-sustained workload acceptance remain release gates;
-a release tag remains pending.
+Earlier sustained tests exposed gaps at 1,024 and 2,048 samples. The
+subsequent four-hour physical qualification passed at 1,024 frames and
+48 kHz with per-session scheduling, temporary ALSA headroom, and short
+overlapping native takes. The [recording evidence](reliability-validation-20261118.md)
+covers this machine and workflow. Representative third-party plugins and
+external interfaces remain separate acceptance work.
 
 The reconstruction uses pinned upstream DXVK 2.7.1. The historical debug DLLs
 carried Wine builtin markers and fell back to a renderer that Ableton
@@ -56,9 +57,48 @@ Realtime ASIO streaming caused exit 137 on this host. Limiting only JACK's
 `rt.prio` did not disable PipeWire's realtime data thread. The machine-specific
 fallback uses a separate JACK configuration under
 `~/.config/waydaw/pipewire/jack.conf` with ordinary thread scheduling.
-`bin/waydaw` passes that directory only to its own processes. This fallback
-requires recording and dropout acceptance before production use; do not infer
-realtime stability from successful driver initialization.
+`bin/waydaw` passes that directory only to its own processes. This remains the
+ordinary scheduling path for machines without the local recording profile.
+
+## Qualified recording profile
+
+Build the Linux helper with `./compat/waydaw-recording/build.sh` and the
+distribution's PipeWire development headers. The local profile also uses
+Python's D-Bus bindings and the existing system RTKit service. While
+WayDAW is stopped, enable the profile by writing the following data to
+`~/.config/waydaw/recording-profile.json`. These endpoint values are specific
+to the measured desktop.
+
+```json
+{
+  "version": 1,
+  "sink_name": "alsa_output.pci-0000_00_1f.3.analog-stereo",
+  "alsa_path": "front:0"
+}
+```
+
+Both installed KDE entries use the profile through the guarded supervisor.
+`./bin/waydaw status` reports `recording_profile=active` after it verifies
+the owned Live node and the physical 1,024-frame, 48 kHz playback clock.
+The profile applies 1,024 frames of headroom to the verified idle ALSA sink
+and grants Live's 14 AudioCalc threads priority 10 and its audio data loop
+priority 9 with a 200,000 us realtime budget. The **Start with Bome** action
+uses the same audio profile and the existing supervised Bome route.
+
+The qualified long-recording workflow uses two equivalent native capture
+tracks with monitoring off and the MIDI track armed throughout. Every
+14 minutes, arm the next capture track, let both record for at least four
+seconds, then disarm the previous track. Each native take stays under
+15 minutes. Preserve both saved lanes for editing and use one lane at a time
+for monitoring or rendering their overlap.
+
+When a different playback device is selected or the qualified sink is busy,
+the launcher reports stock scheduling. At Stop, the supervisor releases its
+realtime settings and restores the original headroom on the same device.
+Each session has a recovery record for interrupted writes or cleanup.
+To roll back to stock scheduling, close WayDAW and move the local JSON profile
+out of the configuration directory. The next regular KDE launch uses the
+ordinary profile.
 
 ## First-machine setup
 

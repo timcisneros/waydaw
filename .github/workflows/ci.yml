@@ -18,7 +18,7 @@ jobs:
           bash -n config/env
           find config compat -name '*.sh' -print0 | xargs -0 -r bash -n
       - name: Install verification tools
-        run: sudo apt-get update && sudo apt-get install -y shellcheck desktop-file-utils gcc-mingw-w64-x86-64 nodejs libjack-jackd2-dev
+        run: sudo apt-get update && sudo apt-get install -y shellcheck desktop-file-utils gcc-mingw-w64-x86-64 nodejs libjack-jackd2-dev libpipewire-0.3-dev
       - name: Check supported launcher scripts
         run: |
           shellcheck --severity=warning --exclude=SC1090,SC1091 \
@@ -29,7 +29,9 @@ jobs:
             bin/ableton bin/bome bin/ableton-proton-normalize-placement \
             config/ableton-runner.sh bin/ableton-kwin-decoration-controller \
             bin/check bin/check-system bin/ableton-wayland bin/session-status bin/wineasio-check \
-            compat/ableton-sizing-shim/build.sh compat/waydaw-launch/build.sh
+            compat/ableton-sizing-shim/build.sh compat/waydaw-launch/build.sh compat/waydaw-recording/build.sh
+      - name: Build the recording profile helper
+        run: ./compat/waydaw-recording/build.sh
       - name: Verify isolated launch and recovery behavior
         run: ./bin/verify-proton-runner-mode
       - name: Verify KWin controller compatibility

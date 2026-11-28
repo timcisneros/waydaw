@@ -41,7 +41,7 @@ It was published to `main`, and
 [GitHub verification passed](https://github.com/timcisneros/waydaw/actions/runs/44352541146),
 including native helper build reproducibility and KWin compatibility checks.
 
-## Sustained workload — stability gap under investigation
+## Sustained workload and dropout diagnosis
 
 A dedicated **Soak Validation** project records generated audio at 48 kHz,
 including processing through the bundled Max SignalAnalyzer. MIDI note
@@ -950,8 +950,31 @@ contained 234,496 and 233,472 identical frames. All three Launchpad
 inquiries returned through Bome and Live saved all 21 expected MIDI notes.
 The test passed the loaded Stop, Save and 30-second hold and verified
 restoration of the original scoped priorities and device headroom.
-The four-hour physical qualification and any default launch change
-remain pending.
+The following four-hour trial used that treatment and kept each take under
+15 minutes by handing off between the two native recording lanes every
+14 minutes. Both references passed, with 14,424 and 14,425 consecutive
+clean seconds after Record. Eighteen saved mono PCM24 takes covered
+692,575,232 frames at 48 kHz. Independent checks read every sample, verified
+the saved Arrangement placement, and compared all 17 overlaps byte for byte.
+Live saved 1,687 ordered notes from 241 successful Launchpad/Bome inquiries.
+Stop, Save, and the 30-second hold passed under the same bounded finalization
+load. Both temporary realtime policies and the playback headroom lease were
+released. Original device headroom was restored to zero.
+
+The stopped and checksummed Set was reopened from an owned copy. Opening the
+Set with a Unix argument brought up the project with its recorded clips
+offline. Opening through the verified Wine drive mapping resolved those clips.
+Live exported the selected lane for two seconds. The resulting stereo PCM24
+WAV contained 96,000 frames at 48 kHz and independently matched the 440 Hz and
+997 Hz reference tones. The saved original and private backup were preserved.
+
+The [qualified profile](production-readiness.md#qualified-recording-profile)
+was enabled on the measured desktop after those checks. A cold WayDAW menu
+launch used the verified 1,024-frame clock and all 15 scoped grants. The
+installed Ableton entry also went through the guarded launcher. Removing the
+local profile and reopening that entry used ordinary audio scheduling and
+zero device headroom. Restoring the profile re-enabled the qualified settings,
+and normal close restored the original headroom again.
 
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
@@ -969,7 +992,9 @@ removes its audio/MIDI clients, and closes its owned session. Its temporary
 sleep inhibitor lasts for the test.
 
 Evidence, source and build provenance are under
-`~/.local/state/waydaw/reliability-validation-20261118/`. The scoped RTKit
+`~/.local/state/waydaw/reliability-validation-20261118/`. The accepted run is
+`native-isolation/desktop-native-physical-handoffs-ebfapzq8/result.json`.
+The scoped RTKit
 trial's status is `native-isolation/desktop-scoped-rtkit-sustained-20261126.k1iHol/status.json`.
 The shared-sink follow-up is under
 `native-isolation/desktop-native-alsa-headroom-sustained-transport-qdf4v3qp/`.

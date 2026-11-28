@@ -13,6 +13,7 @@ docs/*
 tests/__pycache__/
 config/__pycache__/
 .local-tools/waydaw-launch/
+.local-tools/waydaw-recording/
 logs/*
 .local-runners/
 kxstudio-repos_11.2.0_all.deb
