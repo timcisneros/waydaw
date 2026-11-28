@@ -661,6 +661,18 @@ exec "$@"
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("pipewire_properties={ rt.prio=12 }", result.stdout)
 
+    def test_existing_host_live_set_uses_the_wine_drive_path(self):
+        mapping = self.prefix / "dosdevices"
+        mapping.mkdir()
+        (mapping / "z:").symlink_to("/", target_is_directory=True)
+        native = self.home / "Isolated Test Set.als"
+        native.touch()
+        result = self.run_command("start", "--", str(native))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        expected = "Z:" + str(native).replace("/", "\\")
+        self.assertTrue(any(expected in line for line in self.event_text().splitlines()
+                            if line.startswith("wine:")))
+
     def test_local_pipewire_configuration_reaches_the_child(self):
         self.env.pop("PIPEWIRE_CONFIG_DIR", None)
         profile = Path(self.env["XDG_CONFIG_HOME"]) / "waydaw/pipewire"

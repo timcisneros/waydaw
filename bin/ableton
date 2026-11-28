@@ -384,6 +384,23 @@ if [[ -e "$WINEPREFIX/drive_c/ProgramData/Ableton/.Live 12 Suite_updated" ]]; th
   exit 1
 fi
 
+# Live can open a Unix .als argument yet mark its media offline. Pass existing
+# host sets through Wine's verified Z: mapping so Live resolves relative media.
+native_args=()
+for arg in "$@"; do
+  if [[ "$arg" == *.[aA][lL][sS] && -f "$arg" ]]; then
+    if [[ "$(readlink -f -- "$WINEPREFIX/dosdevices/z:")" != / ]]; then
+      printf 'ERROR: Wine Z: must map to the host root to open a Linux Live Set path.\n' >&2
+      exit 1
+    fi
+    native_path="$(realpath -e -- "$arg")" || exit 1
+    native_args+=("Z:${native_path//\//\\}")
+  else
+    native_args+=("$arg")
+  fi
+done
+set -- "${native_args[@]}"
+
 if [[ "$diagnostic_no_registry" != 1 && "$window_driver" == x11 ]]; then
   if ! configure_ableton_windowing; then
     printf 'ERROR: failed to configure Ableton Wine windowing in WINEPREFIX=%s\n' "$WINEPREFIX" | tee -a "$LOG_FILE" >&2
