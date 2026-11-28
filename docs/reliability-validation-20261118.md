@@ -889,6 +889,25 @@ six cycles during the pause, and each reference finished five. Stop, Save,
 the 30-second hold and native content checks passed. The audio path can keep
 running through that main-thread delay in this short test.
 
+A private virtual-clock diagnostic then recorded 691,200,000 generated
+frames at 1,024 frames and 48 kHz in 1,144.841 seconds of wall time. It
+returned to real-time cadence before Stop and recorded a clean return
+baseline. The return then captured 1,024 consecutive zeros and a
+6,144-frame clock discontinuity 1.519 seconds after Stop returned.
+
+Live's callback took 112.640 ms, including 107.623 ms scheduled on CPU.
+The source kept completing its triggers and the observer received no new
+trigger until Live finished. The virtual driver counters held steady and
+Live's error counter advanced from 9 to 18. Seventy of the 90 samples taken
+during that callback landed in Live's executable code. The responsible
+operation inside Live remains unidentified.
+
+The emergency-saved set references the intended take at beat 29,200. Its
+691,689,472 mono PCM24 frames include one 3,072-frame phase advance at the
+virtual clock transition, before the clean real-time tail. This confirms a
+post-Stop deadline overrun in the size-matched virtual diagnostic. Sustained
+physical-clock qualification and a targeted repair remain open.
+
 The measurement confines generated tones to Live and its capture ports. A
 zero-only observer port keeps the hardware audio clock active without sending
 test tones to the speakers. Separate source and observer clients now report
